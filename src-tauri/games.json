@@ -1,0 +1,78 @@
+[
+  {
+    "name": "Genérico (cualquier juego)",
+    "appid": 0,
+    "bottleneck": "Depende del juego",
+    "summary": "Perfil base seguro para empezar con un juego que todavía no tiene reglas propias. Mide con MangoHud antes de añadir nada más.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": ["game-performance"],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_LOCAL_SHADER_CACHE=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Caché de shaders por juego",
+        "why": "Menos stuttering por compilación de shaders tras actualizar drivers.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Reduce stuttering al cargar zonas nuevas"
+      },
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_DXVK_LOWLATENCY=1",
+        "impact": "bajo",
+        "default_on": false,
+        "title": "Frame pacing de baja latencia",
+        "why": "Mejora la sensación de fluidez más que los FPS medios.",
+        "evidence": "heuristica"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_ENABLE_WAYLAND=1",
+        "impact": "bajo",
+        "default_on": false,
+        "requires": ["wayland"],
+        "title": "Renderizar nativo en Wayland",
+        "why": "Puede reducir overhead si ya estás en Wayland.",
+        "warn": "Experimental: puede dar fallos con el cursor o el foco.",
+        "evidence": "heuristica"
+      },
+      {
+        "kind": "env",
+        "value": "RADV_DEBUG=nofastclears",
+        "impact": "evitar",
+        "requires": ["amd"],
+        "title": "Desactivar fast clears (debug)",
+        "why": "Parámetro de depuración que baja el rendimiento.",
+        "evidence": "heuristica"
+      }
+    ],
+    "tips": [
+      "Cambia un solo parámetro cada vez y compara 1% lows sobre el mismo recorrido.",
+      "Si un parámetro no mejora de forma medible, quítalo."
+    ]
+  }
+]

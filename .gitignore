@@ -1,0 +1,31 @@
+# Dependencias
+node_modules/
+
+# Compilados de Rust
+src-tauri/target/
+**/*.rs.bk
+
+# Compilados de Vite/React
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Archivos de entorno
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
