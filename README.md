@@ -24,7 +24,7 @@ npm run tauri dev
 
 ### ✅ 6 Fases Completadas
 
-1. **Interfaz moderna** - Diseño profesional estilo Heronite
+1. **Interfaz moderna** 
 2. **Separación de conceptos** - Compatibilidad, Optimización, Diagnóstico
 3. **Recomendaciones inteligentes** - Filtrado por hardware, toggle Proton
 4. **Dos modos** - Guiado (simple) y Experto (detallado)
