@@ -1,7 +1,7 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use regex::Regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Benchmark {
@@ -21,6 +21,61 @@ pub struct Benchmark {
     pub total_frames: u64,
     pub notes: Option<String>,
     pub launch_command: String,
+    // Métricas de fluidez. Son None en los benchmarks guardados antes de esta versión
+    // (por eso #[serde(default)]: los benchmarks viejos se siguen cargando sin problema).
+    #[serde(default)]
+    pub spikes_per_min: Option<f64>,
+    #[serde(default)]
+    pub pct_over_33ms: Option<f64>,
+    #[serde(default)]
+    pub jitter_ms: Option<f64>,
+    #[serde(default)]
+    pub worst_frame_ms: Option<f64>,
+}
+
+/// Métricas que miden los "tirones" (stutter) a partir de los frame times (en ms).
+struct StutterStats {
+    spikes_per_min: f64,
+    pct_over_33ms: f64,
+    jitter_ms: f64,
+    worst_frame_ms: f64,
+}
+
+fn compute_stutter(frame_times: &[f64], duration_seconds: f64) -> StutterStats {
+    let n = frame_times.len();
+
+    let mut sorted = frame_times.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[n / 2];
+
+    // Un "pico" es un frame que tarda más del doble de lo normal (y al menos 25 ms,
+    // para no contar ruido cuando el juego va a muchos FPS).
+    let spike_threshold = (median * 2.0).max(25.0);
+    let spikes = frame_times.iter().filter(|&&f| f > spike_threshold).count();
+
+    // Frames que tardaron más de 33.3 ms = momentos por debajo de 30 FPS.
+    let over_33 = frame_times.iter().filter(|&&f| f > 33.3).count();
+
+    // Jitter: cuánto cambia el tiempo entre un frame y el siguiente.
+    let jitter_ms = frame_times
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .sum::<f64>()
+        / (n.saturating_sub(1).max(1)) as f64;
+
+    // Peor frame (percentil 99.9): más estable que usar el máximo absoluto.
+    let idx = (((n as f64) * 0.999) as usize).min(n - 1);
+
+    StutterStats {
+        spikes_per_min: if duration_seconds > 0.0 {
+            spikes as f64 / (duration_seconds / 60.0)
+        } else {
+            0.0
+        },
+        pct_over_33ms: over_33 as f64 / n as f64 * 100.0,
+        jitter_ms,
+        worst_frame_ms: sorted[idx],
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,11 +129,10 @@ fn load_benchmarks_data() -> BenchmarksData {
 
 fn save_benchmarks_data(data: &BenchmarksData) -> Result<(), String> {
     let file = get_benchmarks_file();
-    let content = serde_json::to_string_pretty(data)
-        .map_err(|e| format!("Error al serializar: {}", e))?;
+    let content =
+        serde_json::to_string_pretty(data).map_err(|e| format!("Error al serializar: {}", e))?;
 
-    fs::write(&file, content)
-        .map_err(|e| format!("Error al guardar: {}", e))?;
+    fs::write(&file, content).map_err(|e| format!("Error al guardar: {}", e))?;
 
     Ok(())
 }
@@ -99,14 +153,18 @@ fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
                             if let Ok(content) = fs::read_to_string(&path) {
                                 let has_valid_format = content.lines().any(|line| {
                                     let lower = line.to_lowercase();
-                                    lower.contains("fps,frametime") ||
-                                    (lower.starts_with("fps,") && lower.contains("frametime"))
+                                    lower.contains("fps,frametime")
+                                        || (lower.starts_with("fps,")
+                                            && lower.contains("frametime"))
                                 });
 
                                 if has_valid_format {
                                     if let Ok(metadata) = path.metadata() {
                                         if let Ok(modified) = metadata.modified() {
-                                            println!("[Benchmark] Archivo MangoHud encontrado: {:?}", path);
+                                            println!(
+                                                "[Benchmark] Archivo MangoHud encontrado: {:?}",
+                                                path
+                                            );
                                             log_files.push((path, modified));
                                         }
                                     }
@@ -151,7 +209,9 @@ fn extract_game_name_from_file(file_path: &Path) -> String {
     let mut name = file_name.clone();
 
     // PASO 1: Buscar patrón de fecha/hora y cortar ahí
-    if let Ok(datetime_pattern) = Regex::new(r"[_-]\d{4}[-_]\d{2}[-_]\d{2}([_-]\d{2}[-_]\d{2}[-_]\d{2})?") {
+    if let Ok(datetime_pattern) =
+        Regex::new(r"[_-]\d{4}[-_]\d{2}[-_]\d{2}([_-]\d{2}[-_]\d{2}[-_]\d{2})?")
+    {
         if let Some(mat) = datetime_pattern.find(&name) {
             name = name[..mat.start()].to_string();
             println!("[Extract] Después de cortar fecha/hora: '{}'", name);
@@ -185,7 +245,10 @@ fn extract_game_name_from_file(file_path: &Path) -> String {
         let suffix_lower = suffix.to_lowercase();
         if name_lower.ends_with(&suffix_lower) {
             name = name[..name.len() - suffix.len()].to_string();
-            println!("[Extract] Después de quitar sufijo '{}': '{}'", suffix, name);
+            println!(
+                "[Extract] Después de quitar sufijo '{}': '{}'",
+                suffix, name
+            );
             break;
         }
     }
@@ -199,15 +262,22 @@ fn extract_game_name_from_file(file_path: &Path) -> String {
             let trimmed = rest.trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ');
             if !trimmed.is_empty() {
                 name = trimmed.to_string();
-                println!("[Extract] Después de quitar prefijo '{}': '{}'", prefix, name);
+                println!(
+                    "[Extract] Después de quitar prefijo '{}': '{}'",
+                    prefix, name
+                );
                 break;
             }
         }
     }
 
     // PASO 4: Limpiar separadores finales y espacios extra
-    name = name.trim_end_matches(|c: char| c == '_' || c == '-' || c == ' ').to_string();
-    name = name.trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ').to_string();
+    name = name
+        .trim_end_matches(|c: char| c == '_' || c == '-' || c == ' ')
+        .to_string();
+    name = name
+        .trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ')
+        .to_string();
 
     // PASO 5: Si quedó vacío, usar el nombre original del archivo
     if name.is_empty() {
@@ -221,20 +291,21 @@ fn extract_game_name_from_file(file_path: &Path) -> String {
 
 fn get_file_modified_time(file_path: &Path) -> String {
     match fs::metadata(file_path) {
-        Ok(metadata) => {
-            match metadata.modified() {
-                Ok(system_time) => {
-                    let datetime: chrono::DateTime<chrono::Local> = system_time.into();
-                    let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-                    println!("[Time] ✅ Fecha de modificación del archivo: {}", formatted);
-                    formatted
-                }
-                Err(e) => {
-                    println!("[Time] ⚠️ Error obteniendo hora de modificación: {}, usando hora actual", e);
-                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
-                }
+        Ok(metadata) => match metadata.modified() {
+            Ok(system_time) => {
+                let datetime: chrono::DateTime<chrono::Local> = system_time.into();
+                let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+                println!("[Time] ✅ Fecha de modificación del archivo: {}", formatted);
+                formatted
             }
-        }
+            Err(e) => {
+                println!(
+                    "[Time] ⚠️ Error obteniendo hora de modificación: {}, usando hora actual",
+                    e
+                );
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+            }
+        },
         Err(e) => {
             println!("[Time] ⚠️ Error obteniendo meta {}, usando hora actual", e);
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
@@ -287,8 +358,14 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
             }
 
             data_start_line = line_idx + 1;
-            println!("[Benchmark] Header de datos encontrado en línea {}", line_idx + 1);
-            println!("[Benchmark] Columnas: fps={}, frametime={}", fps_column, frametime_column);
+            println!(
+                "[Benchmark] Header de datos encontrado en línea {}",
+                line_idx + 1
+            );
+            println!(
+                "[Benchmark] Columnas: fps={}, frametime={}",
+                fps_column, frametime_column
+            );
             break;
         }
     }
@@ -303,7 +380,7 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         if parts.len() > fps_column && parts.len() > frametime_column {
             if let (Ok(fps), Ok(frame_time)) = (
                 parts[fps_column].trim().parse::<f64>(),
-                parts[frametime_column].trim().parse::<f64>()
+                parts[frametime_column].trim().parse::<f64>(),
             ) {
                 if fps > 0.0 && frame_time > 0.0 {
                     fps_values.push(fps);
@@ -313,12 +390,15 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         }
     }
 
-    println!("[Benchmark] Frames válidos encontrados: {}", fps_values.len());
+    println!(
+        "[Benchmark] Frames válidos encontrados: {}",
+        fps_values.len()
+    );
 
     if fps_values.len() < 100 {
         return Err(format!(
             "El log tiene muy pocos frames ({} encontrados, mínimo 100 requeridos).\n\n\
-            Asegúrate de grabar el log durante al menos 30 segundos.",
+            Graba el log durante al menos 30 segundos (lo ideal es 60).",
             fps_values.len()
         ));
     }
@@ -334,15 +414,22 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     let mut sorted_fps = fps_values.clone();
     sorted_fps.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let one_percent_index = (sorted_fps.len() as f64 * 0.01).ceil() as usize;
-    let fps_1_percent_low = sorted_fps[..one_percent_index].iter().sum::<f64>() / one_percent_index as f64;
+    let fps_1_percent_low =
+        sorted_fps[..one_percent_index].iter().sum::<f64>() / one_percent_index as f64;
 
     let zero_one_percent_index = (sorted_fps.len() as f64 * 0.001).ceil() as usize;
-    let fps_0_1_percent_low = sorted_fps[..zero_one_percent_index].iter().sum::<f64>() / zero_one_percent_index as f64;
+    let fps_0_1_percent_low =
+        sorted_fps[..zero_one_percent_index].iter().sum::<f64>() / zero_one_percent_index as f64;
 
     let mut sorted_frame_times = frame_times.clone();
     sorted_frame_times.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let one_percent_ft_index = (sorted_frame_times.len() as f64 * 0.01).ceil() as usize;
-    let frame_time_1_percent_high = sorted_frame_times[..one_percent_ft_index].iter().sum::<f64>() / one_percent_ft_index as f64;
+    let frame_time_1_percent_high = sorted_frame_times[..one_percent_ft_index]
+        .iter()
+        .sum::<f64>()
+        / one_percent_ft_index as f64;
+
+    let stutter = compute_stutter(&frame_times, duration_seconds);
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -352,6 +439,7 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     println!("[Benchmark]    FPS promedio: {:.1}", avg_fps);
     println!("[Benchmark]    1% Low: {:.1}", fps_1_percent_low);
     println!("[Benchmark]    0.1% Low: {:.1}", fps_0_1_percent_low);
+    println!("[Benchmark]    Picos/min: {:.1}", stutter.spikes_per_min);
     println!("[Benchmark] ============================================");
 
     Ok(Benchmark {
@@ -371,6 +459,10 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         total_frames,
         notes: None,
         launch_command: String::new(),
+        spikes_per_min: Some(stutter.spikes_per_min),
+        pct_over_33ms: Some(stutter.pct_over_33ms),
+        jitter_ms: Some(stutter.jitter_ms),
+        worst_frame_ms: Some(stutter.worst_frame_ms),
     })
 }
 
@@ -412,7 +504,9 @@ pub fn load_benchmarks() -> Result<Vec<Benchmark>, String> {
 #[tauri::command]
 pub fn load_benchmarks_for_game(appid: u32) -> Result<Vec<Benchmark>, String> {
     let data = load_benchmarks_data();
-    let benchmarks = data.benchmarks.into_iter()
+    let benchmarks = data
+        .benchmarks
+        .into_iter()
         .filter(|b| b.appid == appid)
         .collect();
     Ok(benchmarks)
@@ -438,32 +532,61 @@ pub fn delete_all_benchmarks() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn compare_benchmarks(baseline_id: String, test_id: String) -> Result<BenchmarkComparison, String> {
+pub fn compare_benchmarks(
+    baseline_id: String,
+    test_id: String,
+) -> Result<BenchmarkComparison, String> {
     let data = load_benchmarks_data();
 
-    let baseline = data.benchmarks.iter()
+    let baseline = data
+        .benchmarks
+        .iter()
         .find(|b| b.id == baseline_id)
         .ok_or("Benchmark base no encontrado")?
         .clone();
 
-    let test = data.benchmarks.iter()
+    let test = data
+        .benchmarks
+        .iter()
         .find(|b| b.id == test_id)
         .ok_or("Benchmark de prueba no encontrado")?
         .clone();
 
     let fps_change_percent = ((test.avg_fps - baseline.avg_fps) / baseline.avg_fps) * 100.0;
-    let fps_1_percent_change_percent = ((test.fps_1_percent_low - baseline.fps_1_percent_low) / baseline.fps_1_percent_low) * 100.0;
-    let fps_0_1_percent_change_percent = ((test.fps_0_1_percent_low - baseline.fps_0_1_percent_low) / baseline.fps_0_1_percent_low) * 100.0;
-    let frame_time_change_percent = ((test.frame_time_avg - baseline.frame_time_avg) / baseline.frame_time_avg) * 100.0;
+    let fps_1_percent_change_percent = ((test.fps_1_percent_low - baseline.fps_1_percent_low)
+        / baseline.fps_1_percent_low)
+        * 100.0;
+    let fps_0_1_percent_change_percent =
+        ((test.fps_0_1_percent_low - baseline.fps_0_1_percent_low) / baseline.fps_0_1_percent_low)
+            * 100.0;
+    let frame_time_change_percent =
+        ((test.frame_time_avg - baseline.frame_time_avg) / baseline.frame_time_avg) * 100.0;
 
-    let conclusion = if fps_change_percent > 5.0 {
-        format!("✅ Mejora significativa: +{:.1}% FPS promedio", fps_change_percent)
+    let conclusion = if fps_change_percent > 5.0 && fps_1_percent_change_percent < -5.0 {
+        format!(
+            "⚠️ Más FPS promedio (+{:.1}%) pero el 1% Low empeora ({:.1}%): puede haber más tirones",
+            fps_change_percent, fps_1_percent_change_percent
+        )
+    } else if fps_change_percent > 5.0 {
+        format!(
+            "✅ Mejora significativa: +{:.1}% FPS promedio",
+            fps_change_percent
+        )
     } else if fps_change_percent > 0.0 {
-        format!("🟡 Mejora marginal: +{:.1}% FPS promedio", fps_change_percent)
+        format!(
+            "🟡 Mejora marginal: +{:.1}% FPS promedio",
+            fps_change_percent
+        )
     } else if fps_change_percent > -5.0 {
-        format!("🟡 Cambio insignificante: {:.1}% FPS promedio", fps_change_percent)
+        format!(
+            "🟡 Cambio insignificante: {:.1}% FPS promedio",
+            fps_change_percent
+        )
     } else {
-        format!("❌ Rendimiento degradado: {:.1}% FPS promedio", fps_change_percent)
+        format!(
+            "❌ Rendimiento degradado: {:.1}% FPS promedio",
+            fps_change_percent
+        )
     };
 
     Ok(BenchmarkComparison {
@@ -494,8 +617,14 @@ pub fn detect_mangohud_log_path() -> Result<String, String> {
         format!("{}/.config/MangoHud", home),
         format!("{}/.config/goverlay", home),
         "/tmp/MangoHud".to_string(),
-        format!("{}/.var/app/com.valvesoftware.Steam/.local/share/goverlay", home),
-        format!("{}/.var/app/com.valvesoftware.Steam/.local/share/MangoHud", home),
+        format!(
+            "{}/.var/app/com.valvesoftware.Steam/.local/share/goverlay",
+            home
+        ),
+        format!(
+            "{}/.var/app/com.valvesoftware.Steam/.local/share/MangoHud",
+            home
+        ),
     ];
 
     for path in &possible_paths {
@@ -590,9 +719,7 @@ fn find_csv_in_dir_limited(dir: &Path, max_depth: usize) -> Option<String> {
 pub fn check_mangohud_installed() -> Result<bool, String> {
     use std::process::Command;
 
-    let output = Command::new("which")
-        .arg("mangohud")
-        .output();
+    let output = Command::new("which").arg("mangohud").output();
 
     if let Ok(out) = output {
         if out.status.success() {
@@ -635,7 +762,92 @@ pub fn check_mangohud_installed() -> Result<bool, String> {
     Ok(false)
 }
 
-pub fn extract_game_name_from_csv(csv_path: &str) -> Option<String> {
-    let path = Path::new(csv_path);
-    Some(extract_game_name_from_file(path))
+// ───────────────────────── Duración de la grabación de MangoHud ─────────────────────────
+
+fn mangohud_conf_paths() -> Vec<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    vec![
+        std::path::PathBuf::from(format!("{}/.config/MangoHud/MangoHud.conf", home)),
+        std::path::PathBuf::from(format!("{}/.config/goverlay/MangoHud.conf", home)),
+    ]
+}
+
+/// Devuelve la duración (en segundos) que MangoHud graba con Shift+F2.
+/// Devuelve 0 si no hay límite configurado o no se encuentra el archivo.
+#[tauri::command]
+pub fn get_mangohud_log_duration() -> Result<u32, String> {
+    for path in mangohud_conf_paths() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            for line in content.lines() {
+                if let Some(value) = line.trim().strip_prefix("log_duration=") {
+                    if let Ok(n) = value.trim().parse::<u32>() {
+                        return Ok(n);
+                    }
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// Cambia `log_duration` en MangoHud.conf (y en el de GOverlay si existe).
+/// Solo toca esa línea; el resto de la configuración queda igual.
+#[tauri::command]
+pub fn set_mangohud_log_duration(seconds: u32) -> Result<u32, String> {
+    if !(5..=600).contains(&seconds) {
+        return Err("La duración debe estar entre 5 segundos y 10 minutos.".to_string());
+    }
+
+    let mut updated = 0;
+
+    for path in mangohud_conf_paths() {
+        if !path.exists() {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("No se pudo leer {:?}: {}", path, e))?;
+
+        // Copia de seguridad (solo la primera vez)
+        let backup = path.with_extension("conf.thoriapp.bak");
+        if !backup.exists() {
+            fs::write(&backup, &content).ok();
+        }
+
+        let new_line = format!("log_duration={}", seconds);
+        let mut found = false;
+        let mut lines: Vec<String> = content
+            .lines()
+            .map(|line| {
+                if line.trim().starts_with("log_duration=") {
+                    found = true;
+                    new_line.clone()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+
+        if !found {
+            lines.push(new_line);
+        }
+
+        let mut output = lines.join("\n");
+        output.push('\n');
+
+        fs::write(&path, output)
+            .map_err(|e| format!("No se pudo guardar {:?}: {}", path, e))?;
+
+        println!("[MangoHud] log_duration={} guardado en {:?}", seconds, path);
+        updated += 1;
+    }
+
+    if updated == 0 {
+        return Err(
+            "No encontré tu MangoHud.conf. Abre GOverlay una vez y guarda tu configuración."
+                .to_string(),
+        );
+    }
+
+    Ok(seconds)
 }

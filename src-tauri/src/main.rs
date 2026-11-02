@@ -1,11 +1,11 @@
+mod benchmarks;
+mod engine;
 mod hw;
+mod launchers;
 mod log;
+mod profiles;
 mod rules;
 mod steam;
-mod engine;
-mod profiles;
-mod benchmarks;
-mod launchers;
 
 use serde::Serialize;
 use tauri::async_runtime::spawn_blocking;
@@ -35,22 +35,30 @@ fn get_rules(appid: u32) -> rules::Game {
 
 #[tauri::command]
 async fn scan_library() -> Result<Vec<steam::LibGame>, String> {
-    spawn_blocking(steam::scan_library).await.map_err(|e| e.to_string())
+    spawn_blocking(steam::scan_library)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn search_store(term: String) -> Result<Vec<steam::LibGame>, String> {
-    spawn_blocking(move || steam::search_store(&term)).await.map_err(|e| e.to_string())?
+    spawn_blocking(move || steam::search_store(&term))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn game_info(appid: u32) -> Result<steam::GameInfo, String> {
-    spawn_blocking(move || steam::game_info(appid)).await.map_err(|e| e.to_string())
+    spawn_blocking(move || steam::game_info(appid))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn analyze_log(path: String) -> Result<log::Stats, String> {
-    spawn_blocking(move || log::analyze(&path)).await.map_err(|e| e.to_string())?
+    spawn_blocking(move || log::analyze(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -133,6 +141,8 @@ fn main() {
             benchmarks::detect_mangohud_log_path,
             benchmarks::check_mangohud_installed,
             scan_external_launchers,
+            benchmarks::get_mangohud_log_duration,
+            benchmarks::set_mangohud_log_duration,
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la app");

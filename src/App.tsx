@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Home, TrendingUp, Shield, Search, Copy, Check, Star,
+  Home, TrendingUp, Search, Copy, Check, Star,
   ExternalLink, AlertTriangle, Terminal, Users, Settings,
   ChevronDown, Zap, Cpu, GripVertical, RefreshCw, Gamepad2,
   Filter
@@ -128,7 +128,7 @@ interface Profile {
 }
 
 type View = 'recommendations' | 'tests' | 'compatibility' | 'benchmarks';
-type SidebarView = 'library' | 'tests' | 'compatibility' | 'profiles' | 'benchmarks';
+type SidebarView = 'library' | 'tests' | 'profiles' | 'benchmarks';
 type LauncherFilter = 'all' | 'steam' | 'lutris' | 'heroic' | 'heronite';
 
 // ==================== COMPONENTE PERFIL ORDENABLE ====================
@@ -932,17 +932,6 @@ function App() {
                 <span>Mis pruebas</span>
               </button>
               <button
-                onClick={() => { setSidebarView('compatibility'); setCurrent(null); }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  sidebarView === 'compatibility'
-                    ? 'bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/20'
-                    : 'text-[var(--text-muted)] hover:bg-[var(--card)] hover:text-white'
-                }`}
-              >
-                <Shield className="w-4 h-4" />
-                <span>Compatibilidad</span>
-              </button>
-              <button
                 onClick={() => { setSidebarView('profiles'); setCurrent(null); }}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
                   sidebarView === 'profiles'
@@ -1077,7 +1066,7 @@ function App() {
           <AnimatePresence mode="wait">
             {/* LIBRARY VIEW */}
             {sidebarView === 'library' && !current && (
-              <motion.div key="library" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
+              <motion.div key="library" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <div className="max-w-6xl mx-auto">
                   <div className="flex items-center justify-between mb-6">
                     <div>
@@ -1257,7 +1246,7 @@ function App() {
 
             {/* GAME VIEW */}
             {sidebarView === 'library' && current && rules && info && (
-              <motion.div key="game" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
+              <motion.div key="game" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <div className="max-w-6xl mx-auto">
                   {/* Breadcrumb */}
                   <p className="text-xs text-[var(--text-muted)] mb-4">
@@ -2099,7 +2088,7 @@ function App() {
 
             {/* PROFILES VIEW */}
             {sidebarView === 'profiles' && (
-              <motion.div key="profiles" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
+              <motion.div key="profiles" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <div className="max-w-4xl mx-auto">
                   <div className="flex items-center justify-between mb-6">
                     <div>
@@ -2230,7 +2219,7 @@ function App() {
 
             {/* BENCHMARKS VIEW */}
             {sidebarView === 'benchmarks' && (
-              <motion.div key="benchmarks" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
+              <motion.div key="benchmarks" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <div className="max-w-4xl mx-auto">
                   <BenchmarksView
                     currentAppid={current?.appid}
@@ -2245,7 +2234,7 @@ function App() {
 
             {/* DASHBOARD VIEW - MIS PRUEBAS */}
             {sidebarView === 'tests' && (
-              <motion.div key="dashboard" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
+              <motion.div key="dashboard" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <DashboardView />
               </motion.div>
             )}
