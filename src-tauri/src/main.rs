@@ -127,6 +127,7 @@ fn main() {
             benchmarks::load_benchmarks,
             benchmarks::load_benchmarks_for_game,
             benchmarks::delete_benchmark,
+            benchmarks::delete_all_benchmarks,
             benchmarks::compare_benchmarks,
             benchmarks::analyze_mangohud_log_command,
             benchmarks::detect_mangohud_log_path,

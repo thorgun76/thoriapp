@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp, Upload, Trash2, BarChart3, CheckCircle,
-  AlertCircle, Zap, Target, FileText, Search
+  AlertCircle, Zap, Target, FileText, Search, Clock, Gamepad2
 } from 'lucide-react';
 
 interface Benchmark {
@@ -43,6 +43,48 @@ interface BenchmarksViewProps {
   onLogPathChange?: (path: string) => void;
 }
 
+// Componente Toggle moderno (consistente con el resto de la app)
+function Toggle({
+  enabled,
+  onToggle,
+  label,
+  color = 'action'
+}: {
+  enabled: boolean;
+  onToggle: () => void;
+  label: string;
+  color?: 'action' | 'compatible' | 'caution';
+}) {
+  const colorClasses = {
+    action: 'bg-[var(--action)]',
+    compatible: 'bg-[var(--compatible)]',
+    caution: 'bg-[var(--caution)]',
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex items-center gap-2 cursor-pointer group"
+    >
+      <div
+        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
+          enabled ? colorClasses[color] : 'bg-[var(--bg)] border border-[var(--border)]'
+        }`}
+      >
+        <span
+          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${
+            enabled ? 'translate-x-6' : 'translate-x-1'
+          }`}
+        />
+      </div>
+      <span className={`text-xs font-semibold ${enabled ? 'text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
+        {label}
+      </span>
+    </button>
+  );
+}
+
 export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, mangohudLogPath, onLogPathChange }: BenchmarksViewProps) {
   const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
   const [selectedBaseline, setSelectedBaseline] = useState<string | null>(null);
@@ -55,14 +97,12 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   const [toast, setToast] = useState<string | null>(null);
   const [mangohudInstalled, setMangohudInstalled] = useState<boolean | null>(null);
 
-  // Sincronizar con el estado global cuando cambie
   useEffect(() => {
     if (mangohudLogPath) {
       setLogPath(mangohudLogPath);
     }
   }, [mangohudLogPath]);
 
-  // Controlar duración del toast (3 segundos)
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(null), 3000);
@@ -70,7 +110,6 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     }
   }, [toast]);
 
-  // Detectar si MangoHud está instalado
   useEffect(() => {
     const checkMangoHud = async () => {
       try {
@@ -85,7 +124,6 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     checkMangoHud();
   }, []);
 
-  // Guardar en localStorage cuando cambie
   const handleLogPathChange = (newPath: string) => {
     setLogPath(newPath);
     localStorage.setItem('mangohud_log_path', newPath);
@@ -122,23 +160,81 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     try {
       const benchmark = await invoke<Benchmark>('analyze_mangohud_log_command', { logPath });
 
-      // Guardar el benchmark
+      const isDuplicate = benchmarks.some(b =>
+        b.avg_fps === benchmark.avg_fps &&
+        b.fps_1_percent_low === benchmark.fps_1_percent_low &&
+        b.fps_0_1_percent_low === benchmark.fps_0_1_percent_low &&
+        b.total_frames === benchmark.total_frames &&
+        b.timestamp === benchmark.timestamp
+      );
+
+      if (isDuplicate) {
+        setToast('⚠️ Ya existe un benchmark con estos valores (posible duplicado)');
+        setAnalyzing(false);
+        return;
+      }
+
+      let finalGameName = benchmark.game_name;
+
+      if ((!finalGameName || finalGameName === 'Desconocido') && currentGameName && currentGameName !== 'Desconocido') {
+        finalGameName = currentGameName;
+      }
+
       await invoke('save_benchmark', {
         benchmark,
         profileId: '',
-        gameName: currentGameName || 'Desconocido',
+        gameName: finalGameName,
         appid: currentAppid || 0,
         launchCommand: currentLaunchCommand || '',
         notes: notes || null,
       });
 
-      setToast('✓ Benchmark analizado y guardado');
+      setToast(`✓ Benchmark guardado: ${finalGameName} (${benchmark.timestamp})`);
       setNotes('');
       loadBenchmarks();
     } catch (e) {
       setToast(`❌ Error: ${e}`);
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const toggleBaseline = (id: string) => {
+    if (selectedBaseline === id) {
+      setSelectedBaseline(null);
+    } else {
+      setSelectedBaseline(id);
+      if (selectedTest === id) {
+        setSelectedTest(null);
+      }
+    }
+  };
+
+  const toggleTest = (id: string) => {
+    if (selectedTest === id) {
+      setSelectedTest(null);
+    } else {
+      setSelectedTest(id);
+      if (selectedBaseline === id) {
+        setSelectedBaseline(null);
+      }
+    }
+  };
+
+  const deleteAllBenchmarks = async () => {
+    if (!confirm(`¿Estás seguro de que quieres eliminar TODOS los ${benchmarks.length} benchmarks?\n\nEsta acción no se puede deshacer.`)) {
+      return;
+    }
+
+    try {
+      await invoke('delete_all_benchmarks');
+      setToast(`✓ Se eliminaron ${benchmarks.length} benchmarks`);
+      setSelectedBaseline(null);
+      setSelectedTest(null);
+      setComparison(null);
+      loadBenchmarks();
+    } catch (e) {
+      setToast(`❌ Error al eliminar: ${e}`);
     }
   };
 
@@ -194,6 +290,29 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     return <AlertCircle className="w-4 h-4 text-[var(--error)]" />;
   };
 
+  const formatTimestamp = (timestamp: string) => {
+    try {
+      const date = new Date(timestamp);
+      return date.toLocaleString('es-ES', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    } catch {
+      return timestamp;
+    }
+  };
+
+  // Función para obtener color de FPS según rendimiento
+  const getFpsColor = (fps: number) => {
+    if (fps >= 60) return 'text-[var(--compatible)]';
+    if (fps >= 30) return 'text-[var(--caution)]';
+    return 'text-[var(--error)]';
+  };
+
   return (
     <div className="space-y-6">
       {/* Toast */}
@@ -232,9 +351,6 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                   <p className="text-[var(--text-dim)] mt-2"># Arch/Manjaro</p>
                   <p className="text-[var(--compatible)]">sudo pacman -S mangohud</p>
                 </div>
-                <p className="text-xs text-[var(--text-dim)] mt-2">
-                  Después de instalar, configura MangoHud para grabar logs automáticamente.
-                </p>
               </div>
             </div>
           </div>
@@ -271,7 +387,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                     setToast(`❌ Error detectando ruta: ${e}`);
                   }
                 }}
-                className="text-xs text-[var(--action)] hover:text-[var(--action-hover)] flex items-center gap-1"
+                className="text-xs text-[var(--action)] hover:text-[var(--action-hover)] flex items-center gap-1 transition-colors"
               >
                 <Search className="w-3 h-3" />
                 Detectar automáticamente
@@ -282,7 +398,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               value={logPath}
               onChange={(e) => handleLogPathChange(e.target.value)}
               placeholder="/home/user/.local/share/goverlay/logs"
-              className="w-full px-3 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--action)]"
+              className="w-full px-3 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--action)] transition-colors"
             />
           </div>
 
@@ -295,14 +411,14 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Ej: Con game-performance activado"
-              className="w-full px-3 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--action)]"
+              className="w-full px-3 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--action)] transition-colors"
             />
           </div>
 
           <button
             onClick={analyzeLog}
             disabled={analyzing}
-            className="w-full px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            className="w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-[var(--action)]/20 hover:shadow-xl hover:shadow-[var(--action)]/30"
           >
             {analyzing ? (
               <>
@@ -322,83 +438,130 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
       {/* Lista de Benchmarks */}
       {benchmarks.length > 0 && (
         <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
-          <h3 className="text-base font-bold text-[var(--text)] mb-4 flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-[var(--action)]" />
-            Benchmarks Guardados ({benchmarks.length})
-          </h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-base font-bold text-[var(--text)] flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-[var(--action)]" />
+              Benchmarks Guardados
+              <span className="text-xs font-normal text-[var(--text-muted)] bg-[var(--bg)] px-2 py-0.5 rounded-full">
+                {benchmarks.length}
+              </span>
+            </h3>
+            <button
+              onClick={deleteAllBenchmarks}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
+              title="Eliminar todos los benchmarks"
+            >
+              <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
+              Borrar todos
+            </button>
+          </div>
 
-          <div className="space-y-2 max-h-96 overflow-y-auto">
-            {benchmarks.map((bench) => (
-              <div
-                key={bench.id}
-                className="p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <input
-                        type="radio"
-                        name="baseline"
-                        checked={selectedBaseline === bench.id}
-                        onChange={() => setSelectedBaseline(bench.id)}
-                        className="w-4 h-4 accent-[var(--compatible)]"
-                      />
-                      <span className="text-xs text-[var(--compatible)] font-semibold">Base</span>
+          <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+            {benchmarks.map((bench) => {
+              const isSelected = selectedBaseline === bench.id || selectedTest === bench.id;
+              const isBaseline = selectedBaseline === bench.id;
+              const isTest = selectedTest === bench.id;
 
-                      <input
-                        type="radio"
-                        name="test"
-                        checked={selectedTest === bench.id}
-                        onChange={() => setSelectedTest(bench.id)}
-                        className="w-4 h-4 accent-[var(--caution)] ml-2"
-                      />
-                      <span className="text-xs text-[var(--caution)] font-semibold">Prueba</span>
+              return (
+                <motion.div
+                  key={bench.id}
+                  layout
+                  className={`p-4 rounded-xl bg-[var(--bg)] border-2 transition-all duration-200 ${
+                    isBaseline
+                      ? 'border-[var(--compatible)] shadow-lg shadow-[var(--compatible)]/10'
+                      : isTest
+                      ? 'border-[var(--caution)] shadow-lg shadow-[var(--caution)]/10'
+                      : isSelected
+                      ? 'border-[var(--action)] shadow-md shadow-[var(--action)]/10'
+                      : 'border-[var(--border)] hover:border-[var(--action)]/50 hover:shadow-md'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      {/* Toggles modernos */}
+                      <div className="flex items-center gap-4 mb-3">
+                        <Toggle
+                          enabled={isBaseline}
+                          onToggle={() => toggleBaseline(bench.id)}
+                          label="Base"
+                          color="compatible"
+                        />
+                        <Toggle
+                          enabled={isTest}
+                          onToggle={() => toggleTest(bench.id)}
+                          label="Prueba"
+                          color="caution"
+                        />
+                      </div>
+
+                      {/* Nombre del juego y fecha */}
+                      <div className="flex items-center gap-2 mb-3">
+                        <Gamepad2 className="w-4 h-4 text-[var(--action)]" />
+                        <h4 className="text-base font-bold text-[var(--text)] truncate">
+                          {bench.game_name || 'Desconocido'}
+                        </h4>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] mb-4">
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>{formatTimestamp(bench.timestamp)}</span>
+                        {bench.notes && (
+                          <>
+                            <span className="mx-1">•</span>
+                            <span className="italic truncate max-w-[200px]">{bench.notes}</span>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Estadísticas de FPS - Más grandes y visibles */}
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="bg-[var(--surface)] rounded-lg p-3 border border-[var(--border)]">
+                          <div className="text-xs text-[var(--text-muted)] mb-1 font-medium">
+                            FPS Promedio
+                          </div>
+                          <div className={`text-2xl font-bold ${getFpsColor(bench.avg_fps)}`}>
+                            {bench.avg_fps.toFixed(1)}
+                          </div>
+                        </div>
+                        <div className="bg-[var(--surface)] rounded-lg p-3 border border-[var(--border)]">
+                          <div className="text-xs text-[var(--text-muted)] mb-1 font-medium">
+                            1% Low
+                          </div>
+                          <div className={`text-2xl font-bold ${getFpsColor(bench.fps_1_percent_low)}`}>
+                            {bench.fps_1_percent_low.toFixed(1)}
+                          </div>
+                        </div>
+                        <div className="bg-[var(--surface)] rounded-lg p-3 border border-[var(--border)]">
+                          <div className="text-xs text-[var(--text-muted)] mb-1 font-medium">
+                            0.1% Low
+                          </div>
+                          <div className={`text-2xl font-bold ${getFpsColor(bench.fps_0_1_percent_low)}`}>
+                            {bench.fps_0_1_percent_low.toFixed(1)}
+                          </div>
+                        </div>
+                      </div>
                     </div>
 
-                    <p className="text-sm font-semibold text-[var(--text)] truncate">
-                      {bench.game_name}
-                    </p>
-                    <p className="text-xs text-[var(--text-muted)] mt-1">
-                      {new Date(bench.timestamp).toLocaleString('es-ES')}
-                    </p>
-                    {bench.notes && (
-                      <p className="text-xs text-[var(--text-dim)] mt-1 italic">
-                        {bench.notes}
-                      </p>
-                    )}
-
-                    <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
-                      <div>
-                        <span className="text-[var(--text-muted)]">FPS Promedio:</span>
-                        <span className="ml-1 font-semibold text-[var(--text)]">{bench.avg_fps.toFixed(1)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[var(--text-muted)]">1% Low:</span>
-                        <span className="ml-1 font-semibold text-[var(--text)]">{bench.fps_1_percent_low.toFixed(1)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[var(--text-muted)]">0.1% Low:</span>
-                        <span className="ml-1 font-semibold text-[var(--text)]">{bench.fps_0_1_percent_low.toFixed(1)}</span>
-                      </div>
-                    </div>
+                    <button
+                      onClick={() => deleteBenchmark(bench.id)}
+                      className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 hover:scale-110 transition-all duration-200"
+                      title="Eliminar benchmark"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
-
-                  <button
-                    onClick={() => deleteBenchmark(bench.id)}
-                    className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+                </motion.div>
+              );
+            })}
           </div>
 
           {selectedBaseline && selectedTest && selectedBaseline !== selectedTest && (
-            <button
+            <motion.button
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
               onClick={compareBenchmarks}
               disabled={loading}
-              className="w-full mt-4 px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="w-full mt-4 px-4 py-3 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-[var(--action)]/20 hover:shadow-xl hover:shadow-[var(--action)]/30 hover:scale-[1.02]"
             >
               {loading ? (
                 <>
@@ -411,111 +574,115 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                   Comparar Benchmarks Seleccionados
                 </>
               )}
-            </button>
+            </motion.button>
           )}
         </article>
       )}
 
       {/* Resultados de Comparación */}
       {comparison && (
-        <article className="p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)]">
+        <motion.article
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/10"
+        >
           <h3 className="text-base font-bold text-[var(--text)] mb-4 flex items-center gap-2">
             <CheckCircle className="w-5 h-5 text-[var(--compatible)]" />
             Resultados de la Comparación
           </h3>
 
           <div className="p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] mb-4">
-            <p className="text-sm font-semibold text-[var(--text)] mb-2">
+            <p className="text-sm font-semibold text-[var(--text)]">
               {comparison.conclusion}
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-              <p className="text-xs text-[var(--compatible)] font-semibold mb-2">Benchmark Base</p>
-              <div className="space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">FPS Promedio:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.baseline.avg_fps.toFixed(1)}</span>
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="p-4 rounded-lg bg-[var(--bg)] border-2 border-[var(--compatible)]/30">
+              <p className="text-xs text-[var(--compatible)] font-bold mb-3 uppercase tracking-wide">Benchmark Base</p>
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">FPS Promedio:</span>
+                  <span className="text-lg font-bold text-[var(--compatible)]">{comparison.baseline.avg_fps.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">1% Low:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.baseline.fps_1_percent_low.toFixed(1)}</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">1% Low:</span>
+                  <span className="text-lg font-bold text-[var(--compatible)]">{comparison.baseline.fps_1_percent_low.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">0.1% Low:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.baseline.fps_0_1_percent_low.toFixed(1)}</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">0.1% Low:</span>
+                  <span className="text-lg font-bold text-[var(--compatible)]">{comparison.baseline.fps_0_1_percent_low.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">Frame Time:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.baseline.frame_time_avg.toFixed(2)}ms</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">Frame Time:</span>
+                  <span className="text-lg font-bold text-[var(--text)]">{comparison.baseline.frame_time_avg.toFixed(2)}ms</span>
                 </div>
               </div>
             </div>
 
-            <div className="p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-              <p className="text-xs text-[var(--caution)] font-semibold mb-2">Benchmark de Prueba</p>
-              <div className="space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">FPS Promedio:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.test.avg_fps.toFixed(1)}</span>
+            <div className="p-4 rounded-lg bg-[var(--bg)] border-2 border-[var(--caution)]/30">
+              <p className="text-xs text-[var(--caution)] font-bold mb-3 uppercase tracking-wide">Benchmark de Prueba</p>
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">FPS Promedio:</span>
+                  <span className="text-lg font-bold text-[var(--caution)]">{comparison.test.avg_fps.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">1% Low:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.test.fps_1_percent_low.toFixed(1)}</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">1% Low:</span>
+                  <span className="text-lg font-bold text-[var(--caution)]">{comparison.test.fps_1_percent_low.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">0.1% Low:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.test.fps_0_1_percent_low.toFixed(1)}</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">0.1% Low:</span>
+                  <span className="text-lg font-bold text-[var(--caution)]">{comparison.test.fps_0_1_percent_low.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-[var(--text-muted)]">Frame Time:</span>
-                  <span className="font-semibold text-[var(--text)]">{comparison.test.frame_time_avg.toFixed(2)}ms</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[var(--text-muted)]">Frame Time:</span>
+                  <span className="text-lg font-bold text-[var(--text)]">{comparison.test.frame_time_avg.toFixed(2)}ms</span>
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="mt-4 space-y-2">
-            <div className="flex items-center justify-between p-2 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-              <span className="text-xs text-[var(--text-muted)]">Cambio en FPS Promedio:</span>
+          <div className="space-y-2 mb-4">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+              <span className="text-xs text-[var(--text-muted)] font-medium">Cambio en FPS Promedio:</span>
               <div className="flex items-center gap-2">
                 {getChangeIcon(comparison.fps_change_percent)}
-                <span className={`text-sm font-bold ${getChangeColor(comparison.fps_change_percent)}`}>
+                <span className={`text-base font-bold ${getChangeColor(comparison.fps_change_percent)}`}>
                   {comparison.fps_change_percent > 0 ? '+' : ''}{comparison.fps_change_percent.toFixed(1)}%
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center justify-between p-2 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-              <span className="text-xs text-[var(--text-muted)]">Cambio en 1% Low:</span>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+              <span className="text-xs text-[var(--text-muted)] font-medium">Cambio en 1% Low:</span>
               <div className="flex items-center gap-2">
                 {getChangeIcon(comparison.fps_1_percent_change_percent)}
-                <span className={`text-sm font-bold ${getChangeColor(comparison.fps_1_percent_change_percent)}`}>
+                <span className={`text-base font-bold ${getChangeColor(comparison.fps_1_percent_change_percent)}`}>
                   {comparison.fps_1_percent_change_percent > 0 ? '+' : ''}{comparison.fps_1_percent_change_percent.toFixed(1)}%
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center justify-between p-2 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-              <span className="text-xs text-[var(--text-muted)]">Cambio en 0.1% Low:</span>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+              <span className="text-xs text-[var(--text-muted)] font-medium">Cambio en 0.1% Low:</span>
               <div className="flex items-center gap-2">
                 {getChangeIcon(comparison.fps_0_1_percent_change_percent)}
-                <span className={`text-sm font-bold ${getChangeColor(comparison.fps_0_1_percent_change_percent)}`}>
+                <span className={`text-base font-bold ${getChangeColor(comparison.fps_0_1_percent_change_percent)}`}>
                   {comparison.fps_0_1_percent_change_percent > 0 ? '+' : ''}{comparison.fps_0_1_percent_change_percent.toFixed(1)}%
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center justify-between p-2 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-              <span className="text-xs text-[var(--text-muted)]">Cambio en Frame Time:</span>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+              <span className="text-xs text-[var(--text-muted)] font-medium">Cambio en Frame Time:</span>
               <div className="flex items-center gap-2">
                 {comparison.frame_time_change_percent < 0 ? (
                   <TrendingUp className="w-4 h-4 text-[var(--compatible)]" />
                 ) : (
                   <AlertCircle className="w-4 h-4 text-[var(--error)]" />
                 )}
-                <span className={`text-sm font-bold ${comparison.frame_time_change_percent < 0 ? 'text-[var(--compatible)]' : 'text-[var(--error)]'}`}>
+                <span className={`text-base font-bold ${comparison.frame_time_change_percent < 0 ? 'text-[var(--compatible)]' : 'text-[var(--error)]'}`}>
                   {comparison.frame_time_change_percent > 0 ? '+' : ''}{comparison.frame_time_change_percent.toFixed(1)}%
                 </span>
               </div>
@@ -524,39 +691,139 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
           <button
             onClick={() => setComparison(null)}
-            className="w-full mt-4 px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] transition-colors"
+            className="w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] hover:border-[var(--action)]/50 transition-all duration-200"
           >
             Cerrar Comparación
           </button>
-        </article>
+        </motion.article>
       )}
 
-      {/* Tutorial */}
-      <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
-        <h3 className="text-base font-bold text-[var(--text)] mb-3 flex items-center gap-2">
-          <Zap className="w-5 h-5 text-[var(--caution)]" />
-          Cómo Medir el Rendimiento
-        </h3>
-        <div className="space-y-3 text-sm text-[var(--text-muted)]">
-          <div className="flex gap-3">
-            <div className="w-6 h-6 rounded-full bg-[var(--action)]/20 text-[var(--action)] flex items-center justify-center text-xs font-bold shrink-0">1</div>
-            <div>
-              <p className="font-semibold text-[var(--text)]">Establece una referencia</p>
-              <p className="text-xs mt-1">Juega la misma escena sin ajustes y graba un log con MangoHud (Shift+F2) durante al menos 30 segundos.</p>
+      {/* Tutorial mejorado */}
+      <article className="p-6 rounded-xl bg-gradient-to-br from-[var(--surface)] to-[var(--bg)] border-2 border-[var(--border)]">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[var(--action)] to-[var(--caution)] flex items-center justify-center">
+            <Zap className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-[var(--text)]">Guía Rápida de Benchmarks</h3>
+            <p className="text-xs text-[var(--text-muted)]">Aprende a medir el rendimiento en 4 pasos simples</p>
+          </div>
+        </div>
+
+        {/* Explicación de Base y Prueba */}
+        <div className="mb-6 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+          <h4 className="text-sm font-bold text-[var(--text)] mb-3 flex items-center gap-2">
+            <i className="fa-solid fa-circle-question text-[var(--action)]"></i>
+            ¿Qué son Base y Prueba?
+          </h4>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[var(--compatible)]/30">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-8 h-5 rounded-full bg-[var(--compatible)] flex items-center justify-end pr-1">
+                  <div className="w-3 h-3 rounded-full bg-white"></div>
+                </div>
+                <span className="text-sm font-bold text-[var(--compatible)]">Base</span>
+              </div>
+              <p className="text-xs text-[var(--text-muted)]">
+                Tu benchmark de <strong className="text-[var(--text)]">referencia</strong> (antes de hacer cambios). Es el punto de partida para comparar.
+              </p>
+            </div>
+            <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[var(--caution)]/30">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-8 h-5 rounded-full bg-[var(--caution)] flex items-center justify-end pr-1">
+                  <div className="w-3 h-3 rounded-full bg-white"></div>
+                </div>
+                <span className="text-sm font-bold text-[var(--caution)]">Prueba</span>
+              </div>
+              <p className="text-xs text-[var(--text-muted)]">
+                Tu benchmark <strong className="text-[var(--text)]">nuevo</strong> (después de activar un parámetro). Se compara con Base para ver mejoras.
+              </p>
             </div>
           </div>
-          <div className="flex gap-3">
-            <div className="w-6 h-6 rounded-full bg-[var(--action)]/20 text-[var(--action)] flex items-center justify-center text-xs font-bold shrink-0">2</div>
-            <div>
-              <p className="font-semibold text-[var(--text)]">Cambia una sola cosa</p>
-              <p className="text-xs mt-1">Activa un parámetro (ej: game-performance) y repite la misma prueba en las mismas condiciones.</p>
+        </div>
+
+        {/* Pasos mejorados */}
+        <div className="space-y-4">
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+              1
+            </div>
+            <div className="flex-1">
+              <p className="font-bold text-[var(--text)] mb-1">Graba tu primer benchmark (sin cambios)</p>
+              <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+                Juega 30 segundos en tu juego favorito y graba con MangoHud (<kbd className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">Shift+F2</kbd>).
+                Luego analiza el log aquí.
+              </p>
             </div>
           </div>
-          <div className="flex gap-3">
-            <div className="w-6 h-6 rounded-full bg-[var(--action)]/20 text-[var(--action)] flex items-center justify-center text-xs font-bold shrink-0">3</div>
-            <div>
-              <p className="font-semibold text-[var(--text)]">Compara resultados</p>
-              <p className="text-xs mt-1">Selecciona el benchmark base y el de prueba, luego haz clic en "Comparar". El 1% low es más importante que los FPS medios.</p>
+
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+              2
+            </div>
+            <div className="flex-1">
+              <p className="font-bold text-[var(--text)] mb-1">Activa el toggle <span className="text-[var(--compatible)]">Base</span></p>
+              <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+                En el benchmark que acabas de crear, activa el toggle verde <strong className="text-[var(--compatible)]">Base</strong>.
+                Este será tu punto de referencia.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+              3
+            </div>
+            <div className="flex-1">
+              <p className="font-bold text-[var(--text)] mb-1">Cambia un parámetro y graba otro benchmark</p>
+              <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+                Activa un parámetro de optimización (ej: <code className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">game-performance</code>)
+                y repite la misma prueba en las mismas condiciones. Analiza el nuevo log.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+              4
+            </div>
+            <div className="flex-1">
+              <p className="font-bold text-[var(--text)] mb-1">Activa <span className="text-[var(--caution)]">Prueba</span> y compara</p>
+              <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+                En el nuevo benchmark, activa el toggle amarillo <strong className="text-[var(--caution)]">Prueba</strong>.
+                Aparecerá el botón <strong className="text-[var(--action)]">Comparar Benchmarks</strong>. Haz clic para ver las diferencias.
+              </p>
+              <div className="mt-2 p-2 rounded bg-[var(--caution)]/10 border border-[var(--caution)]/30">
+                <p className="text-[10px] text-[var(--caution)] font-semibold">
+                  💡 Tip: El 1% low es más importante que los FPS medios para medir fluidez
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Ejemplo visual */}
+        <div className="mt-6 p-4 rounded-lg bg-gradient-to-r from-[var(--compatible)]/10 to-[var(--caution)]/10 border border-[var(--border)]">
+          <h4 className="text-sm font-bold text-[var(--text)] mb-3 flex items-center gap-2">
+            <i className="fa-solid fa-lightbulb text-[var(--caution)]"></i>
+            Ejemplo práctico
+          </h4>
+          <div className="space-y-2 text-xs text-[var(--text-muted)]">
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--compatible)] font-bold">✓</span>
+              <span>Benchmark 1: Palworld sin optimizar → FPS: 60 → Marcar como <strong className="text-[var(--compatible)]">Base</strong></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--compatible)] font-bold">✓</span>
+              <span>Activar <code className="px-1 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] font-mono text-[10px]">game-performance</code></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--compatible)] font-bold">✓</span>
+              <span>Benchmark 2: Palworld con game-performance → FPS: 70 → Marcar como <strong className="text-[var(--caution)]">Prueba</strong></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--compatible)] font-bold">✓</span>
+              <span>Clic en <strong className="text-[var(--action)]">Comparar</strong> → Resultado: <strong className="text-[var(--compatible)]">+16.7% FPS</strong> 🎉</span>
             </div>
           </div>
         </div>

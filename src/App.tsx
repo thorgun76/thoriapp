@@ -4,7 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Home, TrendingUp, Shield, Search, Copy, Check, Star,
   ExternalLink, AlertTriangle, Terminal, Users, Settings,
-  ChevronDown, Zap, Cpu, GripVertical, RefreshCw, Gamepad2
+  ChevronDown, Zap, Cpu, GripVertical, RefreshCw, Gamepad2,
+  Filter
 } from 'lucide-react';
 import {
   DndContext,
@@ -128,6 +129,7 @@ interface Profile {
 
 type View = 'recommendations' | 'tests' | 'compatibility' | 'benchmarks';
 type SidebarView = 'library' | 'tests' | 'compatibility' | 'profiles' | 'benchmarks';
+type LauncherFilter = 'all' | 'steam' | 'lutris' | 'heroic' | 'heronite';
 
 // ==================== COMPONENTE PERFIL ORDENABLE ====================
 interface SortableProfileProps {
@@ -307,6 +309,7 @@ function App() {
   // showUnavailable siempre es false (no hay control en la UI para cambiarlo)
   const showUnavailable = false;
   const [toast, setToast] = useState<string | null>(null);
+  const [launcherFilter, setLauncherFilter] = useState<LauncherFilter>('all');
 
   // Fase 3: Toggle para forzar Proton en juegos nativos
   const [forceProton, setForceProton] = useState(false);
@@ -758,8 +761,27 @@ function App() {
     return labels[evidence] || labels.heuristica;
   };
 
-  const filteredLib = library.filter(g => g.name.toLowerCase().includes(query.toLowerCase()));
-  const filteredExternalGames = externalGames.filter(g => g.name.toLowerCase().includes(query.toLowerCase()));
+  // NUEVO: Contadores por launcher (ANTES de filtrar para que no cambien)
+  const launcherCounts = {
+    steam: library.length,
+    lutris: externalGames.filter(g => g.launcher === 'lutris').length,
+    heroic: externalGames.filter(g => g.launcher === 'heroic').length,
+    heronite: externalGames.filter(g => g.launcher === 'heronite').length,
+  };
+
+  // NUEVO: Filtrar por launcher
+  const filteredLib = library.filter(g => {
+    const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
+    const matchesLauncher = launcherFilter === 'all' || launcherFilter === 'steam';
+    return matchesQuery && matchesLauncher;
+  });
+
+  const filteredExternalGames = externalGames.filter(g => {
+    const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
+    const matchesLauncher = launcherFilter === 'all' || g.launcher === launcherFilter;
+    return matchesQuery && matchesLauncher;
+  });
+
   const combinedLibrary = showExternalGames
     ? [...filteredLib, ...filteredExternalGames]
     : filteredLib;
@@ -1060,7 +1082,7 @@ function App() {
                   <div className="flex items-center justify-between mb-6">
                     <div>
                       <p className="text-xs text-[var(--text-muted)] mb-2">Biblioteca</p>
-                      <h2 className="text-2xl font-bold">Tu biblioteca de juegos</h2>
+                      <h2 className="text-2xl font-bold">Juegos instalados</h2>
                     </div>
                     <div className="flex items-center gap-2">
                       {externalGames.length > 0 && (
@@ -1130,6 +1152,65 @@ function App() {
                       </button>
                     </div>
                   </div>
+                  {/* NUEVO: FILTROS POR LAUNCHER */}
+                  <div className="mb-6 p-4 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Filter className="w-4 h-4 text-[var(--action)]" />
+                      <span className="text-sm font-semibold text-[var(--text)]">Filtrar por plataforma</span>
+                    </div>
+                    <div className="grid grid-cols-5 gap-2">
+                      <button
+                        onClick={() => setLauncherFilter('all')}
+                        className={`px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                          launcherFilter === 'all'
+                            ? 'bg-[var(--action)] text-white shadow-lg shadow-[var(--action)]/20'
+                            : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-[var(--action)]/50'
+                        }`}
+                      >
+                        Todos ({launcherCounts.steam + launcherCounts.lutris + launcherCounts.heroic + launcherCounts.heronite})
+                      </button>
+                      <button
+                        onClick={() => setLauncherFilter('steam')}
+                        className={`px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                          launcherFilter === 'steam'
+                            ? 'bg-[#1b2838] text-white shadow-lg shadow-[#1b2838]/20'
+                            : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-[#1b2838]/50'
+                        }`}
+                      >
+                        Steam ({launcherCounts.steam})
+                      </button>
+                      <button
+                        onClick={() => setLauncherFilter('lutris')}
+                        className={`px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                          launcherFilter === 'lutris'
+                            ? 'bg-[#f97316] text-white shadow-lg shadow-[#f97316]/20'
+                            : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-[#f97316]/50'
+                        }`}
+                      >
+                        Lutris ({launcherCounts.lutris})
+                      </button>
+                      <button
+                        onClick={() => setLauncherFilter('heroic')}
+                        className={`px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                          launcherFilter === 'heroic'
+                            ? 'bg-[#3b82f6] text-white shadow-lg shadow-[#3b82f6]/20'
+                            : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-[#3b82f6]/50'
+                        }`}
+                      >
+                        Heroic ({launcherCounts.heroic})
+                      </button>
+                      <button
+                        onClick={() => setLauncherFilter('heronite')}
+                        className={`px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                          launcherFilter === 'heronite'
+                            ? 'bg-[#a855f7] text-white shadow-lg shadow-[#a855f7]/20'
+                            : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-[#a855f7]/50'
+                        }`}
+                      >
+                        Heronite ({launcherCounts.heronite})
+                      </button>
+                    </div>
+                  </div>
 
                   {combinedLibrary.length === 0 ? (
                     <div className="text-center py-16">
@@ -1145,19 +1226,23 @@ function App() {
                           onClick={() => openGame(g)}
                           className="group relative aspect-[3/4] rounded-xl bg-[var(--card)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-all overflow-hidden"
                         >
-                          {/* Indicador de launcher */}
-                          {g.launcher && g.launcher !== 'steam' && (
-                            <div className="absolute top-2 right-2 z-10">
-                              <span className={`text-[10px] px-2 py-1 rounded font-semibold ${
-                                g.launcher === 'lutris' ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30' :
-                                g.launcher === 'heroic' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' :
-                                g.launcher === 'heronite' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' :
-                                'bg-gray-500/20 text-gray-400 border border-gray-500/30'
-                              }`}>
-                                {g.launcher.charAt(0).toUpperCase() + g.launcher.slice(1)}
-                              </span>
-                            </div>
-                          )}
+                          {/* Etiqueta del launcher - PARA TODOS LOS JUEGOS */}
+                          <div className="absolute top-2 right-2 z-10">
+                            <span className={`text-[10px] px-2 py-1 rounded font-semibold ${
+                              !g.launcher || g.launcher === 'steam'
+                                ? 'bg-[#1b2838]/90 text-white border border-[#1b2838]'
+                                : g.launcher === 'lutris'
+                                ? 'bg-orange-500/90 text-white border border-orange-600'
+                                : g.launcher === 'heroic'
+                                ? 'bg-blue-500/90 text-white border border-blue-600'
+                                : g.launcher === 'heronite'
+                                ? 'bg-purple-500/90 text-white border border-purple-600'
+                                : 'bg-gray-500/90 text-white border border-gray-600'
+                            }`}>
+                              {!g.launcher || g.launcher === 'steam' ? 'Steam' :
+                               g.launcher.charAt(0).toUpperCase() + g.launcher.slice(1)}
+                            </span>
+                          </div>
                           <div className="absolute inset-0 flex flex-col items-center justify-center p-3 text-center">
                             <Home className="w-8 h-8 text-[var(--text-dim)] group-hover:text-[var(--action)] transition-colors mb-2" />
                             <p className="text-xs font-medium text-[var(--text-muted)] group-hover:text-white line-clamp-3">{g.name}</p>

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use regex::Regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Benchmark {
@@ -85,7 +86,6 @@ fn save_benchmarks_data(data: &BenchmarksData) -> Result<(), String> {
 fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
     let mut log_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
 
-    // Buscar recursivamente archivos .csv y .log que sean de MangoHud
     fn search_dir(dir: &Path, log_files: &mut Vec<(std::path::PathBuf, std::time::SystemTime)>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -93,36 +93,21 @@ fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
                 if path.is_dir() {
                     search_dir(&path, log_files);
                 } else if path.is_file() {
-                    let file_name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
+                    if let Some(ext) = path.extension() {
+                        let ext_str = ext.to_string_lossy().to_lowercase();
+                        if ext_str == "csv" || ext_str == "log" {
+                            if let Ok(content) = fs::read_to_string(&path) {
+                                let has_valid_format = content.lines().any(|line| {
+                                    let lower = line.to_lowercase();
+                                    lower.contains("fps,frametime") ||
+                                    (lower.starts_with("fps,") && lower.contains("frametime"))
+                                });
 
-                    // Solo buscar archivos que parezcan ser de MangoHud
-                    let is_mangohud_file = file_name.contains("mangohud") ||
-                                          file_name.ends_with(".csv");
-
-                    if is_mangohud_file {
-                        if let Some(ext) = path.extension() {
-                            let ext_str = ext.to_string_lossy().to_lowercase();
-                            if ext_str == "csv" || ext_str == "log" {
-                                // Verificar que el archivo tenga el formato correcto de MangoHud
-                                if let Ok(content) = fs::read_to_string(&path) {
-                                    // MangoHud CSV tiene formato: fps,frametime,...
-                                    // O formato con header: fps,frametime,duration,...
-                                    let has_valid_format = content.lines().any(|line| {
-                                        let parts: Vec<&str> = line.split(',').collect();
-                                        parts.len() >= 2 &&
-                                        parts[0].trim().parse::<f64>().is_ok() &&
-                                        parts[1].trim().parse::<f64>().is_ok()
-                                    });
-
-                                    if has_valid_format {
-                                        if let Ok(metadata) = path.metadata() {
-                                            if let Ok(modified) = metadata.modified() {
-                                                println!("[Benchmark] Archivo MangoHud encontrado: {:?}", path);
-                                                log_files.push((path, modified));
-                                            }
+                                if has_valid_format {
+                                    if let Ok(metadata) = path.metadata() {
+                                        if let Ok(modified) = metadata.modified() {
+                                            println!("[Benchmark] Archivo MangoHud encontrado: {:?}", path);
+                                            log_files.push((path, modified));
                                         }
                                     }
                                 }
@@ -147,13 +132,114 @@ fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
         ));
     }
 
-    // Ordenar por fecha de modificación (más reciente primero)
     log_files.sort_by(|a, b| b.1.cmp(&a.1));
 
     let latest = &log_files[0].0;
     println!("[Benchmark] Usando el log más reciente: {:?}", latest);
 
     Ok(latest.clone())
+}
+
+fn extract_game_name_from_file(file_path: &Path) -> String {
+    let file_name = match file_path.file_stem() {
+        Some(name) => name.to_string_lossy().to_string(),
+        None => return "Desconocido".to_string(),
+    };
+
+    println!("[Extract] Nombre original del archivo: {}", file_name);
+
+    let mut name = file_name.clone();
+
+    // PASO 1: Buscar patrón de fecha/hora y cortar ahí
+    if let Ok(datetime_pattern) = Regex::new(r"[_-]\d{4}[-_]\d{2}[-_]\d{2}([_-]\d{2}[-_]\d{2}[-_]\d{2})?") {
+        if let Some(mat) = datetime_pattern.find(&name) {
+            name = name[..mat.start()].to_string();
+            println!("[Extract] Después de cortar fecha/hora: '{}'", name);
+        }
+    }
+
+    // PASO 2: Quitar sufijos técnicos comunes de juegos
+    let technical_suffixes = [
+        "-Win64-Shipping",
+        "-Win32-Shipping",
+        "-Shipping",
+        "-Win64",
+        "-Win32",
+        "-x64",
+        "-X64",
+        "-Linux64",
+        "-Linux",
+        "-Mac",
+        "-MacOS",
+        "-Server",
+        "-DedicatedServer",
+        "-Client",
+        "-Editor",
+        "-Test",
+        "-Debug",
+        "-Release",
+    ];
+
+    let name_lower = name.to_lowercase();
+    for suffix in &technical_suffixes {
+        let suffix_lower = suffix.to_lowercase();
+        if name_lower.ends_with(&suffix_lower) {
+            name = name[..name.len() - suffix.len()].to_string();
+            println!("[Extract] Después de quitar sufijo '{}': '{}'", suffix, name);
+            break;
+        }
+    }
+
+    // PASO 3: Quitar prefijos comunes de MangoHud
+    let prefixes_to_remove = ["mangohud", "mango", "hud", "log", "logs", "mg"];
+    for prefix in &prefixes_to_remove {
+        let name_lower = name.to_lowercase();
+        if name_lower.starts_with(prefix) {
+            let rest = name[prefix.len()..].to_string();
+            let trimmed = rest.trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ');
+            if !trimmed.is_empty() {
+                name = trimmed.to_string();
+                println!("[Extract] Después de quitar prefijo '{}': '{}'", prefix, name);
+                break;
+            }
+        }
+    }
+
+    // PASO 4: Limpiar separadores finales y espacios extra
+    name = name.trim_end_matches(|c: char| c == '_' || c == '-' || c == ' ').to_string();
+    name = name.trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ').to_string();
+
+    // PASO 5: Si quedó vacío, usar el nombre original del archivo
+    if name.is_empty() {
+        println!("[Extract] Nombre vacío, usando original: {}", file_name);
+        return file_name;
+    }
+
+    println!("[Extract] ✅ Nombre final del juego: {}", name);
+    name
+}
+
+fn get_file_modified_time(file_path: &Path) -> String {
+    match fs::metadata(file_path) {
+        Ok(metadata) => {
+            match metadata.modified() {
+                Ok(system_time) => {
+                    let datetime: chrono::DateTime<chrono::Local> = system_time.into();
+                    let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+                    println!("[Time] ✅ Fecha de modificación del archivo: {}", formatted);
+                    formatted
+                }
+                Err(e) => {
+                    println!("[Time] ⚠️ Error obteniendo hora de modificación: {}, usando hora actual", e);
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+                }
+            }
+        }
+        Err(e) => {
+            println!("[Time] ⚠️ Error obteniendo meta {}, usando hora actual", e);
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+        }
+    }
 }
 
 pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
@@ -163,12 +249,17 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         return Err(format!("La ruta no existe: {}", log_path));
     }
 
-    // Si es un directorio, buscar archivos de log de MangoHud
     let file_path = if path.is_dir() {
         find_latest_mangohud_log(path)?
     } else {
         path.to_path_buf()
     };
+
+    println!("[Benchmark] ============================================");
+    println!("[Benchmark] Analizando archivo: {:?}", file_path);
+
+    let game_name = extract_game_name_from_file(&file_path);
+    let file_timestamp = get_file_modified_time(&file_path);
 
     let content = fs::read_to_string(&file_path)
         .map_err(|e| format!("Error al leer el archivo {:?}: {}", file_path, e))?;
@@ -176,33 +267,37 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     let mut fps_values: Vec<f64> = Vec::new();
     let mut frame_times: Vec<f64> = Vec::new();
 
-    // Detectar si el archivo tiene header
-    let mut has_header = false;
-    let mut fps_column = 0;
-    let mut frametime_column = 1;
+    let mut fps_column: usize = 0;
+    let mut frametime_column: usize = 1;
+    let mut data_start_line: usize = 0;
 
-    if let Some(first_line) = content.lines().next() {
-        // Si la primera línea contiene texto (no números), es un header
-        if first_line.split(',').any(|part| part.trim().parse::<f64>().is_err()) {
-            has_header = true;
+    for (line_idx, line) in content.lines().enumerate() {
+        let lower = line.to_lowercase();
 
-            // Buscar las columnas de fps y frametime en el header
-            let headers: Vec<&str> = first_line.split(',').collect();
+        if lower.contains("fps") && lower.contains("frametime") {
+            let headers: Vec<&str> = line.split(',').collect();
+
             for (i, header) in headers.iter().enumerate() {
-                let header_lower = header.trim().to_lowercase();
-                if header_lower == "fps" {
+                let h = header.trim().to_lowercase();
+                if h == "fps" {
                     fps_column = i;
-                } else if header_lower == "frametime" || header_lower == "frame_time" {
+                } else if h == "frametime" {
                     frametime_column = i;
                 }
             }
 
-            println!("[Benchmark] Header detectado. Columnas: fps={}, frametime={}", fps_column, frametime_column);
+            data_start_line = line_idx + 1;
+            println!("[Benchmark] Header de datos encontrado en línea {}", line_idx + 1);
+            println!("[Benchmark] Columnas: fps={}, frametime={}", fps_column, frametime_column);
+            break;
         }
     }
 
-    // Procesar las líneas de datos
-    for line in content.lines().skip(if has_header { 1 } else { 0 }) {
+    if data_start_line == 0 {
+        return Err("No se encontró el header de datos (fps,frametime) en el archivo CSV. ¿Es un log válido de MangoHud?".to_string());
+    }
+
+    for line in content.lines().skip(data_start_line) {
         let parts: Vec<&str> = line.split(',').collect();
 
         if parts.len() > fps_column && parts.len() > frametime_column {
@@ -251,12 +346,20 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
+    println!("[Benchmark] ✅ Análisis completado:");
+    println!("[Benchmark]    Juego: {}", game_name);
+    println!("[Benchmark]    Fecha del log: {}", file_timestamp);
+    println!("[Benchmark]    FPS promedio: {:.1}", avg_fps);
+    println!("[Benchmark]    1% Low: {:.1}", fps_1_percent_low);
+    println!("[Benchmark]    0.1% Low: {:.1}", fps_0_1_percent_low);
+    println!("[Benchmark] ============================================");
+
     Ok(Benchmark {
         id: format!("bench_{}", now.replace([':', ' ', '-'], "")),
         profile_id: String::new(),
-        game_name: String::new(),
+        game_name: game_name,
         appid: 0,
-        timestamp: now,
+        timestamp: file_timestamp,
         duration_seconds,
         avg_fps,
         fps_1_percent_low,
@@ -283,7 +386,13 @@ pub fn save_benchmark(
     let mut data = load_benchmarks_data();
 
     benchmark.profile_id = profile_id;
-    benchmark.game_name = game_name;
+
+    if benchmark.game_name.is_empty() || benchmark.game_name == "Desconocido" {
+        if !game_name.is_empty() && game_name != "Desconocido" {
+            benchmark.game_name = game_name;
+        }
+    }
+
     benchmark.appid = appid;
     benchmark.launch_command = launch_command;
     benchmark.notes = notes;
@@ -314,6 +423,17 @@ pub fn delete_benchmark(benchmark_id: String) -> Result<(), String> {
     let mut data = load_benchmarks_data();
     data.benchmarks.retain(|b| b.id != benchmark_id);
     save_benchmarks_data(&data)?;
+    Ok(())
+}
+
+// NUEVO: Comando para borrar todos los benchmarks
+#[tauri::command]
+pub fn delete_all_benchmarks() -> Result<(), String> {
+    let mut data = load_benchmarks_data();
+    let count = data.benchmarks.len();
+    data.benchmarks.clear();
+    save_benchmarks_data(&data)?;
+    println!("[Benchmark] ✅ Se eliminaron {} benchmarks", count);
     Ok(())
 }
 
@@ -364,38 +484,30 @@ pub fn analyze_mangohud_log_command(log_path: String) -> Result<Benchmark, Strin
 
 #[tauri::command]
 pub fn detect_mangohud_log_path() -> Result<String, String> {
-    // Intentar leer la configuración de MangoHud
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
 
-    // Rutas posibles para el archivo de configuración
-    let config_paths = vec![
-        format!("{}/.config/MangoHud/MangoHud.conf", home),
-        format!("{}/.config/goverlay/MangoHud.conf", home),
+    let possible_paths = vec![
+        format!("{}/.local/share/goverlay", home),
+        format!("{}/.local/share/goverlay/logs", home),
+        format!("{}/.local/share/MangoHud", home),
+        format!("{}/.local/share/MangoHud/logs", home),
+        format!("{}/.config/MangoHud", home),
+        format!("{}/.config/goverlay", home),
+        "/tmp/MangoHud".to_string(),
+        format!("{}/.var/app/com.valvesoftware.Steam/.local/share/goverlay", home),
+        format!("{}/.var/app/com.valvesoftware.Steam/.local/share/MangoHud", home),
     ];
 
-    for config_path in config_paths {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            // Buscar la línea output_folder
-            for line in content.lines() {
-                let line = line.trim();
-                if line.starts_with("output_folder=") {
-                    let folder = line.trim_start_matches("output_folder=").trim();
-                    if !folder.is_empty() {
-                        // MangoHud crea una subcarpeta "logs" automáticamente
-                        let logs_path = if folder.ends_with("/logs") {
-                            folder.to_string()
-                        } else {
-                            format!("{}/logs", folder)
-                        };
-
-                        // Verificar que la carpeta existe
-                        if Path::new(&logs_path).exists() {
-                            return Ok(logs_path);
-                        }
-
-                        // Si no existe la subcarpeta logs, devolver la carpeta base
-                        if Path::new(folder).exists() {
-                            return Ok(folder.to_string());
+    for path in &possible_paths {
+        let p = Path::new(path);
+        if p.exists() && p.is_dir() {
+            if let Ok(entries) = fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    let file_path = entry.path();
+                    if let Some(ext) = file_path.extension() {
+                        if ext.to_string_lossy().to_lowercase() == "csv" {
+                            println!("[Detect] Encontrados CSV en: {}", path);
+                            return Ok(path.clone());
                         }
                     }
                 }
@@ -403,28 +515,81 @@ pub fn detect_mangohud_log_path() -> Result<String, String> {
         }
     }
 
-    // Rutas por defecto si no se encuentra configuración
-    let default_paths = vec![
-        format!("{}/.local/share/goverlay/logs", home),
-        format!("{}/.local/share/MangoHud/logs", home),
-        "/tmp/MangoHud".to_string(),
+    let config_paths = vec![
+        format!("{}/.config/MangoHud/MangoHud.conf", home),
+        format!("{}/.config/goverlay/MangoHud.conf", home),
     ];
 
-    for path in default_paths {
-        if Path::new(&path).exists() {
-            return Ok(path);
+    for config_path in config_paths {
+        if let Ok(content) = fs::read_to_string(&config_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with("output_folder=") {
+                    let folder = line.trim_start_matches("output_folder=").trim();
+                    if !folder.is_empty() && Path::new(folder).exists() {
+                        println!("[Detect] Ruta desde config: {}", folder);
+                        return Ok(folder.to_string());
+                    }
+                }
+            }
         }
     }
 
-    // Fallback final
+    let search_dirs = vec![
+        format!("{}/.local/share", home),
+        format!("{}/.config", home),
+    ];
+
+    for search_dir in search_dirs {
+        let p = Path::new(&search_dir);
+        if p.exists() {
+            if let Some(found) = find_csv_in_dir_limited(p, 2) {
+                println!("[Detect] Encontrado recursivamente: {}", found);
+                return Ok(found);
+            }
+        }
+    }
+
+    let goverly_path = format!("{}/.local/share/goverlay", home);
+    if Path::new(&goverly_path).exists() {
+        return Ok(goverly_path);
+    }
+
     Ok("/tmp/MangoHud".to_string())
+}
+
+fn find_csv_in_dir_limited(dir: &Path, max_depth: usize) -> Option<String> {
+    if max_depth == 0 || !dir.is_dir() {
+        return None;
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext.to_string_lossy().to_lowercase() == "csv" {
+                        return path.parent().map(|p| p.to_string_lossy().to_string());
+                    }
+                }
+            }
+
+            if path.is_dir() {
+                if let Some(found) = find_csv_in_dir_limited(&path, max_depth - 1) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[tauri::command]
 pub fn check_mangohud_installed() -> Result<bool, String> {
     use std::process::Command;
 
-    // Verificar si el binario mangohud está en el PATH
     let output = Command::new("which")
         .arg("mangohud")
         .output();
@@ -435,7 +600,6 @@ pub fn check_mangohud_installed() -> Result<bool, String> {
         }
     }
 
-    // Verificar si existe el archivo de configuración
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let config_paths = vec![
         format!("{}/.config/MangoHud/MangoHud.conf", home),
@@ -448,16 +612,15 @@ pub fn check_mangohud_installed() -> Result<bool, String> {
         }
     }
 
-    // Verificar si existen carpetas de logs de MangoHud
     let log_paths = vec![
         format!("{}/.local/share/goverlay/logs", home),
+        format!("{}/.local/share/goverlay", home),
         format!("{}/.local/share/MangoHud/logs", home),
         "/tmp/MangoHud".to_string(),
     ];
 
     for log_path in log_paths {
         if Path::new(&log_path).exists() {
-            // Verificar si hay archivos CSV dentro
             if let Ok(entries) = fs::read_dir(&log_path) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -470,4 +633,9 @@ pub fn check_mangohud_installed() -> Result<bool, String> {
     }
 
     Ok(false)
+}
+
+pub fn extract_game_name_from_csv(csv_path: &str) -> Option<String> {
+    let path = Path::new(csv_path);
+    Some(extract_game_name_from_file(path))
 }
