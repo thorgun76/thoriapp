@@ -320,6 +320,21 @@ function App() {
 
   // Fase 5: Perfiles
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  // Número de pruebas guardadas (se muestra junto a "Mis pruebas" en el menú)
+  const [savedTestsCount, setSavedTestsCount] = useState(0);
+  useEffect(() => {
+    const refresh = async () => {
+      try {
+        const list = await invoke<unknown[]>('load_comparisons');
+        setSavedTestsCount(list.length);
+      } catch (e) {
+        console.error('Error al contar las pruebas guardadas:', e);
+      }
+    };
+    refresh();
+    window.addEventListener('thoriapp:comparisons-changed', refresh);
+    return () => window.removeEventListener('thoriapp:comparisons-changed', refresh);
+  }, []);
   const [profileCommands, setProfileCommands] = useState<Record<string, string>>({});
   const [expandedProfile, setExpandedProfile] = useState<string | null>(null);
   const [showSaveProfileModal, setShowSaveProfileModal] = useState(false);
@@ -930,6 +945,11 @@ function App() {
               >
                 <TrendingUp className="w-4 h-4" />
                 <span>Mis pruebas</span>
+                {savedTestsCount > 0 && (
+                  <span className="ml-auto text-xs bg-[var(--action)]/20 text-[var(--action)] px-2 py-0.5 rounded-full">
+                    {savedTestsCount}
+                  </span>
+                )}
               </button>
               <button
                 onClick={() => { setSidebarView('profiles'); setCurrent(null); }}
@@ -2105,14 +2125,13 @@ function App() {
                             const file = (e.target as HTMLInputElement).files?.[0];
                             if (file) {
                               try {
-                                // En navegadores, no podemos acceder a la ruta completa del archivo
-                                // Por ahora, usamos el nombre del archivo como identificador
-                                const path = file.name;
-                                const imported = await invoke<Profile[]>('import_profile', { path });
+                                // El navegador no da la ruta completa del archivo: se lee su contenido y se envía al backend
+                                const content = await file.text();
+                                const imported = await invoke<Profile[]>('import_profile_from_text', { content });
                                 setToast(`${imported.length} perfil(es) importado(s) correctamente`);
                                 loadAllProfiles();
                               } catch (err) {
-                                setToast('Error al importar perfil');
+                                setToast(`Error al importar: ${String(err)}`);
                               }
                             }
                           };
@@ -2125,13 +2144,13 @@ function App() {
                       </button>
                       <button
                         onClick={async () => {
-                          const path = prompt('Ruta para exportar todos los perfiles:', `/home/thoriapp_perfiles_backup.json`);
+                          const path = prompt('Ruta para exportar todos los perfiles:', `~/thoriapp_perfiles_backup.json`);
                           if (path) {
                             try {
-                              await invoke('export_all_profiles', { path });
-                              setToast('Todos los perfiles exportados correctamente');
+                              const savedTo = await invoke<string>('export_all_profiles', { path });
+                              setToast(`Perfiles exportados en ${savedTo}`);
                             } catch (err) {
-                              setToast('Error al exportar perfiles');
+                              setToast(`Error al exportar: ${String(err)}`);
                             }
                           }
                         }}
@@ -2170,7 +2189,7 @@ function App() {
                               onToggle={() => setExpandedProfile(expandedProfile === profile.id ? null : profile.id)}
                               onCopy={() => loadProfile(profile)}
                               onExport={async () => {
-                                const path = prompt('Ruta para exportar el perfil:', `/home/${profile.game_name}_${profile.name}.json`);
+                                const path = prompt('Ruta para exportar el perfil:', `~/${profile.game_name}_${profile.name}.json`);
                                 if (path) {
                                   try {
                                     await invoke('export_profile', { profileId: profile.id, path });

@@ -129,6 +129,7 @@ fn main() {
             profiles::export_profile,
             profiles::export_all_profiles,
             profiles::import_profile,
+            profiles::import_profile_from_text,
             profiles::update_profile,
             profiles::reorder_profiles,
             benchmarks::save_benchmark,
