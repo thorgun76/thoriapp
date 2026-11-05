@@ -1,166 +1,375 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import {
-  TrendingUp, BarChart3, Award, Calendar,
-  Gamepad2, Target
+  TrendingUp, BarChart3, Calendar,
+  Gamepad2, Target, Trash2, ArrowLeft, ChevronRight,
+  Terminal, Trophy, Copy,
 } from 'lucide-react';
+import { ComparisonResultCard, summarizeComparison } from './BenchmarksView';
+import type { BenchmarkComparison } from './BenchmarksView';
 
-interface Benchmark {
+/** Una comparación guardada desde Benchmarks (copia completa, no una referencia). */
+interface SavedComparison {
   id: string;
-  profile_id: string;
+  saved_at: string;
   game_name: string;
-  appid: number;
-  timestamp: string;
-  duration_seconds: number;
-  avg_fps: number;
-  fps_1_percent_low: number;
-  fps_0_1_percent_low: number;
-  max_fps: number;
-  min_fps: number;
-  frame_time_avg: number;
-  frame_time_1_percent_high: number;
-  total_frames: number;
-  notes: string | null;
-  launch_command: string;
+  before_fps: number;
+  after_fps: number;
+  fps_change_percent: number;
+  comparison: BenchmarkComparison;
 }
 
-interface DashboardStats {
-  total_tests: number;
-  total_games: number;
-  last_test_date: string | null;
-  best_improvements: Array<{
-    game_name: string;
-    improvement_percent: number;
-    parameter: string;
-    date: string;
-  }>;
-  recent_tests: Array<{
-    game_name: string;
-    baseline_fps: number;
-    optimized_fps: number;
-    improvement_percent: number;
-    date: string;
-  }>;
+// Aviso entre pantallas: Benchmarks y Mis pruebas se actualizan cuando cambia la lista.
+const CHANGED_EVENT = 'thoriapp:comparisons-changed';
+
+// "2026-11-03 10:47:42" -> formato ISO, que todos los motores web entienden
+const parseDate = (s: string) => new Date(s.replace(' ', 'T'));
+
+// La fecha de la prueba es la de la grabación "Después", no la del momento de guardar.
+const testDateOf = (c: SavedComparison) => c.comparison.test.timestamp;
+
+const normGame = (n: string) => n.trim().toLowerCase();
+
+/* ───────────── Argumento probado y ganador (detalle de una prueba) ───────────── */
+
+// Separa el comando en piezas (variables, banderas, envoltorios) sin el marcador %command%
+const tokenize = (cmd: string) => Array.from(new Set(cmd.split(/\s+/).filter((t) => t && t !== '%command%')));
+
+function diffCommands(before: string, after: string) {
+  const a = tokenize(before);
+  const b = tokenize(after);
+  return {
+    added: b.filter((t) => !a.includes(t)),
+    removed: a.filter((t) => !b.includes(t)),
+  };
+}
+
+function CommandBox({
+  label,
+  color,
+  command,
+  isWinner,
+  onCopy,
+}: {
+  label: string;
+  color: string;
+  command: string;
+  isWinner: boolean;
+  onCopy: (text: string) => void;
+}) {
+  return (
+    <div
+      className={`p-3 rounded-lg bg-[var(--bg)] border-2 ${
+        isWinner ? 'border-[var(--compatible)]/60' : 'border-[var(--border)]'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="text-sm font-bold" style={{ color }}>
+          {label}
+        </span>
+        {isWinner && (
+          <span className="flex items-center gap-1 text-[11px] font-bold text-[var(--compatible)]">
+            <Trophy className="w-3.5 h-3.5" />
+            Ganador
+          </span>
+        )}
+      </div>
+      {command ? (
+        <>
+          <code className="block text-[11px] leading-relaxed font-mono text-[var(--text)] break-all select-text">
+            {command}
+          </code>
+          <button
+            type="button"
+            onClick={() => onCopy(command)}
+            className="mt-2 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold text-[var(--text-muted)] bg-[var(--surface)] border border-[var(--border)] hover:text-[var(--text)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+          >
+            <Copy className="w-3 h-3" />
+            Copiar
+          </button>
+        </>
+      ) : (
+        <p className="text-xs text-[var(--text-muted)] italic">Sin parámetros (configuración original)</p>
+      )}
+    </div>
+  );
+}
+
+function ArgumentCard({
+  comparison,
+  onCopy,
+}: {
+  comparison: BenchmarkComparison;
+  onCopy: (text: string) => void;
+}) {
+  const summary = summarizeComparison(comparison);
+  const beforeCmd = (comparison.baseline.launch_command || '').trim();
+  const afterCmd = (comparison.test.launch_command || '').trim();
+  const { added, removed } = diffCommands(beforeCmd, afterCmd);
+  const hasChange = added.length > 0 || removed.length > 0;
+
+  const badge =
+    summary.winner === 'despues'
+      ? { text: 'Ganó el Después', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      : summary.winner === 'antes'
+      ? { text: 'Ganó el Antes', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      : summary.winner === 'empate'
+      ? { text: 'Sin ganador claro', cls: 'bg-[var(--bg)] text-[var(--text-muted)] border-[var(--border)]' }
+      : { text: 'Depende de lo que prefieras', cls: 'bg-[var(--caution)]/10 text-[var(--caution)] border-[var(--caution)]/40' };
+
+  return (
+    <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+      <h3 className="text-base font-bold mb-4 flex items-center gap-2 text-[var(--text)]">
+        <Terminal className="w-5 h-5 text-[var(--action)]" />
+        Argumento probado
+      </h3>
+
+      {/* Qué cambió */}
+      <div className="mb-4">
+        <p className="text-xs text-[var(--text-muted)] mb-2">Lo que cambió entre el Antes y el Después</p>
+        {hasChange ? (
+          <div className="flex flex-wrap gap-2">
+            {added.map((t) => (
+              <span
+                key={`add-${t}`}
+                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-[var(--compatible)]/10 text-[var(--compatible)] border border-[var(--compatible)]/30 select-text"
+              >
+                + {t}
+              </span>
+            ))}
+            {removed.map((t) => (
+              <span
+                key={`rem-${t}`}
+                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 select-text"
+              >
+                − {t}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+            No se registró ninguna diferencia entre los dos comandos. El comando que se guarda es el que tenía la app
+            al pulsar <strong className="text-[var(--text)]">Analizar y guardar</strong>, así que activa el parámetro
+            antes de analizar la grabación.
+          </p>
+        )}
+      </div>
+
+      {/* Ganador */}
+      <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className={`px-3 py-1 rounded-full text-xs font-bold border ${badge.cls}`}>{badge.text}</span>
+        <span className="text-xs text-[var(--text-muted)]">{summary.advice}</span>
+      </div>
+
+      {/* Comandos completos */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <CommandBox
+          label="Antes"
+          color="#38bdf8"
+          command={beforeCmd}
+          isWinner={summary.winner === 'antes'}
+          onCopy={onCopy}
+        />
+        <CommandBox
+          label="Después"
+          color="var(--caution)"
+          command={afterCmd}
+          isWinner={summary.winner === 'despues'}
+          onCopy={onCopy}
+        />
+      </div>
+    </article>
+  );
 }
 
 export function DashboardView() {
-  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [items, setItems] = useState<SavedComparison[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
 
-  useEffect(() => {
-    loadDashboardStats();
-  }, []);
-
-  const loadDashboardStats = async () => {
+  const loadComparisons = useCallback(async () => {
     try {
-      const allBenchmarks = await invoke<Benchmark[]>('load_benchmarks');
-
-      // Calcular estadísticas
-      const totalTests = allBenchmarks.length;
-      const uniqueGames = new Set(allBenchmarks.map(b => b.appid));
-      const totalGames = uniqueGames.size;
-
-      // Última prueba
-      const sortedByDate = [...allBenchmarks].sort((a, b) =>
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      );
-      const lastTestDate = sortedByDate.length > 0 ? sortedByDate[0].timestamp : null;
-
-      // Agrupar benchmarks por juego
-      const benchmarksByGame: Record<number, Benchmark[]> = {};
-      allBenchmarks.forEach(b => {
-        if (!benchmarksByGame[b.appid]) {
-          benchmarksByGame[b.appid] = [];
-        }
-        benchmarksByGame[b.appid].push(b);
-      });
-
-      // Calcular mejores mejoras
-      const improvements: Array<{
-        game_name: string;
-        improvement_percent: number;
-        parameter: string;
-        date: string;
-      }> = [];
-
-      Object.values(benchmarksByGame).forEach(gameBenchmarks => {
-        if (gameBenchmarks.length >= 2) {
-          // Ordenar por fecha
-          const sorted = [...gameBenchmarks].sort((a, b) =>
-            new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-          );
-
-          // Comparar el primero (base) con el último (optimizado)
-          const baseline = sorted[0];
-          const optimized = sorted[sorted.length - 1];
-
-          const improvementPercent = ((optimized.avg_fps - baseline.avg_fps) / baseline.avg_fps) * 100;
-
-          if (improvementPercent > 0) {
-            // Extraer parámetro del comando de lanzamiento
-            const params = optimized.launch_command.split(' ').filter(p => p !== '%command%' && p.includes('='));
-            const parameter = params.length > 0 ? params[params.length - 1] : 'Configuración optimizada';
-
-            improvements.push({
-              game_name: baseline.game_name,
-              improvement_percent: improvementPercent,
-              parameter: parameter,
-              date: optimized.timestamp,
-            });
-          }
-        }
-      });
-
-      // Ordenar mejoras y tomar las top 5
-      const bestImprovements = improvements
-        .sort((a, b) => b.improvement_percent - a.improvement_percent)
-        .slice(0, 5);
-
-      // Pruebas recientes (últimas 10)
-      const recentTests = sortedByDate.slice(0, 10).map(benchmark => {
-        const gameBenchmarks = benchmarksByGame[benchmark.appid];
-        const baseline = gameBenchmarks.reduce((min, b) =>
-          b.avg_fps < min.avg_fps ? b : min
-        , gameBenchmarks[0]);
-
-        const improvementPercent = ((benchmark.avg_fps - baseline.avg_fps) / baseline.avg_fps) * 100;
-
-        return {
-          game_name: benchmark.game_name,
-          baseline_fps: baseline.avg_fps,
-          optimized_fps: benchmark.avg_fps,
-          improvement_percent: improvementPercent,
-          date: benchmark.timestamp,
-        };
-      });
-
-      setStats({
-        total_tests: totalTests,
-        total_games: totalGames,
-        last_test_date: lastTestDate,
-        best_improvements: bestImprovements,
-        recent_tests: recentTests,
-      });
+      const list = await invoke<SavedComparison[]>('load_comparisons');
+      setItems(list);
     } catch (e) {
-      console.error('Error al cargar estadísticas:', e);
+      console.error('Error al cargar las pruebas guardadas:', e);
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    loadComparisons();
+    const onChanged = () => {
+      loadComparisons();
+    };
+    window.addEventListener(CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(CHANGED_EVENT, onChanged);
+  }, [loadComparisons]);
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  // Cerrar el cuadro de confirmación con Escape
+  useEffect(() => {
+    if (!confirmState) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmState(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [confirmState]);
+
+  const notifyChanged = () => window.dispatchEvent(new Event(CHANGED_EVENT));
+
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast('✓ Copiado al portapapeles');
+    } catch {
+      setToast('❌ No se pudo copiar');
+    }
   };
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
+  const deleteOne = async (id: string) => {
+    try {
+      await invoke('delete_comparison', { comparisonId: id });
+      if (selectedId === id) setSelectedId(null);
+      setToast('✓ Prueba eliminada');
+      notifyChanged();
+    } catch (e) {
+      setToast(`❌ Error al eliminar: ${e}`);
+    }
+  };
+
+  const deleteAll = async () => {
+    try {
+      await invoke('delete_all_comparisons');
+      setSelectedId(null);
+      setToast('✓ Se eliminaron todas las pruebas');
+      notifyChanged();
+    } catch (e) {
+      setToast(`❌ Error al eliminar: ${e}`);
+    }
+  };
+
+  const askDeleteOne = (c: SavedComparison) =>
+    setConfirmState({
+      title: 'Eliminar prueba',
+      message: `Se eliminará la prueba de ${c.game_name || 'este juego'}. Esta acción no se puede deshacer.`,
+      confirmLabel: 'Eliminar',
+      onConfirm: () => deleteOne(c.id),
+    });
+
+  const askDeleteAll = () =>
+    setConfirmState({
+      title: 'Borrar todas las pruebas',
+      message: `Se eliminarán las ${items.length} pruebas guardadas. Esta acción no se puede deshacer.`,
+      confirmLabel: 'Borrar todas',
+      onConfirm: deleteAll,
+    });
+
+  // Fecha relativa para la tarjeta "Última prueba"
+  const formatRelative = (dateString: string) => {
+    const date = parseDate(dateString);
+    const diffMs = Date.now() - date.getTime();
     const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
+    if (Number.isNaN(diffMs)) return dateString;
     if (diffHours < 1) return 'Hace menos de 1 hora';
     if (diffHours < 24) return `Hace ${diffHours} hora${diffHours > 1 ? 's' : ''}`;
     if (diffDays < 7) return `Hace ${diffDays} día${diffDays > 1 ? 's' : ''}`;
     return date.toLocaleDateString('es-ES');
   };
+
+  // Fecha y hora exactas en que se hizo la prueba
+  const formatFull = (dateString: string) => {
+    const date = parseDate(dateString);
+    if (Number.isNaN(date.getTime())) return dateString;
+    return date.toLocaleString('es-ES', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
+  const percentClass = (p: number) =>
+    p > 0 ? 'text-[var(--compatible)]' : p < 0 ? 'text-[var(--error)]' : 'text-[var(--text-muted)]';
+
+  const sorted = [...items].sort(
+    (a, b) => parseDate(testDateOf(b)).getTime() - parseDate(testDateOf(a)).getTime()
+  );
+  const selected = items.find((c) => c.id === selectedId) ?? null;
+
+  // ── Cuadro de confirmación y aviso (se muestran en todas las pantallas) ──
+  const overlays = (
+    <>
+      {toast && (
+        <div
+          role="status"
+          className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/20 text-sm font-semibold text-white"
+        >
+          {toast}
+        </div>
+      )}
+
+      {confirmState && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60"
+          onClick={() => setConfirmState(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-title"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--border)] shadow-2xl"
+          >
+            <h4 id="confirm-title" className="text-base font-bold text-[var(--text)] mb-2">
+              {confirmState.title}
+            </h4>
+            <p className="text-sm text-[var(--text-muted)] mb-5">{confirmState.message}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setConfirmState(null)}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const run = confirmState.onConfirm;
+                  setConfirmState(null);
+                  run();
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--error)] text-white hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+              >
+                {confirmState.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   if (loading) {
     return (
@@ -173,31 +382,95 @@ export function DashboardView() {
     );
   }
 
-  if (!stats || stats.total_tests === 0) {
+  /* ───────────────────────── Detalle de una prueba ───────────────────────── */
+  if (selected) {
+    return (
+      <div className="max-w-6xl mx-auto p-8 space-y-6">
+        <button
+          type="button"
+          onClick={() => setSelectedId(null)}
+          className="flex items-center gap-2 text-sm font-semibold text-[var(--text-muted)] hover:text-[var(--text)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] rounded"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Volver a Mis pruebas
+        </button>
+
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-xs text-[var(--text-muted)] mb-2">Prueba guardada</p>
+            <h2 className="text-2xl font-bold truncate">{selected.game_name || 'Desconocido'}</h2>
+            <p className="text-sm text-[var(--text-muted)] mt-1">
+              {formatFull(testDateOf(selected))} • {selected.before_fps.toFixed(1)} FPS → {selected.after_fps.toFixed(1)} FPS{' '}
+              <span className={`font-bold ${percentClass(selected.fps_change_percent)}`}>
+                ({selected.fps_change_percent > 0 ? '+' : ''}{selected.fps_change_percent.toFixed(1)}%)
+              </span>
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => askDeleteOne(selected)}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 transition-all duration-200 flex items-center gap-1.5 shrink-0"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Eliminar prueba
+          </button>
+        </div>
+
+        <ArgumentCard comparison={selected.comparison} onCopy={copyText} />
+
+        <ComparisonResultCard
+          comparison={selected.comparison}
+          onClose={() => setSelectedId(null)}
+          closeLabel="Volver a Mis pruebas"
+        />
+
+        {overlays}
+      </div>
+    );
+  }
+
+  /* ───────────────────────── Sin pruebas guardadas ───────────────────────── */
+  if (items.length === 0) {
     return (
       <div className="max-w-4xl mx-auto p-8">
         <div className="text-center py-16">
           <BarChart3 className="w-16 h-16 text-[var(--text-dim)] mx-auto mb-4" />
           <h2 className="text-2xl font-bold text-[var(--text)] mb-2">
-            No hay pruebas de rendimiento aún
+            No hay pruebas guardadas aún
           </h2>
           <p className="text-[var(--text-muted)] mb-6">
-            Comienza a probar diferentes configuraciones de juegos para ver tus estadísticas aquí
+            Aquí aparecerán las comparaciones que guardes para consultarlas cuando quieras
           </p>
           <div className="text-sm text-[var(--text-dim)]">
-            <p>💡 Consejo: Ve a la pestaña "Benchmarks" para comenzar a medir el rendimiento</p>
+            <p>💡 Consejo: en la pestaña "Benchmarks" compara dos grabaciones y pulsa "Guardar en Mis pruebas"</p>
           </div>
         </div>
+        {overlays}
       </div>
     );
   }
 
+  /* ───────────────────────────── Estadísticas ───────────────────────────── */
+  const totalGames = new Set(items.map((c) => normGame(c.game_name))).size;
+  const lastTestDate = sorted.length > 0 ? testDateOf(sorted[0]) : null;
+
   return (
     <div className="max-w-6xl mx-auto p-8 space-y-6">
       {/* Header */}
-      <div>
-        <p className="text-xs text-[var(--text-muted)] mb-2">Dashboard</p>
-        <h2 className="text-2xl font-bold">Mis pruebas de rendimiento</h2>
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <p className="text-xs text-[var(--text-muted)] mb-2">Dashboard</p>
+          <h2 className="text-2xl font-bold">Mis pruebas de rendimiento</h2>
+        </div>
+        <button
+          type="button"
+          onClick={askDeleteAll}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 transition-all duration-200 flex items-center gap-1.5 group"
+          title="Eliminar todas las pruebas guardadas"
+        >
+          <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
+          Borrar todas las pruebas
+        </button>
       </div>
 
       {/* Estadísticas generales */}
@@ -214,7 +487,7 @@ export function DashboardView() {
             </div>
             <div>
               <p className="text-xs text-[var(--text-muted)]">Total de pruebas</p>
-              <p className="text-2xl font-bold text-[var(--text)]">{stats.total_tests}</p>
+              <p className="text-2xl font-bold text-[var(--text)]">{items.length}</p>
             </div>
           </div>
         </motion.div>
@@ -231,7 +504,7 @@ export function DashboardView() {
             </div>
             <div>
               <p className="text-xs text-[var(--text-muted)]">Juegos probados</p>
-              <p className="text-2xl font-bold text-[var(--text)]">{stats.total_games}</p>
+              <p className="text-2xl font-bold text-[var(--text)]">{totalGames}</p>
             </div>
           </div>
         </motion.div>
@@ -249,96 +522,82 @@ export function DashboardView() {
             <div>
               <p className="text-xs text-[var(--text-muted)]">Última prueba</p>
               <p className="text-lg font-bold text-[var(--text)]">
-                {stats.last_test_date ? formatDate(stats.last_test_date) : 'N/A'}
+                {lastTestDate ? formatRelative(lastTestDate) : 'N/A'}
               </p>
             </div>
           </div>
         </motion.div>
       </div>
 
-      {/* Mejores mejoras */}
-      {stats.best_improvements.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.4 }}
-          className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
-        >
-          <h3 className="text-base font-bold mb-4 flex items-center gap-2 text-[var(--text)]">
-            <Award className="w-5 h-5 text-[var(--caution)]" />
-            Mejores mejoras descubiertas
-          </h3>
-          <div className="space-y-3">
-            {stats.best_improvements.map((improvement, index) => (
-              <div
-                key={index}
-                className="flex items-center justify-between p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-[var(--caution)]/20 text-[var(--caution)] flex items-center justify-center text-sm font-bold">
-                    {index + 1}
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-[var(--text)]">{improvement.game_name}</p>
-                    <p className="text-xs text-[var(--text-muted)]">{improvement.parameter}</p>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <p className="text-lg font-bold text-[var(--compatible)]">
-                    +{improvement.improvement_percent.toFixed(1)}%
+      {/* Pruebas guardadas */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.5 }}
+        className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
+      >
+        <h3 className="text-base font-bold mb-1 flex items-center gap-2 text-[var(--text)]">
+          <TrendingUp className="w-5 h-5 text-[var(--action)]" />
+          Pruebas recientes
+        </h3>
+        <p className="text-xs text-[var(--text-muted)] mb-4">
+          Haz clic en una prueba para ver la comparación completa.
+        </p>
+        <div className="space-y-2">
+          {sorted.map((test) => (
+            <div
+              key={test.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelectedId(test.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedId(test.id);
+                }
+              }}
+              className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Gamepad2 className="w-5 h-5 text-[var(--text-muted)] shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-[var(--text)] truncate">{test.game_name || 'Desconocido'}</p>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    {test.before_fps.toFixed(1)} FPS → {test.after_fps.toFixed(1)} FPS
                   </p>
-                  <p className="text-xs text-[var(--text-dim)]">{formatDate(improvement.date)}</p>
                 </div>
               </div>
-            ))}
-          </div>
-        </motion.div>
-      )}
 
-      {/* Pruebas recientes */}
-      {stats.recent_tests.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.5 }}
-          className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
-        >
-          <h3 className="text-base font-bold mb-4 flex items-center gap-2 text-[var(--text)]">
-            <TrendingUp className="w-5 h-5 text-[var(--action)]" />
-            Pruebas recientes
-          </h3>
-          <div className="space-y-2">
-            {stats.recent_tests.map((test, index) => (
-              <div
-                key={index}
-                className="flex items-center justify-between p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <Gamepad2 className="w-5 h-5 text-[var(--text-muted)]" />
-                  <div>
-                    <p className="text-sm font-semibold text-[var(--text)]">{test.game_name}</p>
-                    <p className="text-xs text-[var(--text-muted)]">
-                      {test.baseline_fps.toFixed(1)} FPS → {test.optimized_fps.toFixed(1)} FPS
-                    </p>
-                  </div>
-                </div>
+              <div className="flex items-center gap-3 shrink-0">
                 <div className="text-right">
-                  <p className={`text-sm font-bold ${
-                    test.improvement_percent > 0
-                      ? 'text-[var(--compatible)]'
-                      : test.improvement_percent < 0
-                        ? 'text-[var(--error)]'
-                        : 'text-[var(--text-muted)]'
-                  }`}>
-                    {test.improvement_percent > 0 ? '+' : ''}{test.improvement_percent.toFixed(1)}%
+                  <p className={`text-sm font-bold ${percentClass(test.fps_change_percent)}`}>
+                    {test.fps_change_percent > 0 ? '+' : ''}{test.fps_change_percent.toFixed(1)}%
                   </p>
-                  <p className="text-xs text-[var(--text-dim)]">{formatDate(test.date)}</p>
+                  <p className="text-xs text-[var(--text-dim)]">{formatFull(testDateOf(test))}</p>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    askDeleteOne(test);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 hover:scale-110 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+                  title="Eliminar esta prueba"
+                  aria-label={`Eliminar la prueba de ${test.game_name || 'este juego'}`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+
+                <ChevronRight className="w-4 h-4 text-[var(--text-dim)]" />
               </div>
-            ))}
-          </div>
-        </motion.div>
-      )}
+            </div>
+          ))}
+        </div>
+      </motion.div>
+
+      {overlays}
     </div>
   );
 }

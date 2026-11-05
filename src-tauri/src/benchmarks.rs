@@ -41,6 +41,52 @@ struct StutterStats {
     worst_frame_ms: f64,
 }
 
+/// Percentil con interpolación lineal sobre un vector YA ORDENADO de menor a mayor.
+/// `p` va de 0 a 100. Es más estable que promediar "el peor 1%" cuando hay pocas muestras
+/// (MangoHud guarda ~10 filas por segundo, no un frame por fila).
+fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let rank = (p / 100.0).clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let frac = rank - lo as f64;
+    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+}
+
+/// Una fila válida del log de MangoHud.
+struct Sample {
+    fps: f64,
+    frame_time: f64,
+    elapsed_ns: Option<f64>,
+}
+
+/// MangoHud repite el último valor cuando el juego no entrega frames nuevos
+/// (pantalla de carga, alt-tab, pausa). Esas filas "pegadas" no son frames reales y
+/// distorsionan el promedio, así que se descartan las repetidas consecutivas.
+/// Con 6 decimales es prácticamente imposible que dos muestras reales sean idénticas.
+fn drop_stuck_samples(samples: Vec<Sample>) -> (Vec<Sample>, usize) {
+    let total = samples.len();
+    let mut cleaned: Vec<Sample> = Vec::with_capacity(total);
+
+    for s in samples {
+        let is_repeat = cleaned
+            .last()
+            .map(|prev| prev.fps == s.fps && prev.frame_time == s.frame_time)
+            .unwrap_or(false);
+        if !is_repeat {
+            cleaned.push(s);
+        }
+    }
+
+    let removed = total - cleaned.len();
+    (cleaned, removed)
+}
+
 fn compute_stutter(frame_times: &[f64], duration_seconds: f64) -> StutterStats {
     let n = frame_times.len();
 
@@ -137,6 +183,24 @@ fn save_benchmarks_data(data: &BenchmarksData) -> Result<(), String> {
     Ok(())
 }
 
+/// Lee como máximo `max_bytes` del inicio de un archivo (como texto, tolerando bytes raros).
+fn read_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// MangoHud crea además un `<nombre>_summary.csv` con estadísticas ya calculadas.
+/// No sirve para el análisis frame a frame, así que se ignora.
+fn is_summary_file(path: &Path) -> bool {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase().ends_with("_summary"))
+        .unwrap_or(false)
+}
+
 fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
     let mut log_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
 
@@ -149,8 +213,10 @@ fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
                 } else if path.is_file() {
                     if let Some(ext) = path.extension() {
                         let ext_str = ext.to_string_lossy().to_lowercase();
-                        if ext_str == "csv" || ext_str == "log" {
-                            if let Ok(content) = fs::read_to_string(&path) {
+                        if (ext_str == "csv" || ext_str == "log") && !is_summary_file(&path) {
+                            // Solo se lee el inicio del archivo: basta para ver el header
+                            // y evita cargar en memoria logs enormes de otras aplicaciones.
+                            if let Ok(content) = read_head(&path, 4096) {
                                 let has_valid_format = content.lines().any(|line| {
                                     let lower = line.to_lowercase();
                                     lower.contains("fps,frametime")
@@ -335,11 +401,11 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     let content = fs::read_to_string(&file_path)
         .map_err(|e| format!("Error al leer el archivo {:?}: {}", file_path, e))?;
 
-    let mut fps_values: Vec<f64> = Vec::new();
-    let mut frame_times: Vec<f64> = Vec::new();
+    let mut raw_samples: Vec<Sample> = Vec::new();
 
     let mut fps_column: usize = 0;
     let mut frametime_column: usize = 1;
+    let mut elapsed_column: Option<usize> = None;
     let mut data_start_line: usize = 0;
 
     for (line_idx, line) in content.lines().enumerate() {
@@ -354,6 +420,8 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
                     fps_column = i;
                 } else if h == "frametime" {
                     frametime_column = i;
+                } else if h == "elapsed" {
+                    elapsed_column = Some(i);
                 }
             }
 
@@ -363,8 +431,8 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
                 line_idx + 1
             );
             println!(
-                "[Benchmark] Columnas: fps={}, frametime={}",
-                fps_column, frametime_column
+                "[Benchmark] Columnas: fps={}, frametime={}, elapsed={:?}",
+                fps_column, frametime_column, elapsed_column
             );
             break;
         }
@@ -382,56 +450,93 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
                 parts[fps_column].trim().parse::<f64>(),
                 parts[frametime_column].trim().parse::<f64>(),
             ) {
-                if fps > 0.0 && frame_time > 0.0 {
-                    fps_values.push(fps);
-                    frame_times.push(frame_time);
+                // is_finite descarta NaN/inf, que romperían los ordenamientos más abajo
+                if fps.is_finite() && frame_time.is_finite() && fps > 0.0 && frame_time > 0.0 {
+                    let elapsed_ns = elapsed_column
+                        .and_then(|c| parts.get(c))
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                        .filter(|v| v.is_finite());
+
+                    raw_samples.push(Sample {
+                        fps,
+                        frame_time,
+                        elapsed_ns,
+                    });
                 }
             }
         }
     }
 
-    println!(
-        "[Benchmark] Frames válidos encontrados: {}",
-        fps_values.len()
-    );
+    // La duración se mide con el reloj real de la grabación (columna `elapsed`, en
+    // nanosegundos) ANTES de limpiar muestras repetidas, para no acortarla.
+    // MangoHud guarda ~1 fila cada 100 ms, así que sumar los frametimes (lo que se hacía
+    // antes) daba ~7 s en una grabación de 60 s.
+    let elapsed_only: Vec<f64> = raw_samples.iter().filter_map(|s| s.elapsed_ns).collect();
+    let duration_seconds = if elapsed_only.len() >= 2 {
+        let first = elapsed_only[0];
+        let last = elapsed_only[elapsed_only.len() - 1];
+        ((last - first) / 1e9).max(0.0)
+    } else {
+        // Respaldo para logs sin columna `elapsed`
+        raw_samples.iter().map(|s| s.frame_time).sum::<f64>() / 1000.0
+    };
 
-    if fps_values.len() < 100 {
+    let (samples, stuck_removed) = drop_stuck_samples(raw_samples);
+
+    println!(
+        "[Benchmark] Muestras válidas: {} (descartadas {} repetidas/pegadas)",
+        samples.len(),
+        stuck_removed
+    );
+    println!("[Benchmark] Duración real de la grabación: {:.1} s", duration_seconds);
+
+    if samples.len() < 100 {
         return Err(format!(
-            "El log tiene muy pocos frames ({} encontrados, mínimo 100 requeridos).\n\n\
+            "El log tiene muy pocas muestras ({} útiles, mínimo 100 requeridas).\n\n\
             Graba el log durante al menos 30 segundos (lo ideal es 60).",
-            fps_values.len()
+            samples.len()
         ));
     }
 
+    let fps_values: Vec<f64> = samples.iter().map(|s| s.fps).collect();
+    let frame_times: Vec<f64> = samples.iter().map(|s| s.frame_time).collect();
+
+    // Las muestras están espaciadas de forma uniforme en el tiempo, así que el promedio
+    // simple de FPS equivale a (frames totales / tiempo total).
     let total_frames = fps_values.len() as u64;
     let avg_fps = fps_values.iter().sum::<f64>() / fps_values.len() as f64;
-    let max_fps = fps_values.iter().cloned().fold(0.0, f64::max);
-    let min_fps = fps_values.iter().cloned().fold(f64::MAX, f64::min);
-
     let frame_time_avg = frame_times.iter().sum::<f64>() / frame_times.len() as f64;
-    let duration_seconds = frame_times.iter().sum::<f64>() / 1000.0;
 
+    // Máximo y mínimo "absolutos" son muy sensibles a una sola muestra rara (por ejemplo
+    // una fila de 8 FPS por un tirón puntual). Se usan los percentiles 99,9 y 0,1 de FPS.
     let mut sorted_fps = fps_values.clone();
-    sorted_fps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let one_percent_index = (sorted_fps.len() as f64 * 0.01).ceil() as usize;
-    let fps_1_percent_low =
-        sorted_fps[..one_percent_index].iter().sum::<f64>() / one_percent_index as f64;
+    sorted_fps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let max_fps = percentile_sorted(&sorted_fps, 99.9);
+    let min_fps = percentile_sorted(&sorted_fps, 0.1);
 
-    let zero_one_percent_index = (sorted_fps.len() as f64 * 0.001).ceil() as usize;
-    let fps_0_1_percent_low =
-        sorted_fps[..zero_one_percent_index].iter().sum::<f64>() / zero_one_percent_index as f64;
+    // Los "lows" se calculan sobre el frametime (como hacen CapFrameX y similares):
+    // 1% low = FPS equivalentes al percentil 99 del frametime.
+    // Con ~600 muestras, promediar "el peor 1%" serían solo ~6 filas y un valor extremo
+    // lo arrastraría; el percentil con interpolación es mucho más estable.
+    let mut sorted_ft = frame_times.clone();
+    sorted_ft.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut sorted_frame_times = frame_times.clone();
-    sorted_frame_times.sort_by(|a, b| b.partial_cmp(a).unwrap());
-    let one_percent_ft_index = (sorted_frame_times.len() as f64 * 0.01).ceil() as usize;
-    let frame_time_1_percent_high = sorted_frame_times[..one_percent_ft_index]
-        .iter()
-        .sum::<f64>()
-        / one_percent_ft_index as f64;
+    let p99_ft = percentile_sorted(&sorted_ft, 99.0);
+    let p999_ft = percentile_sorted(&sorted_ft, 99.9);
+    let fps_1_percent_low = 1000.0 / p99_ft;
+    let fps_0_1_percent_low = 1000.0 / p999_ft;
+
+    // Promedio de los frametimes que superan el percentil 99 (el "1% más lento").
+    let worst: Vec<f64> = sorted_ft.iter().cloned().filter(|&f| f >= p99_ft).collect();
+    let frame_time_1_percent_high = if worst.is_empty() {
+        p99_ft
+    } else {
+        worst.iter().sum::<f64>() / worst.len() as f64
+    };
 
     let stutter = compute_stutter(&frame_times, duration_seconds);
 
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
 
     println!("[Benchmark] ✅ Análisis completado:");
     println!("[Benchmark]    Juego: {}", game_name);
@@ -443,7 +548,7 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     println!("[Benchmark] ============================================");
 
     Ok(Benchmark {
-        id: format!("bench_{}", now.replace([':', ' ', '-'], "")),
+        id: format!("bench_{}", now.replace([':', ' ', '-', '.'], "")),
         profile_id: String::new(),
         game_name: game_name,
         appid: 0,
@@ -464,6 +569,39 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         jitter_ms: Some(stutter.jitter_ms),
         worst_frame_ms: Some(stutter.worst_frame_ms),
     })
+}
+
+/// Nombre de juego normalizado para compararlo (minúsculas y sin extensión de ejecutable).
+fn norm_game_name(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    for suffix in [".x86_64", ".x86", ".exe", ".bin"] {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            return stripped.trim().to_string();
+        }
+    }
+    lower
+}
+
+/// ¿Las dos grabaciones son del mismo juego? Se usa el appid de Steam cuando ambos lo
+/// tienen; si no, se compara el nombre.
+fn same_game(a: &Benchmark, b: &Benchmark) -> bool {
+    if a.appid != 0 && b.appid != 0 {
+        a.appid == b.appid
+    } else {
+        norm_game_name(&a.game_name) == norm_game_name(&b.game_name)
+    }
+}
+
+/// Deja solo el Antes (primero) y el Después (último). Sirve para archivos guardados
+/// con versiones antiguas, que podían tener muchas grabaciones. No modifica el archivo.
+fn pair_only(mut list: Vec<Benchmark>) -> Vec<Benchmark> {
+    if list.len() > 2 {
+        if let Some(last) = list.pop() {
+            list.truncate(1);
+            list.push(last);
+        }
+    }
+    list
 }
 
 #[tauri::command]
@@ -489,6 +627,17 @@ pub fn save_benchmark(
     benchmark.launch_command = launch_command;
     benchmark.notes = notes;
 
+    // Política "un Antes y un Después": se guardan como máximo 2 grabaciones.
+    //   [0] = Antes   (la primera, se mantiene como punto de partida)
+    //   [1] = Después (la más reciente; una grabación nueva reemplaza a la anterior)
+    // Si la grabación nueva es de OTRO juego, empieza una prueba nueva desde cero,
+    // porque comparar juegos distintos no tiene sentido.
+    if let Some(first) = data.benchmarks.first() {
+        if !same_game(first, &benchmark) {
+            data.benchmarks.clear();
+        }
+    }
+    data.benchmarks.truncate(1); // también limpia archivos antiguos con más de 2
     data.benchmarks.push(benchmark.clone());
     save_benchmarks_data(&data)?;
 
@@ -498,18 +647,18 @@ pub fn save_benchmark(
 #[tauri::command]
 pub fn load_benchmarks() -> Result<Vec<Benchmark>, String> {
     let data = load_benchmarks_data();
-    Ok(data.benchmarks)
+    Ok(pair_only(data.benchmarks))
 }
 
 #[tauri::command]
 pub fn load_benchmarks_for_game(appid: u32) -> Result<Vec<Benchmark>, String> {
     let data = load_benchmarks_data();
-    let benchmarks = data
+    let benchmarks: Vec<Benchmark> = data
         .benchmarks
         .into_iter()
         .filter(|b| b.appid == appid)
         .collect();
-    Ok(benchmarks)
+    Ok(pair_only(benchmarks))
 }
 
 #[tauri::command]
@@ -552,42 +701,66 @@ pub fn compare_benchmarks(
         .ok_or("Benchmark de prueba no encontrado")?
         .clone();
 
-    let fps_change_percent = ((test.avg_fps - baseline.avg_fps) / baseline.avg_fps) * 100.0;
-    let fps_1_percent_change_percent = ((test.fps_1_percent_low - baseline.fps_1_percent_low)
-        / baseline.fps_1_percent_low)
-        * 100.0;
-    let fps_0_1_percent_change_percent =
-        ((test.fps_0_1_percent_low - baseline.fps_0_1_percent_low) / baseline.fps_0_1_percent_low)
-            * 100.0;
-    let frame_time_change_percent =
-        ((test.frame_time_avg - baseline.frame_time_avg) / baseline.frame_time_avg) * 100.0;
+    // Cambio porcentual de `b` respecto a `a`. Si `a` es 0 (dato inválido) devuelve 0
+    // en vez de infinito o NaN.
+    fn pct_change(a: f64, b: f64) -> f64 {
+        if a.abs() < f64::EPSILON {
+            0.0
+        } else {
+            (b - a) / a * 100.0
+        }
+    }
 
-    let conclusion = if fps_change_percent > 5.0 && fps_1_percent_change_percent < -5.0 {
+    let fps_change_percent = pct_change(baseline.avg_fps, test.avg_fps);
+    let fps_1_percent_change_percent =
+        pct_change(baseline.fps_1_percent_low, test.fps_1_percent_low);
+    let fps_0_1_percent_change_percent =
+        pct_change(baseline.fps_0_1_percent_low, test.fps_0_1_percent_low);
+    let frame_time_change_percent = pct_change(baseline.frame_time_avg, test.frame_time_avg);
+
+    // Entre dos grabaciones del mismo juego en las mismas condiciones, el propio ruido ronda
+    // el 2-3 %. Por debajo de ese margen no se puede afirmar que haya mejora ni empeoramiento.
+    const NOISE: f64 = 3.0;
+
+    let mut conclusion = if fps_change_percent > NOISE && fps_1_percent_change_percent < -NOISE {
         format!(
-            "⚠️ Más FPS promedio (+{:.1}%) pero el 1% Low empeora ({:.1}%): puede haber más tirones",
+            "⚠️ Más FPS promedio (+{:.1}%) pero los peores momentos empeoran ({:.1}%): puede haber más tirones",
             fps_change_percent, fps_1_percent_change_percent
         )
-    } else if fps_change_percent > 5.0 {
+    } else if fps_change_percent < -NOISE && fps_1_percent_change_percent > NOISE {
         format!(
-            "✅ Mejora significativa: +{:.1}% FPS promedio",
+            "⚠️ Menos FPS promedio ({:.1}%) pero los peores momentos mejoran (+{:.1}%): el juego puede sentirse más parejo",
+            fps_change_percent, fps_1_percent_change_percent
+        )
+    } else if fps_change_percent > NOISE {
+        format!(
+            "✅ Mejora: +{:.1}% FPS promedio",
             fps_change_percent
         )
-    } else if fps_change_percent > 0.0 {
-        format!(
-            "🟡 Mejora marginal: +{:.1}% FPS promedio",
-            fps_change_percent
-        )
-    } else if fps_change_percent > -5.0 {
-        format!(
-            "🟡 Cambio insignificante: {:.1}% FPS promedio",
-            fps_change_percent
-        )
-    } else {
+    } else if fps_change_percent < -NOISE {
         format!(
             "❌ Rendimiento degradado: {:.1}% FPS promedio",
             fps_change_percent
         )
+    } else {
+        format!(
+            "🟡 Sin diferencia clara ({:+.1}% FPS promedio, dentro del margen normal de ±{:.0}%)",
+            fps_change_percent, NOISE
+        )
     };
+
+    // Avisos que ayudan a no sacar conclusiones erróneas
+    if baseline.game_name != test.game_name {
+        conclusion.push_str(&format!(
+            "\nℹ️ Son juegos distintos ({} vs {}): la comparación no es válida.",
+            baseline.game_name, test.game_name
+        ));
+    }
+    if baseline.duration_seconds < 20.0 || test.duration_seconds < 20.0 {
+        conclusion.push_str(
+            "\nℹ️ Alguna grabación dura menos de 20 s: el resultado puede no ser fiable.",
+        );
+    }
 
     Ok(BenchmarkComparison {
         baseline,
@@ -605,15 +778,59 @@ pub fn analyze_mangohud_log_command(log_path: String) -> Result<Benchmark, Strin
     analyze_mangohud_log(&log_path)
 }
 
+/// Lee el valor de una clave de MangoHud.conf (`clave=valor` o `clave = valor`).
+/// Ignora comentarios (#) y toma la ÚLTIMA aparición, igual que MangoHud.
+fn read_conf_value(content: &str, key: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                found = Some(v.trim().to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Expande `~` al directorio personal.
+fn expand_home(path: &str, home: &str) -> String {
+    if path == "~" {
+        home.to_string()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", home, rest)
+    } else {
+        path.to_string()
+    }
+}
+
 #[tauri::command]
 pub fn detect_mangohud_log_path() -> Result<String, String> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
 
+    // 1) Lo más fiable: la carpeta que el propio usuario configuró en MangoHud.
+    for config_path in mangohud_conf_paths() {
+        if let Ok(content) = fs::read_to_string(&config_path) {
+            if let Some(folder) = read_conf_value(&content, "output_folder") {
+                let folder = expand_home(&folder, &home);
+                if !folder.is_empty() && Path::new(&folder).is_dir() {
+                    println!("[Detect] Ruta desde config: {}", folder);
+                    return Ok(folder);
+                }
+            }
+        }
+    }
+
+    // 2) Carpetas habituales que ya contengan logs de MangoHud
     let possible_paths = vec![
         format!("{}/.local/share/goverlay", home),
         format!("{}/.local/share/goverlay/logs", home),
         format!("{}/.local/share/MangoHud", home),
         format!("{}/.local/share/MangoHud/logs", home),
+        format!("{}/MangoHud", home),
         format!("{}/.config/MangoHud", home),
         format!("{}/.config/goverlay", home),
         "/tmp/MangoHud".to_string(),
@@ -629,90 +846,42 @@ pub fn detect_mangohud_log_path() -> Result<String, String> {
 
     for path in &possible_paths {
         let p = Path::new(path);
-        if p.exists() && p.is_dir() {
-            if let Ok(entries) = fs::read_dir(p) {
-                for entry in entries.flatten() {
-                    let file_path = entry.path();
-                    if let Some(ext) = file_path.extension() {
-                        if ext.to_string_lossy().to_lowercase() == "csv" {
-                            println!("[Detect] Encontrados CSV en: {}", path);
-                            return Ok(path.clone());
-                        }
-                    }
-                }
-            }
+        if p.is_dir() && dir_has_mangohud_log(p) {
+            println!("[Detect] Encontrados logs de MangoHud en: {}", path);
+            return Ok(path.clone());
         }
     }
 
-    let config_paths = vec![
-        format!("{}/.config/MangoHud/MangoHud.conf", home),
-        format!("{}/.config/goverlay/MangoHud.conf", home),
-    ];
-
-    for config_path in config_paths {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.starts_with("output_folder=") {
-                    let folder = line.trim_start_matches("output_folder=").trim();
-                    if !folder.is_empty() && Path::new(folder).exists() {
-                        println!("[Detect] Ruta desde config: {}", folder);
-                        return Ok(folder.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    let search_dirs = vec![
-        format!("{}/.local/share", home),
-        format!("{}/.config", home),
-    ];
-
-    for search_dir in search_dirs {
-        let p = Path::new(&search_dir);
-        if p.exists() {
-            if let Some(found) = find_csv_in_dir_limited(p, 2) {
-                println!("[Detect] Encontrado recursivamente: {}", found);
-                return Ok(found);
-            }
-        }
-    }
-
-    let goverly_path = format!("{}/.local/share/goverlay", home);
-    if Path::new(&goverly_path).exists() {
-        return Ok(goverly_path);
+    // 3) Último recurso: carpeta por defecto (aunque aún esté vacía)
+    let goverlay_path = format!("{}/.local/share/goverlay", home);
+    if Path::new(&goverlay_path).exists() {
+        return Ok(goverlay_path);
     }
 
     Ok("/tmp/MangoHud".to_string())
 }
 
-fn find_csv_in_dir_limited(dir: &Path, max_depth: usize) -> Option<String> {
-    if max_depth == 0 || !dir.is_dir() {
-        return None;
-    }
-
+/// ¿Hay en esta carpeta (sin entrar en subcarpetas) algún CSV con formato de log de MangoHud?
+/// Se comprueba el header para no confundirlo con un CSV cualquiera de otra aplicación.
+fn dir_has_mangohud_log(dir: &Path) -> bool {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let path = entry.path();
-
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext.to_string_lossy().to_lowercase() == "csv" {
-                        return path.parent().map(|p| p.to_string_lossy().to_string());
+            let p = entry.path();
+            let is_csv = p
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase() == "csv")
+                .unwrap_or(false);
+            if is_csv && !is_summary_file(&p) {
+                if let Ok(head) = read_head(&p, 4096) {
+                    let lower = head.to_lowercase();
+                    if lower.contains("fps,frametime") {
+                        return true;
                     }
-                }
-            }
-
-            if path.is_dir() {
-                if let Some(found) = find_csv_in_dir_limited(&path, max_depth - 1) {
-                    return Some(found);
                 }
             }
         }
     }
-
-    None
+    false
 }
 
 #[tauri::command]
@@ -778,11 +947,9 @@ fn mangohud_conf_paths() -> Vec<std::path::PathBuf> {
 pub fn get_mangohud_log_duration() -> Result<u32, String> {
     for path in mangohud_conf_paths() {
         if let Ok(content) = fs::read_to_string(&path) {
-            for line in content.lines() {
-                if let Some(value) = line.trim().strip_prefix("log_duration=") {
-                    if let Ok(n) = value.trim().parse::<u32>() {
-                        return Ok(n);
-                    }
+            if let Some(value) = read_conf_value(&content, "log_duration") {
+                if let Ok(n) = value.parse::<u32>() {
+                    return Ok(n);
                 }
             }
         }
@@ -819,7 +986,12 @@ pub fn set_mangohud_log_duration(seconds: u32) -> Result<u32, String> {
         let mut lines: Vec<String> = content
             .lines()
             .map(|line| {
-                if line.trim().starts_with("log_duration=") {
+                let is_duration_line = !line.trim().starts_with('#')
+                    && line
+                        .split_once('=')
+                        .map(|(k, _)| k.trim() == "log_duration")
+                        .unwrap_or(false);
+                if is_duration_line {
                     found = true;
                     new_line.clone()
                 } else {
@@ -850,4 +1022,122 @@ pub fn set_mangohud_log_duration(seconds: u32) -> Result<u32, String> {
     }
 
     Ok(seconds)
+}
+
+// ───────────────────────── Pruebas guardadas ("Mis pruebas") ─────────────────────────
+//
+// Cuando el usuario pulsa "Guardar en Mis pruebas" se guarda una COPIA completa de la
+// comparación (Antes + Después + resultado). Así no se pierde aunque después se grabe
+// otra prueba y el Antes/Después de la pantalla Benchmarks se reemplace.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedComparison {
+    pub id: String,
+    /// Cuándo se pulsó "Guardar" (la fecha de la prueba es `comparison.test.timestamp`).
+    pub saved_at: String,
+    pub game_name: String,
+    pub before_fps: f64,
+    pub after_fps: f64,
+    pub fps_change_percent: f64,
+    pub comparison: BenchmarkComparison,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedComparisonsData {
+    comparisons: Vec<SavedComparison>,
+}
+
+fn get_saved_comparisons_file() -> std::path::PathBuf {
+    get_benchmarks_dir().join("saved_comparisons.json")
+}
+
+fn load_saved_data() -> SavedComparisonsData {
+    let file = get_saved_comparisons_file();
+
+    if file.exists() {
+        if let Ok(content) = fs::read_to_string(&file) {
+            match serde_json::from_str::<SavedComparisonsData>(&content) {
+                Ok(data) => return data,
+                Err(e) => {
+                    // El archivo existe pero no se pudo leer: se guarda una copia antes de
+                    // que un guardado posterior lo sobrescriba con una lista vacía.
+                    println!("[Pruebas] ⚠️ saved_comparisons.json ilegible: {}", e);
+                    let backup = file.with_extension("json.corrupt.bak");
+                    fs::write(&backup, &content).ok();
+                }
+            }
+        }
+    }
+
+    SavedComparisonsData {
+        comparisons: Vec::new(),
+    }
+}
+
+fn save_saved_data(data: &SavedComparisonsData) -> Result<(), String> {
+    let content =
+        serde_json::to_string_pretty(data).map_err(|e| format!("Error al serializar: {}", e))?;
+    fs::write(get_saved_comparisons_file(), content)
+        .map_err(|e| format!("Error al guardar: {}", e))
+}
+
+/// Guarda en "Mis pruebas" la comparación entre dos benchmarks (copia completa).
+#[tauri::command]
+pub fn save_comparison(baseline_id: String, test_id: String) -> Result<SavedComparison, String> {
+    let comparison = compare_benchmarks(baseline_id, test_id)?;
+    let mut data = load_saved_data();
+
+    let already_saved = data.comparisons.iter().any(|c| {
+        c.comparison.baseline.id == comparison.baseline.id
+            && c.comparison.test.id == comparison.test.id
+    });
+    if already_saved {
+        return Err("Esta comparación ya está guardada en Mis pruebas.".to_string());
+    }
+
+    let now = chrono::Local::now();
+    let game_name = if comparison.test.game_name.is_empty() {
+        comparison.baseline.game_name.clone()
+    } else {
+        comparison.test.game_name.clone()
+    };
+    let before_fps = comparison.baseline.avg_fps;
+    let after_fps = comparison.test.avg_fps;
+    let fps_change_percent = comparison.fps_change_percent;
+
+    let saved = SavedComparison {
+        id: format!("cmp_{}", now.format("%Y%m%d%H%M%S%3f")),
+        saved_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        game_name,
+        before_fps,
+        after_fps,
+        fps_change_percent,
+        comparison,
+    };
+
+    data.comparisons.push(saved.clone());
+    save_saved_data(&data)?;
+
+    println!("[Pruebas] ✅ Comparación guardada: {}", saved.game_name);
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn load_comparisons() -> Result<Vec<SavedComparison>, String> {
+    Ok(load_saved_data().comparisons)
+}
+
+#[tauri::command]
+pub fn delete_comparison(comparison_id: String) -> Result<(), String> {
+    let mut data = load_saved_data();
+    data.comparisons.retain(|c| c.id != comparison_id);
+    save_saved_data(&data)
+}
+
+#[tauri::command]
+pub fn delete_all_comparisons() -> Result<(), String> {
+    let data = SavedComparisonsData {
+        comparisons: Vec::new(),
+    };
+    save_saved_data(&data)
 }

@@ -143,6 +143,10 @@ fn main() {
             scan_external_launchers,
             benchmarks::get_mangohud_log_duration,
             benchmarks::set_mangohud_log_duration,
+            benchmarks::save_comparison,
+            benchmarks::load_comparisons,
+            benchmarks::delete_comparison,
+            benchmarks::delete_all_comparisons,
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la app");

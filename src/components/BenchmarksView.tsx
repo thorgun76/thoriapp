@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  Upload, Trash2, BarChart3, AlertCircle, Zap, Target, FileText, Search,
+  Upload, Trash2, BarChart3, AlertCircle, Zap, FileText, Search,
   Clock, Gamepad2, Gauge, Activity, ChevronDown, Timer, ThumbsUp, ThumbsDown,
-  Scale, Info,
+  Scale, Info, Save, Check,
 } from 'lucide-react';
 
 /* ────────────────────────────── Tipos ────────────────────────────── */
@@ -33,7 +33,7 @@ interface Benchmark {
   worst_frame_ms?: number | null;
 }
 
-interface BenchmarkComparison {
+export interface BenchmarkComparison {
   baseline: Benchmark;
   test: Benchmark;
   fps_change_percent: number;
@@ -53,7 +53,7 @@ interface BenchmarksViewProps {
 
 /* ─────────────────────── Constantes y utilidades ─────────────────────── */
 
-// Base = azul (#38bdf8), Prueba = amarillo (--caution). Verde y rojo se reservan para "mejor" y "peor".
+// Antes = azul (#38bdf8), Después = amarillo (--caution). Verde y rojo se reservan para "mejor" y "peor".
 
 // Diferencias menores a este % se consideran "igual" (MangoHud tiene algo de ruido entre grabaciones)
 const TIE = 5;
@@ -228,8 +228,8 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (smooth < -TIE) {
     return {
       ...base, kind: 'base',
-      title: 'La Base gana',
-      detail: speed < -TIE ? 'La Prueba va más lenta y con más tirones.' : 'La Prueba se siente menos suave.',
+      title: 'Gana el Antes',
+      detail: speed < -TIE ? 'El Después va más lento y con más tirones.' : 'El Después se siente menos suave.',
       advice: 'Mejor desactiva este cambio.',
     };
   }
@@ -244,7 +244,7 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (smooth > TIE) {
     return {
       ...base, kind: 'test',
-      title: 'La Prueba gana',
+      title: 'Gana el Después',
       detail: speed > TIE ? 'Va más rápido y se siente más suave.' : 'Se siente más suave, con la misma velocidad.',
       advice: 'Puedes dejar este cambio activado.',
     };
@@ -252,7 +252,7 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (speed > TIE) {
     return {
       ...base, kind: 'test',
-      title: 'La Prueba va más rápido',
+      title: 'El Después va más rápido',
       detail: 'Más FPS, y la suavidad se mantiene igual.',
       advice: 'Puedes dejar este cambio activado.',
     };
@@ -260,8 +260,8 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (speed < -TIE) {
     return {
       ...base, kind: 'base',
-      title: 'La Base gana',
-      detail: 'La Prueba va más lenta y no gana suavidad.',
+      title: 'Gana el Antes',
+      detail: 'El Después va más lento y no gana suavidad.',
       advice: 'Mejor desactiva este cambio.',
     };
   }
@@ -301,58 +301,14 @@ const VERDICT_STYLE: Record<VerdictKind, { box: string; iconBox: string; text: s
 };
 
 const LEVEL_STYLE: Record<Level, { chip: string; word: string }> = {
-  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Prueba: mejor' },
+  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Después: mejor' },
   same:   { chip: 'bg-[var(--border)]/40 text-[var(--text-muted)]',     word: 'Igual' },
-  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Prueba: peor' },
+  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Después: peor' },
 };
 
 /* ─────────────────────────── Componentes pequeños ─────────────────────────── */
 
-function Toggle({
-  enabled,
-  onToggle,
-  label,
-  color = 'action',
-}: {
-  enabled: boolean;
-  onToggle: () => void;
-  label: string;
-  color?: 'action' | 'compatible' | 'caution' | 'base';
-}) {
-  const colorClasses = {
-    action: 'bg-[var(--action)]',
-    compatible: 'bg-[var(--compatible)]',
-    caution: 'bg-[var(--caution)]',
-    base: 'bg-[#38bdf8]',
-  };
-
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      role="switch"
-      aria-checked={enabled}
-      className="flex items-center gap-2 cursor-pointer group rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
-    >
-      <div
-        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
-          enabled ? colorClasses[color] : 'bg-[var(--bg)] border border-[var(--border)]'
-        }`}
-      >
-        <span
-          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${
-            enabled ? 'translate-x-6' : 'translate-x-1'
-          }`}
-        />
-      </div>
-      <span className={`text-xs font-semibold ${enabled ? 'text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
-        {label}
-      </span>
-    </button>
-  );
-}
-
-/** Dos barras (Base y Prueba) con el mismo criterio, para ver quién gana de un vistazo. */
+/** Dos barras (Antes y Después) con el mismo criterio, para ver quién gana de un vistazo. */
 function CompareMeter({
   icon,
   title,
@@ -394,7 +350,7 @@ function CompareMeter({
       <div className="space-y-3">
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[#38bdf8]">Base</span>
+            <span className="font-semibold text-[#38bdf8]">Antes</span>
             <span className="font-bold text-[var(--text)]">{base.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -403,7 +359,7 @@ function CompareMeter({
         </div>
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[var(--caution)]">Prueba</span>
+            <span className="font-semibold text-[var(--caution)]">Después</span>
             <span className="font-bold text-[var(--text)]">{test.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -428,8 +384,8 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
       <div className="min-w-[520px] space-y-4">
         <div className="grid grid-cols-[1.6fr_0.8fr_0.8fr_1.4fr] gap-3 px-4 text-xs font-semibold">
           <span className="text-[var(--text-dim)]">Medida</span>
-          <span className="text-[#38bdf8] text-right">Base</span>
-          <span className="text-[var(--caution)] text-right">Prueba</span>
+          <span className="text-[#38bdf8] text-right">Antes</span>
+          <span className="text-[var(--caution)] text-right">Después</span>
           <span className="text-[var(--text-dim)] text-right">Resultado</span>
         </div>
 
@@ -475,21 +431,148 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
   );
 }
 
+/** Quién gana en una comparación, para poder mostrarlo fuera de esta pantalla. */
+export type OverallWinner = 'antes' | 'despues' | 'empate' | 'depende';
+
+export function summarizeComparison(c: BenchmarkComparison): { winner: OverallWinner; title: string; advice: string } {
+  const verdict = buildVerdict(buildRows(c));
+  const winner: OverallWinner =
+    verdict.kind === 'test' ? 'despues'
+    : verdict.kind === 'base' ? 'antes'
+    : verdict.kind === 'tie' ? 'empate'
+    : 'depende'; // más FPS pero más tirones (o al revés): depende de lo que prefiera el usuario
+  return { winner, title: verdict.title, advice: verdict.advice };
+}
+
+/* ───────────────────── Tarjeta de resultado (se reutiliza en Mis pruebas) ───────────────────── */
+
+export function ComparisonResultCard({
+  comparison,
+  onClose,
+  closeLabel = 'Cerrar comparación',
+  title = 'Resultado de la comparación',
+  children,
+}: {
+  comparison: BenchmarkComparison;
+  onClose?: () => void;
+  closeLabel?: string;
+  title?: string;
+  children?: ReactNode;
+}) {
+  const [showDetails, setShowDetails] = useState(false);
+
+  const rows = buildRows(comparison);
+  const verdict = buildVerdict(rows);
+  const warnings = buildWarnings(comparison);
+  const style = VERDICT_STYLE[verdict.kind];
+  const VerdictIcon = style.Icon;
+
+  const speedRow = rows.find((r) => r.key === 'avg')!;
+  const smoothRow = rows.find((r) => r.key === 'smooth')!;
+  const smoothLevel = levelOf(verdict.smooth);
+
+  const smoothFooter =
+    smoothLevel === 'better'
+      ? 'Después del cambio el juego se siente más parejo.'
+      : smoothLevel === 'worse'
+      ? 'Después del cambio el juego tiene más tirones.'
+      : 'El juego se siente igual de parejo.';
+
+  return (
+    <article
+      className="p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/10"
+    >
+      <h3 className="text-base font-bold text-[var(--text)] mb-4">{title}</h3>
+
+      {warnings.length > 0 && (
+        <div className="mb-4 p-3 rounded-lg bg-[var(--caution-bg)] border border-[var(--caution)]/50 space-y-1.5">
+          {warnings.map((w) => (
+            <p key={w} className="text-xs text-[var(--caution)] font-semibold flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {w}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {/* Veredicto */}
+      <div className={`p-5 rounded-xl border-2 mb-4 flex items-start gap-4 ${style.box}`}>
+        <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${style.iconBox}`}>
+          <VerdictIcon className={`w-6 h-6 ${style.text}`} />
+        </div>
+        <div className="min-w-0">
+          <p className={`text-xl font-bold ${style.text}`}>{verdict.title}</p>
+          <p className="text-sm text-[var(--text)] mt-1">{verdict.detail}</p>
+          <p className="text-sm font-semibold text-[var(--text)] mt-2">{verdict.advice}</p>
+        </div>
+      </div>
+
+      {/* Velocidad y Fluidez */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <CompareMeter
+          icon={<Gauge className="w-4 h-4 text-[var(--action)]" />}
+          title="Velocidad"
+          help="Cuántas imágenes por segundo (FPS) muestra el juego."
+          base={speedRow.base}
+          test={speedRow.test}
+          decimals={0}
+          unit=" FPS"
+          level={levelOf(verdict.speed)}
+          footer={`${speedRow.change > 0 ? '+' : ''}${speedRow.change.toFixed(1)}% de FPS promedio.`}
+        />
+        <CompareMeter
+          icon={<Activity className="w-4 h-4 text-[var(--action)]" />}
+          title="Fluidez"
+          help="Qué tan parejo va el juego. Más alto, menos tirones."
+          base={smoothRow.base}
+          test={smoothRow.test}
+          decimals={0}
+          unit="%"
+          level={smoothLevel}
+          footer={smoothFooter}
+        />
+      </div>
+
+      {/* Detalles técnicos */}
+      <button
+        type="button"
+        onClick={() => setShowDetails((s) => !s)}
+        aria-expanded={showDetails}
+        className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm font-semibold text-[var(--text-muted)] bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 hover:text-[var(--text)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+      >
+        Ver detalles técnicos
+        <ChevronDown className={`w-4 h-4 transition-transform duration-200 ${showDetails ? 'rotate-180' : ''}`} />
+      </button>
+      {showDetails && <DetailsTable rows={rows} />}
+
+      {children}
+
+      {onClose && (
+        <button
+          type="button"
+          onClick={onClose}
+          className="w-full mt-4 px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] hover:border-[var(--action)]/50 transition-all duration-200"
+        >
+          {closeLabel}
+        </button>
+      )}
+    </article>
+  );
+}
+
 /* ─────────────────────────────── Vista principal ─────────────────────────────── */
 
 export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, mangohudLogPath, onLogPathChange }: BenchmarksViewProps) {
   const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
-  const [selectedBaseline, setSelectedBaseline] = useState<string | null>(null);
-  const [selectedTest, setSelectedTest] = useState<string | null>(null);
   const [comparison, setComparison] = useState<BenchmarkComparison | null>(null);
-  const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [logPath, setLogPath] = useState(mangohudLogPath || '/tmp/MangoHud');
   const [notes, setNotes] = useState('');
   const [toast, setToast] = useState<string | null>(null);
   const [mangohudInstalled, setMangohudInstalled] = useState<boolean | null>(null);
   const [logDuration, setLogDuration] = useState<number | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
+  const [savedKeys, setSavedKeys] = useState<string[]>([]);
+  const [savingComparison, setSavingComparison] = useState(false);
   const [confirmState, setConfirmState] = useState<{
     title: string;
     message: string;
@@ -625,7 +708,27 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
         notes: notes || null,
       });
 
-      setToast(`✓ Benchmark guardado: ${finalGameName} (${benchmark.timestamp})`);
+      // Mismo criterio que el backend: la primera grabación es el Antes, la siguiente el
+      // Después (y las nuevas reemplazan al Después). Otro juego = prueba nueva.
+      const first = benchmarks[0];
+      const newAppid = currentAppid || 0;
+      const sameGame = first
+        ? first.appid && newAppid
+          ? first.appid === newAppid
+          : normName(first.game_name) === normName(finalGameName)
+        : true;
+
+      if (!first || !sameGame) {
+        setToast(
+          first
+            ? `✓ Juego distinto: empezamos una prueba nueva. Guardado como Antes (${finalGameName})`
+            : `✓ Guardado como Antes (${finalGameName}). Cambia algo y graba otra vez para comparar`
+        );
+      } else if (benchmarks.length >= 2) {
+        setToast('✓ Guardado como nuevo Después (reemplazó al anterior)');
+      } else {
+        setToast(`✓ Guardado como Después (${finalGameName})`);
+      }
       setNotes('');
       loadBenchmarks();
     } catch (e) {
@@ -635,59 +738,14 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     }
   };
 
-  const toggleBaseline = (id: string) => {
-    if (selectedBaseline === id) {
-      setSelectedBaseline(null);
-    } else {
-      setSelectedBaseline(id);
-      if (selectedTest === id) {
-        setSelectedTest(null);
-      }
-    }
-  };
-
-  const toggleTest = (id: string) => {
-    if (selectedTest === id) {
-      setSelectedTest(null);
-    } else {
-      setSelectedTest(id);
-      if (selectedBaseline === id) {
-        setSelectedBaseline(null);
-      }
-    }
-  };
-
   const deleteAllBenchmarks = async () => {
     try {
       await invoke('delete_all_benchmarks');
       setToast(`✓ Se eliminaron ${benchmarks.length} benchmarks`);
-      setSelectedBaseline(null);
-      setSelectedTest(null);
       setComparison(null);
       loadBenchmarks();
     } catch (e) {
       setToast(`❌ Error al eliminar: ${e}`);
-    }
-  };
-
-  const compareBenchmarks = async () => {
-    if (!selectedBaseline || !selectedTest) {
-      setToast('Selecciona un benchmark base y uno de prueba');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const result = await invoke<BenchmarkComparison>('compare_benchmarks', {
-        baselineId: selectedBaseline,
-        testId: selectedTest,
-      });
-      setComparison(result);
-      setShowDetails(false);
-    } catch (e) {
-      setToast(`❌ Error al comparar: ${e}`);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -697,11 +755,6 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
       setToast('✓ Benchmark eliminado');
       loadBenchmarks();
 
-      if (selectedBaseline === id) setSelectedBaseline(null);
-      if (selectedTest === id) setSelectedTest(null);
-      if (comparison?.baseline.id === id || comparison?.test.id === id) {
-        setComparison(null);
-      }
     } catch (e) {
       setToast(`❌ Error al eliminar: ${e}`);
     }
@@ -710,16 +763,18 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   // Confirmaciones propias de la app (en vez de confirm() nativo, que bloquea la ventana)
   const askDeleteAll = () =>
     setConfirmState({
-      title: 'Borrar todos los benchmarks',
-      message: `Se eliminarán los ${benchmarks.length} benchmarks guardados. Esta acción no se puede deshacer.`,
-      confirmLabel: 'Borrar todos',
+      title: 'Empezar de nuevo',
+      message: 'Se eliminarán el Antes y el Después guardados. Esta acción no se puede deshacer.',
+      confirmLabel: 'Empezar de nuevo',
       onConfirm: deleteAllBenchmarks,
     });
 
-  const askDeleteBenchmark = (id: string) =>
+  const askDeleteBenchmark = (id: string, isAntes: boolean) =>
     setConfirmState({
-      title: 'Eliminar benchmark',
-      message: 'Se eliminará este benchmark. Esta acción no se puede deshacer.',
+      title: isAntes ? 'Eliminar el Antes' : 'Eliminar el Después',
+      message: isAntes && shown.length > 1
+        ? 'Se eliminará el Antes. El Después pasará a ser tu nuevo Antes, y podrás grabar otro Después para compararlo. Esta acción no se puede deshacer.'
+        : 'Se eliminará esta grabación. Esta acción no se puede deshacer.',
       confirmLabel: 'Eliminar',
       onConfirm: () => deleteBenchmark(id),
     });
@@ -737,6 +792,79 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
       });
     } catch {
       return timestamp;
+    }
+  };
+
+  // Siempre hay como máximo un Antes (la primera grabación) y un Después (la última).
+  const shown: Benchmark[] =
+    benchmarks.length >= 2 ? [benchmarks[0], benchmarks[benchmarks.length - 1]] : benchmarks.slice(0, 1);
+  const antesId = shown[0]?.id;
+  const despuesId = shown.length >= 2 ? shown[1].id : undefined;
+
+  // En cuanto hay un Antes y un Después, se comparan solos.
+  useEffect(() => {
+    if (!antesId || !despuesId) {
+      setComparison(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await invoke<BenchmarkComparison>('compare_benchmarks', {
+          baselineId: antesId,
+          testId: despuesId,
+        });
+        if (!cancelled) {
+          setComparison(result);
+        }
+      } catch (e) {
+        if (!cancelled) setToast(`❌ Error al comparar: ${e}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [antesId, despuesId]);
+
+  // ── Guardar la comparación en "Mis pruebas" ──
+  const refreshSaved = async () => {
+    try {
+      const list = await invoke<Array<{ comparison: BenchmarkComparison }>>('load_comparisons');
+      setSavedKeys(list.map((c) => `${c.comparison.baseline.id}|${c.comparison.test.id}`));
+    } catch (e) {
+      console.error('Error al leer las pruebas guardadas:', e);
+    }
+  };
+
+  useEffect(() => {
+    refreshSaved();
+    // Si se borra algo desde Mis pruebas, el botón vuelve a estar disponible
+    const onChanged = () => {
+      refreshSaved();
+    };
+    window.addEventListener('thoriapp:comparisons-changed', onChanged);
+    return () => window.removeEventListener('thoriapp:comparisons-changed', onChanged);
+  }, []);
+
+  const isCurrentSaved = comparison
+    ? savedKeys.includes(`${comparison.baseline.id}|${comparison.test.id}`)
+    : false;
+
+  const saveCurrentComparison = async () => {
+    if (!comparison || isCurrentSaved) return;
+    setSavingComparison(true);
+    try {
+      await invoke('save_comparison', {
+        baselineId: comparison.baseline.id,
+        testId: comparison.test.id,
+      });
+      setToast('✓ Guardada en Mis pruebas');
+      await refreshSaved();
+      window.dispatchEvent(new Event('thoriapp:comparisons-changed'));
+    } catch (e) {
+      setToast(`❌ ${e}`);
+    } finally {
+      setSavingComparison(false);
     }
   };
 
@@ -909,31 +1037,29 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
       </article>
 
       {/* Lista de Benchmarks */}
-      {benchmarks.length > 0 && (
+      {shown.length > 0 && (
         <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-base font-bold text-[var(--text)] flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-[var(--action)]" />
               Benchmarks guardados
               <span className="text-xs font-normal text-[var(--text-muted)] bg-[var(--bg)] px-2 py-0.5 rounded-full">
-                {benchmarks.length}
+                {shown.length}
               </span>
             </h3>
             <button
               onClick={askDeleteAll}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
-              title="Eliminar todos los benchmarks"
+              title="Borrar el Antes y el Después y empezar de nuevo"
             >
               <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
-              Borrar todos
+              Empezar de nuevo
             </button>
           </div>
 
           <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
-            {benchmarks.map((bench) => {
-              const isSelected = selectedBaseline === bench.id || selectedTest === bench.id;
-              const isBaseline = selectedBaseline === bench.id;
-              const isTest = selectedTest === bench.id;
+            {shown.map((bench, idx) => {
+              const isBaseline = idx === 0; // true = Antes, false = Después
               const score = smoothScore(bench);
               const isShort = bench.duration_seconds < SHORT_SECONDS;
 
@@ -943,29 +1069,20 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                   className={`p-4 rounded-xl bg-[var(--bg)] border-2 transition-all duration-200 ${
                     isBaseline
                       ? 'border-[#38bdf8] shadow-lg shadow-[#38bdf8]/10'
-                      : isTest
-                      ? 'border-[var(--caution)] shadow-lg shadow-[var(--caution)]/10'
-                      : isSelected
-                      ? 'border-[var(--action)] shadow-md shadow-[var(--action)]/10'
-                      : 'border-[var(--border)] hover:border-[var(--action)]/50 hover:shadow-md'
+                      : 'border-[var(--caution)] shadow-lg shadow-[var(--caution)]/10'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      {/* Toggles */}
-                      <div className="flex items-center gap-4 mb-3">
-                        <Toggle
-                          enabled={isBaseline}
-                          onToggle={() => toggleBaseline(bench.id)}
-                          label="Base"
-                          color="base"
-                        />
-                        <Toggle
-                          enabled={isTest}
-                          onToggle={() => toggleTest(bench.id)}
-                          label="Prueba"
-                          color="caution"
-                        />
+                      {/* Etiqueta automática */}
+                      <div className="mb-3">
+                        <span
+                          className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold text-white ${
+                            isBaseline ? 'bg-[#38bdf8]' : 'bg-[var(--caution)]'
+                          }`}
+                        >
+                          {isBaseline ? 'Antes' : 'Después'}
+                        </span>
                       </div>
 
                       {/* Nombre del juego */}
@@ -1031,7 +1148,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                     </div>
 
                     <button
-                      onClick={() => askDeleteBenchmark(bench.id)}
+                      onClick={() => askDeleteBenchmark(bench.id, isBaseline)}
                       className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 hover:scale-110 transition-all duration-200"
                       title="Eliminar benchmark"
                       aria-label="Eliminar benchmark"
@@ -1048,123 +1165,45 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             Velocidad = FPS promedio. Fluidez = qué tan parejo va el juego (más alto, menos tirones). Peores momentos = tus FPS en el 1% más lento.
           </p>
 
-          {selectedBaseline && selectedTest && selectedBaseline !== selectedTest && (
-            <button
-              onClick={compareBenchmarks}
-              disabled={loading}
-              className="w-full mt-4 px-4 py-3 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-[var(--action)]/20 hover:shadow-xl hover:shadow-[var(--action)]/30 hover:scale-[1.02]"
-            >
-              {loading ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Comparando...
-                </>
-              ) : (
-                <>
-                  <Target className="w-4 h-4" />
-                  Comparar Base y Prueba
-                </>
-              )}
-            </button>
+          {shown.length === 1 && (
+            <div className="mt-4 p-3 rounded-lg bg-[#38bdf8]/10 border border-[#38bdf8]/30">
+              <p className="text-xs text-[var(--text)]">
+                <strong className="text-[#38bdf8]">Listo el Antes.</strong> Cambia una sola cosa en el juego, graba otra vez
+                y pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>: se guardará como Después y
+                se comparará solo.
+              </p>
+            </div>
           )}
         </article>
       )}
 
       {/* Resultado de la comparación */}
-      {comparison && (() => {
-        const rows = buildRows(comparison);
-        const verdict = buildVerdict(rows);
-        const warnings = buildWarnings(comparison);
-        const style = VERDICT_STYLE[verdict.kind];
-        const VerdictIcon = style.Icon;
-
-        const speedRow = rows.find((r) => r.key === 'avg')!;
-        const smoothRow = rows.find((r) => r.key === 'smooth')!;
-        const smoothLevel = levelOf(verdict.smooth);
-
-        const smoothFooter =
-          smoothLevel === 'better'
-            ? 'Con la Prueba el juego se siente más parejo.'
-            : smoothLevel === 'worse'
-            ? 'Con la Prueba el juego tiene más tirones.'
-            : 'El juego se siente igual de parejo.';
-
-        return (
-          <article
-            className="p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/10"
+      {comparison && (
+        <ComparisonResultCard comparison={comparison} onClose={() => setComparison(null)}>
+          <button
+            type="button"
+            onClick={saveCurrentComparison}
+            disabled={isCurrentSaved || savingComparison}
+            className={`w-full mt-4 px-4 py-3 rounded-lg text-sm font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
+              isCurrentSaved
+                ? 'bg-[var(--compatible)]/10 text-[var(--compatible)] border border-[var(--compatible)]/40 cursor-default'
+                : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)] shadow-lg shadow-[var(--action)]/20 disabled:opacity-50 disabled:cursor-not-allowed'
+            }`}
           >
-            <h3 className="text-base font-bold text-[var(--text)] mb-4">Resultado de la comparación</h3>
-
-            {warnings.length > 0 && (
-              <div className="mb-4 p-3 rounded-lg bg-[var(--caution-bg)] border border-[var(--caution)]/50 space-y-1.5">
-                {warnings.map((w) => (
-                  <p key={w} className="text-xs text-[var(--caution)] font-semibold flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    {w}
-                  </p>
-                ))}
-              </div>
+            {isCurrentSaved ? (
+              <>
+                <Check className="w-4 h-4" />
+                Guardada en Mis pruebas
+              </>
+            ) : (
+              <>
+                <Save className="w-4 h-4" />
+                {savingComparison ? 'Guardando…' : 'Guardar en Mis pruebas'}
+              </>
             )}
-
-            {/* Veredicto */}
-            <div className={`p-5 rounded-xl border-2 mb-4 flex items-start gap-4 ${style.box}`}>
-              <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${style.iconBox}`}>
-                <VerdictIcon className={`w-6 h-6 ${style.text}`} />
-              </div>
-              <div className="min-w-0">
-                <p className={`text-xl font-bold ${style.text}`}>{verdict.title}</p>
-                <p className="text-sm text-[var(--text)] mt-1">{verdict.detail}</p>
-                <p className="text-sm font-semibold text-[var(--text)] mt-2">{verdict.advice}</p>
-              </div>
-            </div>
-
-            {/* Velocidad y Fluidez */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-              <CompareMeter
-                icon={<Gauge className="w-4 h-4 text-[var(--action)]" />}
-                title="Velocidad"
-                help="Cuántas imágenes por segundo (FPS) muestra el juego."
-                base={speedRow.base}
-                test={speedRow.test}
-                decimals={0}
-                unit=" FPS"
-                level={levelOf(verdict.speed)}
-                footer={`${speedRow.change > 0 ? '+' : ''}${speedRow.change.toFixed(1)}% de FPS promedio.`}
-              />
-              <CompareMeter
-                icon={<Activity className="w-4 h-4 text-[var(--action)]" />}
-                title="Fluidez"
-                help="Qué tan parejo va el juego. Más alto, menos tirones."
-                base={smoothRow.base}
-                test={smoothRow.test}
-                decimals={0}
-                unit="%"
-                level={smoothLevel}
-                footer={smoothFooter}
-              />
-            </div>
-
-            {/* Detalles técnicos */}
-            <button
-              type="button"
-              onClick={() => setShowDetails((s) => !s)}
-              aria-expanded={showDetails}
-              className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm font-semibold text-[var(--text-muted)] bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 hover:text-[var(--text)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
-            >
-              Ver detalles técnicos
-              <ChevronDown className={`w-4 h-4 transition-transform duration-200 ${showDetails ? 'rotate-180' : ''}`} />
-            </button>
-            {showDetails && <DetailsTable rows={rows} />}
-
-            <button
-              onClick={() => setComparison(null)}
-              className="w-full mt-4 px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] hover:border-[var(--action)]/50 transition-all duration-200"
-            >
-              Cerrar comparación
-            </button>
-          </article>
-        );
-      })()}
+          </button>
+        </ComparisonResultCard>
+      )}
 
       {/* Guía rápida */}
       <article className="p-6 rounded-xl bg-gradient-to-br from-[var(--surface)] to-[var(--bg)] border-2 border-[var(--border)]">
@@ -1174,34 +1213,33 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           </div>
           <div>
             <h3 className="text-lg font-bold text-[var(--text)]">Guía rápida de benchmarks</h3>
-            <p className="text-xs text-[var(--text-muted)]">Mide si un cambio mejora tu juego, en 4 pasos</p>
+            <p className="text-xs text-[var(--text-muted)]">Mide si un cambio mejora tu juego, en 3 pasos</p>
           </div>
         </div>
 
-        {/* Explicación de Base y Prueba */}
+        {/* Explicación de Antes y Después */}
         <div className="mb-6 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-          <h4 className="text-sm font-bold text-[var(--text)] mb-3">¿Qué son Base y Prueba?</h4>
+          <h4 className="text-sm font-bold text-[var(--text)] mb-1">¿Qué son Antes y Después?</h4>
+          <p className="text-xs text-[var(--text-muted)] mb-3">
+            No tienes que elegir nada: la app los asigna sola, por orden de grabación.
+          </p>
           <div className="grid grid-cols-2 gap-3">
             <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[#38bdf8]/30">
               <div className="flex items-center gap-2 mb-2">
-                <div className="w-8 h-5 rounded-full bg-[#38bdf8] flex items-center justify-end pr-1">
-                  <div className="w-3 h-3 rounded-full bg-white"></div>
-                </div>
-                <span className="text-sm font-bold text-[#38bdf8]">Base</span>
+                <span className="w-5 h-5 rounded-full bg-[#38bdf8] text-[10px] font-bold text-white flex items-center justify-center">1</span>
+                <span className="text-sm font-bold text-[#38bdf8]">Antes</span>
               </div>
               <p className="text-xs text-[var(--text-muted)]">
-                Tu grabación de <strong className="text-[var(--text)]">referencia</strong>, antes de hacer cambios. Es el punto de partida.
+                Tu <strong className="text-[var(--text)]">primera</strong> grabación, sin cambios. Es el punto de partida.
               </p>
             </div>
             <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[var(--caution)]/30">
               <div className="flex items-center gap-2 mb-2">
-                <div className="w-8 h-5 rounded-full bg-[var(--caution)] flex items-center justify-end pr-1">
-                  <div className="w-3 h-3 rounded-full bg-white"></div>
-                </div>
-                <span className="text-sm font-bold text-[var(--caution)]">Prueba</span>
+                <span className="w-5 h-5 rounded-full bg-[var(--caution)] text-[10px] font-bold text-white flex items-center justify-center">2</span>
+                <span className="text-sm font-bold text-[var(--caution)]">Después</span>
               </div>
               <p className="text-xs text-[var(--text-muted)]">
-                Tu grabación <strong className="text-[var(--text)]">nueva</strong>, después de activar un parámetro. Se compara con la Base.
+                Tu grabación <strong className="text-[var(--text)]">nueva</strong>, tras activar un parámetro. Se compara sola con el Antes.
               </p>
             </div>
           </div>
@@ -1214,10 +1252,11 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               1
             </div>
             <div className="flex-1">
-              <p className="font-bold text-[var(--text)] mb-1">Graba tu primera prueba, sin cambios</p>
+              <p className="font-bold text-[var(--text)] mb-1">Graba cómo va tu juego, sin cambios</p>
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
                 Arriba, elige cuánto debe durar la grabación (lo ideal es 1 minuto). En el juego pulsa <kbd className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">Shift + F2</kbd> y
                 juega siempre por la misma zona. Cuando termine, pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>.
+                Esa grabación queda guardada sola como <strong className="text-[#38bdf8]">Antes</strong>.
               </p>
             </div>
           </div>
@@ -1227,9 +1266,11 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               2
             </div>
             <div className="flex-1">
-              <p className="font-bold text-[var(--text)] mb-1">Marca esa grabación como <span className="text-[#38bdf8]">Base</span></p>
+              <p className="font-bold text-[var(--text)] mb-1">Cambia una sola cosa y graba otra vez</p>
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-                En la grabación que acabas de guardar, activa el interruptor azul <strong className="text-[#38bdf8]">Base</strong>.
+                Activa un parámetro (por ejemplo <code className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">game-performance</code>)
+                y repite la grabación en el mismo sitio y con la misma duración. Pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>:
+                esta queda como <strong className="text-[var(--caution)]">Después</strong>.
               </p>
             </div>
           </div>
@@ -1239,23 +1280,9 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               3
             </div>
             <div className="flex-1">
-              <p className="font-bold text-[var(--text)] mb-1">Cambia una sola cosa y graba otra vez</p>
+              <p className="font-bold text-[var(--text)] mb-1">Mira el resultado</p>
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-                Activa un parámetro (por ejemplo <code className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">game-performance</code>)
-                y repite la grabación en el mismo sitio y con la misma duración. Analiza el nuevo log.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
-              4
-            </div>
-            <div className="flex-1">
-              <p className="font-bold text-[var(--text)] mb-1">Marca la nueva como <span className="text-[var(--caution)]">Prueba</span> y compara</p>
-              <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-                Activa el interruptor amarillo <strong className="text-[var(--caution)]">Prueba</strong> en la grabación nueva y pulsa
-                <strong className="text-[var(--action)]"> Comparar Base y Prueba</strong>. Te diremos quién gana y qué hacer.
+                La comparación aparece sola, sin pulsar nada más. Te diremos quién gana y qué hacer.
               </p>
               <div className="mt-2 p-2 rounded bg-[var(--caution)]/10 border border-[var(--caution)]/30">
                 <p className="text-[11px] text-[var(--caution)] font-semibold">
@@ -1266,13 +1293,31 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           </div>
         </div>
 
+        {/* Qué pasa si grabo más veces */}
+        <div className="mt-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+          <h4 className="text-sm font-bold text-[var(--text)] mb-2">¿Y si quiero probar otro cambio?</h4>
+          <ul className="space-y-1.5 text-xs text-[var(--text-muted)] leading-relaxed list-disc pl-4">
+            <li>
+              Si grabas una tercera vez, la nueva <strong className="text-[var(--text)]">reemplaza al Después</strong> y se
+              compara otra vez con el mismo Antes. Así puedes probar varios parámetros contra el mismo punto de partida.
+            </li>
+            <li>
+              Si quieres un <strong className="text-[var(--text)]">nuevo punto de partida</strong>, elimina el Antes: el Después
+              pasa a ser tu nuevo Antes. O pulsa <strong className="text-[var(--text)]">Empezar de nuevo</strong> para borrar ambos.
+            </li>
+            <li>
+              Si grabas <strong className="text-[var(--text)]">otro juego</strong>, empieza una prueba nueva automáticamente.
+            </li>
+          </ul>
+        </div>
+
         {/* Ejemplo */}
         <div className="mt-6 p-4 rounded-lg bg-gradient-to-r from-[#38bdf8]/10 to-[var(--caution)]/10 border border-[var(--border)]">
           <h4 className="text-sm font-bold text-[var(--text)] mb-3">Ejemplo práctico</h4>
           <div className="space-y-2 text-xs text-[var(--text-muted)]">
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Grabación 1: Palworld sin optimizar → 60 FPS → márcala como <strong className="text-[#38bdf8]">Base</strong></span>
+              <span>Grabación 1: Palworld sin optimizar → 60 FPS → queda como <strong className="text-[#38bdf8]">Antes</strong></span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
@@ -1280,11 +1325,11 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Grabación 2: Palworld con game-performance → 70 FPS → márcala como <strong className="text-[var(--caution)]">Prueba</strong></span>
+              <span>Grabación 2: Palworld con game-performance → 70 FPS → queda como <strong className="text-[var(--caution)]">Después</strong></span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Pulsa <strong className="text-[var(--action)]">Comparar</strong> → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, la Prueba gana 🎉</span>
+              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, gana el Después 🎉</span>
             </div>
           </div>
         </div>
