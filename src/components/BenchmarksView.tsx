@@ -1,6 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import type { Benchmark, BenchmarkComparison } from '../lib/types';
+import { useMangoHud } from '../hooks/useMangoHud';
+import { useBenchmarks } from '../hooks/useBenchmarks';
+import { useComparison } from '../hooks/useComparison';
+import { useConfirm, useToast } from '../hooks/useConfirm';
+import { ConfirmDialog } from './ConfirmDialog';
+import { fmtDuration, formatTimestamp } from '../lib/format';
 import {
   Upload, Trash2, BarChart3, AlertCircle, Zap, FileText, Search,
   Clock, Gamepad2, Gauge, Activity, ChevronDown, Timer, ThumbsUp, ThumbsDown,
@@ -9,39 +15,8 @@ import {
 
 /* ────────────────────────────── Tipos ────────────────────────────── */
 
-interface Benchmark {
-  id: string;
-  profile_id: string;
-  game_name: string;
-  appid: number;
-  timestamp: string;
-  duration_seconds: number;
-  avg_fps: number;
-  fps_1_percent_low: number;
-  fps_0_1_percent_low: number;
-  max_fps: number;
-  min_fps: number;
-  frame_time_avg: number;
-  frame_time_1_percent_high: number;
-  total_frames: number;
-  notes: string | null;
-  launch_command: string;
-  // Solo existen en benchmarks guardados con la versión nueva
-  spikes_per_min?: number | null;
-  pct_over_33ms?: number | null;
-  jitter_ms?: number | null;
-  worst_frame_ms?: number | null;
-}
-
-export interface BenchmarkComparison {
-  baseline: Benchmark;
-  test: Benchmark;
-  fps_change_percent: number;
-  fps_1_percent_change_percent: number;
-  fps_0_1_percent_change_percent: number;
-  frame_time_change_percent: number;
-  conclusion: string;
-}
+// Se re-exportan para quien ya los importaba desde aquí (DashboardView).
+export type { Benchmark, BenchmarkComparison };
 
 interface BenchmarksViewProps {
   currentAppid?: number;
@@ -53,7 +28,7 @@ interface BenchmarksViewProps {
 
 /* ─────────────────────── Constantes y utilidades ─────────────────────── */
 
-// Antes = azul (#38bdf8), Después = amarillo (--caution). Verde y rojo se reservan para "mejor" y "peor".
+// Inicial = azul (#38bdf8), final = amarillo (--caution). Verde y rojo se reservan para "mejor" y "peor".
 
 // Diferencias menores a este % se consideran "igual" (MangoHud tiene algo de ruido entre grabaciones)
 const TIE = 5;
@@ -67,14 +42,6 @@ const DURATION_OPTIONS = [
   { seconds: 90, label: '1 min 30 s', note: 'Muy fiable' },
   { seconds: 120, label: '2 min', note: 'Máxima precisión' },
 ];
-
-function fmtDuration(totalSeconds: number): string {
-  const s = Math.round(totalSeconds);
-  if (s < 60) return `${s} s`;
-  const m = Math.floor(s / 60);
-  const rest = s % 60;
-  return rest === 0 ? `${m} min` : `${m} min ${rest} s`;
-}
 
 /** Fluidez 0-100: qué parte de tu velocidad media se mantiene en los peores momentos. */
 function smoothScore(b: Benchmark): number {
@@ -228,8 +195,8 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (smooth < -TIE) {
     return {
       ...base, kind: 'base',
-      title: 'Gana el Antes',
-      detail: speed < -TIE ? 'El Después va más lento y con más tirones.' : 'El Después se siente menos suave.',
+      title: 'Gana la prueba inicial',
+      detail: speed < -TIE ? 'La prueba final va más lenta y con más tirones.' : 'La prueba final se siente menos suave.',
       advice: 'Mejor desactiva este cambio.',
     };
   }
@@ -244,7 +211,7 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (smooth > TIE) {
     return {
       ...base, kind: 'test',
-      title: 'Gana el Después',
+      title: 'Gana la prueba final',
       detail: speed > TIE ? 'Va más rápido y se siente más suave.' : 'Se siente más suave, con la misma velocidad.',
       advice: 'Puedes dejar este cambio activado.',
     };
@@ -252,7 +219,7 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (speed > TIE) {
     return {
       ...base, kind: 'test',
-      title: 'El Después va más rápido',
+      title: 'La prueba final va más rápido',
       detail: 'Más FPS, y la suavidad se mantiene igual.',
       advice: 'Puedes dejar este cambio activado.',
     };
@@ -260,8 +227,8 @@ function buildVerdict(rows: MetricRow[]): Verdict {
   if (speed < -TIE) {
     return {
       ...base, kind: 'base',
-      title: 'Gana el Antes',
-      detail: 'El Después va más lento y no gana suavidad.',
+      title: 'Gana la prueba inicial',
+      detail: 'La prueba final va más lenta y no gana suavidad.',
       advice: 'Mejor desactiva este cambio.',
     };
   }
@@ -301,14 +268,14 @@ const VERDICT_STYLE: Record<VerdictKind, { box: string; iconBox: string; text: s
 };
 
 const LEVEL_STYLE: Record<Level, { chip: string; word: string }> = {
-  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Después: mejor' },
+  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Final: mejor' },
   same:   { chip: 'bg-[var(--border)]/40 text-[var(--text-muted)]',     word: 'Igual' },
-  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Después: peor' },
+  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Final: peor' },
 };
 
 /* ─────────────────────────── Componentes pequeños ─────────────────────────── */
 
-/** Dos barras (Antes y Después) con el mismo criterio, para ver quién gana de un vistazo. */
+/** Dos barras (inicial y final) con el mismo criterio, para ver quién gana de un vistazo. */
 function CompareMeter({
   icon,
   title,
@@ -350,7 +317,7 @@ function CompareMeter({
       <div className="space-y-3">
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[#38bdf8]">Antes</span>
+            <span className="font-semibold text-[#38bdf8]">Inicial</span>
             <span className="font-bold text-[var(--text)]">{base.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -359,7 +326,7 @@ function CompareMeter({
         </div>
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[var(--caution)]">Después</span>
+            <span className="font-semibold text-[var(--caution)]">Final</span>
             <span className="font-bold text-[var(--text)]">{test.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -384,8 +351,8 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
       <div className="min-w-[520px] space-y-4">
         <div className="grid grid-cols-[1.6fr_0.8fr_0.8fr_1.4fr] gap-3 px-4 text-xs font-semibold">
           <span className="text-[var(--text-dim)]">Medida</span>
-          <span className="text-[#38bdf8] text-right">Antes</span>
-          <span className="text-[var(--caution)] text-right">Después</span>
+          <span className="text-[#38bdf8] text-right">Inicial</span>
+          <span className="text-[var(--caution)] text-right">Final</span>
           <span className="text-[var(--text-dim)] text-right">Resultado</span>
         </div>
 
@@ -561,312 +528,74 @@ export function ComparisonResultCard({
 }
 
 /* ─────────────────────────────── Vista principal ─────────────────────────────── */
-
 export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, mangohudLogPath, onLogPathChange }: BenchmarksViewProps) {
-  const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
-  const [comparison, setComparison] = useState<BenchmarkComparison | null>(null);
-  const [analyzing, setAnalyzing] = useState(false);
   const [logPath, setLogPath] = useState(mangohudLogPath || '/tmp/MangoHud');
   const [notes, setNotes] = useState('');
-  const [toast, setToast] = useState<string | null>(null);
-  const [mangohudInstalled, setMangohudInstalled] = useState<boolean | null>(null);
-  const [logDuration, setLogDuration] = useState<number | null>(null);
-  const [savedKeys, setSavedKeys] = useState<string[]>([]);
-  const [savingComparison, setSavingComparison] = useState(false);
-  const [confirmState, setConfirmState] = useState<{
-    title: string;
-    message: string;
-    confirmLabel: string;
-    onConfirm: () => void;
-  } | null>(null);
+  const { toast, setToast } = useToast();
+  const { confirmState, ask, close } = useConfirm();
 
-  useEffect(() => {
-    if (mangohudLogPath) {
-      setLogPath(mangohudLogPath);
-    }
-  }, [mangohudLogPath]);
+  // Los hooks notifican con un toast propio de esta vista.
+  const notify = (message: string) => setToast(message);
 
-  useEffect(() => {
-    if (toast) {
-      const timer = setTimeout(() => setToast(null), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [toast]);
+  const { installed: mangohudInstalled, duration: logDuration, changeDuration, detectLogPath } =
+    useMangoHud(notify);
 
-  useEffect(() => {
-    const checkMangoHud = async () => {
-      try {
-        const installed = await invoke<boolean>('check_mangohud_installed');
-        setMangohudInstalled(installed);
-      } catch (e) {
-        console.error('Error detectando MangoHud:', e);
-        setMangohudInstalled(false);
-      }
-    };
+  const {
+    benchmarks,
+    analyzing,
+    analyze,
+    remove: deleteBenchmark,
+    removeAll: deleteAllBenchmarks,
+  } = useBenchmarks({ currentAppid, currentGameName, currentLaunchCommand, onNotify: notify });
 
-    checkMangoHud();
-  }, []);
-
-  // Lee cuánto dura ahora la grabación de MangoHud
-  useEffect(() => {
-    const readDuration = async () => {
-      try {
-        const seconds = await invoke<number>('get_mangohud_log_duration');
-        setLogDuration(seconds);
-      } catch (e) {
-        console.error('Error leyendo la duración de MangoHud:', e);
-      }
-    };
-
-    readDuration();
-  }, []);
-
-  // Cerrar el cuadro de confirmación con Escape
-  useEffect(() => {
-    if (!confirmState) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setConfirmState(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [confirmState]);
-
-  const handleLogPathChange = (newPath: string) => {
-    setLogPath(newPath);
-    localStorage.setItem('mangohud_log_path', newPath);
-    if (onLogPathChange) {
-      onLogPathChange(newPath);
-    }
-  };
-
-  useEffect(() => {
-    loadBenchmarks();
-  }, [currentAppid]);
-
-  const loadBenchmarks = async () => {
-    try {
-      if (currentAppid) {
-        const gameBenchmarks = await invoke<Benchmark[]>('load_benchmarks_for_game', { appid: currentAppid });
-        setBenchmarks(gameBenchmarks);
-      } else {
-        const allBenchmarks = await invoke<Benchmark[]>('load_benchmarks');
-        setBenchmarks(allBenchmarks);
-      }
-    } catch (e) {
-      console.error('Error al cargar benchmarks:', e);
-    }
-  };
-
-  const changeDuration = async (seconds: number) => {
-    const previous = logDuration;
-    setLogDuration(seconds);
-    try {
-      await invoke('set_mangohud_log_duration', { seconds });
-      setToast(`✓ Ahora cada grabación dura ${fmtDuration(seconds)}`);
-    } catch (e) {
-      setLogDuration(previous);
-      setToast(`❌ ${e}`);
-    }
-  };
-
-  const analyzeLog = async () => {
-    if (!logPath.trim()) {
-      setToast('Ingresa la ruta del log de MangoHud');
-      return;
-    }
-
-    setAnalyzing(true);
-    try {
-      const benchmark = await invoke<Benchmark>('analyze_mangohud_log_command', { logPath });
-
-      const isDuplicate = benchmarks.some(b =>
-        b.avg_fps === benchmark.avg_fps &&
-        b.fps_1_percent_low === benchmark.fps_1_percent_low &&
-        b.fps_0_1_percent_low === benchmark.fps_0_1_percent_low &&
-        b.total_frames === benchmark.total_frames &&
-        b.timestamp === benchmark.timestamp
-      );
-
-      if (isDuplicate) {
-        setToast('⚠️ Ya existe un benchmark con estos valores (posible duplicado)');
-        setAnalyzing(false);
-        return;
-      }
-
-      let finalGameName = benchmark.game_name;
-
-      if ((!finalGameName || finalGameName === 'Desconocido') && currentGameName && currentGameName !== 'Desconocido') {
-        finalGameName = currentGameName;
-      }
-
-      await invoke('save_benchmark', {
-        benchmark,
-        profileId: '',
-        gameName: finalGameName,
-        appid: currentAppid || 0,
-        launchCommand: currentLaunchCommand || '',
-        notes: notes || null,
-      });
-
-      // Mismo criterio que el backend: la primera grabación es el Antes, la siguiente el
-      // Después (y las nuevas reemplazan al Después). Otro juego = prueba nueva.
-      const first = benchmarks[0];
-      const newAppid = currentAppid || 0;
-      const sameGame = first
-        ? first.appid && newAppid
-          ? first.appid === newAppid
-          : normName(first.game_name) === normName(finalGameName)
-        : true;
-
-      if (!first || !sameGame) {
-        setToast(
-          first
-            ? `✓ Juego distinto: empezamos una prueba nueva. Guardado como Antes (${finalGameName})`
-            : `✓ Guardado como Antes (${finalGameName}). Cambia algo y graba otra vez para comparar`
-        );
-      } else if (benchmarks.length >= 2) {
-        setToast('✓ Guardado como nuevo Después (reemplazó al anterior)');
-      } else {
-        setToast(`✓ Guardado como Después (${finalGameName})`);
-      }
-      setNotes('');
-      loadBenchmarks();
-    } catch (e) {
-      setToast(`❌ Error: ${e}`);
-    } finally {
-      setAnalyzing(false);
-    }
-  };
-
-  const deleteAllBenchmarks = async () => {
-    try {
-      await invoke('delete_all_benchmarks');
-      setToast(`✓ Se eliminaron ${benchmarks.length} benchmarks`);
-      setComparison(null);
-      loadBenchmarks();
-    } catch (e) {
-      setToast(`❌ Error al eliminar: ${e}`);
-    }
-  };
-
-  const deleteBenchmark = async (id: string) => {
-    try {
-      await invoke('delete_benchmark', { benchmarkId: id });
-      setToast('✓ Benchmark eliminado');
-      loadBenchmarks();
-
-    } catch (e) {
-      setToast(`❌ Error al eliminar: ${e}`);
-    }
-  };
-
-  // Confirmaciones propias de la app (en vez de confirm() nativo, que bloquea la ventana)
-  const askDeleteAll = () =>
-    setConfirmState({
-      title: 'Empezar de nuevo',
-      message: 'Se eliminarán el Antes y el Después guardados. Esta acción no se puede deshacer.',
-      confirmLabel: 'Empezar de nuevo',
-      onConfirm: deleteAllBenchmarks,
-    });
-
-  const askDeleteBenchmark = (id: string, isAntes: boolean) =>
-    setConfirmState({
-      title: isAntes ? 'Eliminar el Antes' : 'Eliminar el Después',
-      message: isAntes && shown.length > 1
-        ? 'Se eliminará el Antes. El Después pasará a ser tu nuevo Antes, y podrás grabar otro Después para compararlo. Esta acción no se puede deshacer.'
-        : 'Se eliminará esta grabación. Esta acción no se puede deshacer.',
-      confirmLabel: 'Eliminar',
-      onConfirm: () => deleteBenchmark(id),
-    });
-
-  const formatTimestamp = (timestamp: string) => {
-    try {
-      const date = new Date(timestamp);
-      return date.toLocaleString('es-ES', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-    } catch {
-      return timestamp;
-    }
-  };
-
-  // Siempre hay como máximo un Antes (la primera grabación) y un Después (la última).
+  // Siempre hay como máximo una prueba inicial (la primera grabación) y una final (la última).
   const shown: Benchmark[] =
     benchmarks.length >= 2 ? [benchmarks[0], benchmarks[benchmarks.length - 1]] : benchmarks.slice(0, 1);
   const antesId = shown[0]?.id;
   const despuesId = shown.length >= 2 ? shown[1].id : undefined;
 
-  // En cuanto hay un Antes y un Después, se comparan solos.
-  useEffect(() => {
-    if (!antesId || !despuesId) {
-      setComparison(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const result = await invoke<BenchmarkComparison>('compare_benchmarks', {
-          baselineId: antesId,
-          testId: despuesId,
-        });
-        if (!cancelled) {
-          setComparison(result);
-        }
-      } catch (e) {
-        if (!cancelled) setToast(`❌ Error al comparar: ${e}`);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [antesId, despuesId]);
-
-  // ── Guardar la comparación en "Mis pruebas" ──
-  const refreshSaved = async () => {
-    try {
-      const list = await invoke<Array<{ comparison: BenchmarkComparison }>>('load_comparisons');
-      setSavedKeys(list.map((c) => `${c.comparison.baseline.id}|${c.comparison.test.id}`));
-    } catch (e) {
-      console.error('Error al leer las pruebas guardadas:', e);
-    }
-  };
+  const {
+    comparison,
+    isSaved: isCurrentSaved,
+    saving: savingComparison,
+    save: saveCurrentComparison,
+    clear: clearComparison,
+  } = useComparison(antesId, despuesId, notify);
 
   useEffect(() => {
-    refreshSaved();
-    // Si se borra algo desde Mis pruebas, el botón vuelve a estar disponible
-    const onChanged = () => {
-      refreshSaved();
-    };
-    window.addEventListener('thoriapp:comparisons-changed', onChanged);
-    return () => window.removeEventListener('thoriapp:comparisons-changed', onChanged);
-  }, []);
+    if (mangohudLogPath) setLogPath(mangohudLogPath);
+  }, [mangohudLogPath]);
 
-  const isCurrentSaved = comparison
-    ? savedKeys.includes(`${comparison.baseline.id}|${comparison.test.id}`)
-    : false;
-
-  const saveCurrentComparison = async () => {
-    if (!comparison || isCurrentSaved) return;
-    setSavingComparison(true);
-    try {
-      await invoke('save_comparison', {
-        baselineId: comparison.baseline.id,
-        testId: comparison.test.id,
-      });
-      setToast('✓ Guardada en Mis pruebas');
-      await refreshSaved();
-      window.dispatchEvent(new Event('thoriapp:comparisons-changed'));
-    } catch (e) {
-      setToast(`❌ ${e}`);
-    } finally {
-      setSavingComparison(false);
-    }
+  const handleLogPathChange = (newPath: string) => {
+    setLogPath(newPath);
+    localStorage.setItem('mangohud_log_path', newPath);
+    onLogPathChange?.(newPath);
   };
+
+  const analyzeLog = async () => {
+    const saved = await analyze(logPath, notes);
+    if (saved) setNotes('');
+  };
+
+  // Confirmaciones propias de la app (en vez de confirm() nativo, que bloquea la ventana)
+  const askDeleteAll = () =>
+    ask({
+      title: 'Empezar de nuevo',
+      message: 'Se eliminarán la prueba inicial y la prueba final. Esta acción no se puede deshacer.',
+      confirmLabel: 'Empezar de nuevo',
+      onConfirm: deleteAllBenchmarks,
+    });
+
+  const askDeleteBenchmark = (id: string, isAntes: boolean) =>
+    ask({
+      title: isAntes ? 'Eliminar la prueba inicial' : 'Eliminar la prueba final',
+      message:
+        isAntes && shown.length > 1
+          ? 'Se eliminará la prueba inicial. La prueba final pasará a ser tu nueva prueba inicial, y podrás grabar otra prueba final para compararla. Esta acción no se puede deshacer.'
+          : 'Se eliminará esta grabación. Esta acción no se puede deshacer.',
+      confirmLabel: 'Eliminar',
+      onConfirm: () => deleteBenchmark(id),
+    });
 
   const durationIsPreset = DURATION_OPTIONS.some((o) => o.seconds === logDuration);
   const durationHint =
@@ -980,12 +709,10 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               </label>
               <button
                 onClick={async () => {
-                  try {
-                    const detectedPath = await invoke<string>('detect_mangohud_log_path');
+                  const detectedPath = await detectLogPath();
+                  if (detectedPath) {
                     handleLogPathChange(detectedPath);
                     setToast('✓ Ruta detectada automáticamente');
-                  } catch (e) {
-                    setToast(`❌ Error detectando ruta: ${e}`);
                   }
                 }}
                 className="text-xs text-[var(--action)] hover:text-[var(--action-hover)] flex items-center gap-1 transition-colors"
@@ -1050,7 +777,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             <button
               onClick={askDeleteAll}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
-              title="Borrar el Antes y el Después y empezar de nuevo"
+              title="Borrar la prueba inicial y la final y empezar de nuevo"
             >
               <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
               Empezar de nuevo
@@ -1059,7 +786,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
           <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
             {shown.map((bench, idx) => {
-              const isBaseline = idx === 0; // true = Antes, false = Después
+              const isBaseline = idx === 0; // true = inicial, false = final
               const score = smoothScore(bench);
               const isShort = bench.duration_seconds < SHORT_SECONDS;
 
@@ -1081,7 +808,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                             isBaseline ? 'bg-[#38bdf8]' : 'bg-[var(--caution)]'
                           }`}
                         >
-                          {isBaseline ? 'Antes' : 'Después'}
+                          {isBaseline ? 'Inicial' : 'Final'}
                         </span>
                       </div>
 
@@ -1168,8 +895,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           {shown.length === 1 && (
             <div className="mt-4 p-3 rounded-lg bg-[#38bdf8]/10 border border-[#38bdf8]/30">
               <p className="text-xs text-[var(--text)]">
-                <strong className="text-[#38bdf8]">Listo el Antes.</strong> Cambia una sola cosa en el juego, graba otra vez
-                y pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>: se guardará como Después y
+                <strong className="text-[#38bdf8]">Lista la prueba inicial.</strong> Cambia una sola cosa en el juego, graba otra vez
+                y pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>: se guardará como prueba final y
                 se comparará solo.
               </p>
             </div>
@@ -1179,7 +906,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
       {/* Resultado de la comparación */}
       {comparison && (
-        <ComparisonResultCard comparison={comparison} onClose={() => setComparison(null)}>
+        <ComparisonResultCard comparison={comparison} onClose={clearComparison}>
           <button
             type="button"
             onClick={saveCurrentComparison}
@@ -1217,17 +944,17 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           </div>
         </div>
 
-        {/* Explicación de Antes y Después */}
+        {/* Explicación de prueba inicial y prueba final */}
         <div className="mb-6 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-          <h4 className="text-sm font-bold text-[var(--text)] mb-1">¿Qué son Antes y Después?</h4>
+          <h4 className="text-sm font-bold text-[var(--text)] mb-1">¿Qué son la prueba inicial y la prueba final?</h4>
           <p className="text-xs text-[var(--text-muted)] mb-3">
-            No tienes que elegir nada: la app los asigna sola, por orden de grabación.
+            No tienes que elegir nada: la app las asigna sola, por orden de grabación.
           </p>
           <div className="grid grid-cols-2 gap-3">
             <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[#38bdf8]/30">
               <div className="flex items-center gap-2 mb-2">
                 <span className="w-5 h-5 rounded-full bg-[#38bdf8] text-[10px] font-bold text-white flex items-center justify-center">1</span>
-                <span className="text-sm font-bold text-[#38bdf8]">Antes</span>
+                <span className="text-sm font-bold text-[#38bdf8]">Prueba inicial</span>
               </div>
               <p className="text-xs text-[var(--text-muted)]">
                 Tu <strong className="text-[var(--text)]">primera</strong> grabación, sin cambios. Es el punto de partida.
@@ -1236,10 +963,10 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[var(--caution)]/30">
               <div className="flex items-center gap-2 mb-2">
                 <span className="w-5 h-5 rounded-full bg-[var(--caution)] text-[10px] font-bold text-white flex items-center justify-center">2</span>
-                <span className="text-sm font-bold text-[var(--caution)]">Después</span>
+                <span className="text-sm font-bold text-[var(--caution)]">Prueba final</span>
               </div>
               <p className="text-xs text-[var(--text-muted)]">
-                Tu grabación <strong className="text-[var(--text)]">nueva</strong>, tras activar un parámetro. Se compara sola con el Antes.
+                Tu grabación <strong className="text-[var(--text)]">nueva</strong>, tras activar un parámetro. Se compara sola con la prueba inicial.
               </p>
             </div>
           </div>
@@ -1256,7 +983,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
                 Arriba, elige cuánto debe durar la grabación (lo ideal es 1 minuto). En el juego pulsa <kbd className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">Shift + F2</kbd> y
                 juega siempre por la misma zona. Cuando termine, pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>.
-                Esa grabación queda guardada sola como <strong className="text-[#38bdf8]">Antes</strong>.
+                Esa grabación queda guardada sola como <strong className="text-[#38bdf8]">prueba inicial</strong>.
               </p>
             </div>
           </div>
@@ -1270,7 +997,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
                 Activa un parámetro (por ejemplo <code className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">game-performance</code>)
                 y repite la grabación en el mismo sitio y con la misma duración. Pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>:
-                esta queda como <strong className="text-[var(--caution)]">Después</strong>.
+                esta queda como <strong className="text-[var(--caution)]">prueba final</strong>.
               </p>
             </div>
           </div>
@@ -1298,12 +1025,12 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           <h4 className="text-sm font-bold text-[var(--text)] mb-2">¿Y si quiero probar otro cambio?</h4>
           <ul className="space-y-1.5 text-xs text-[var(--text-muted)] leading-relaxed list-disc pl-4">
             <li>
-              Si grabas una tercera vez, la nueva <strong className="text-[var(--text)]">reemplaza al Después</strong> y se
-              compara otra vez con el mismo Antes. Así puedes probar varios parámetros contra el mismo punto de partida.
+              Si grabas una tercera vez, la nueva <strong className="text-[var(--text)]">reemplaza a la prueba final</strong> y se
+              compara otra vez con la misma prueba inicial. Así puedes probar varios parámetros contra el mismo punto de partida.
             </li>
             <li>
-              Si quieres un <strong className="text-[var(--text)]">nuevo punto de partida</strong>, elimina el Antes: el Después
-              pasa a ser tu nuevo Antes. O pulsa <strong className="text-[var(--text)]">Empezar de nuevo</strong> para borrar ambos.
+              Si quieres un <strong className="text-[var(--text)]">nuevo punto de partida</strong>, elimina la prueba inicial: la prueba final
+              pasa a ser tu nueva prueba inicial. O pulsa <strong className="text-[var(--text)]">Empezar de nuevo</strong> para borrar ambas.
             </li>
             <li>
               Si grabas <strong className="text-[var(--text)]">otro juego</strong>, empieza una prueba nueva automáticamente.
@@ -1317,7 +1044,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           <div className="space-y-2 text-xs text-[var(--text-muted)]">
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Grabación 1: Palworld sin optimizar → 60 FPS → queda como <strong className="text-[#38bdf8]">Antes</strong></span>
+              <span>Grabación 1: Palworld sin optimizar → 60 FPS → queda como <strong className="text-[#38bdf8]">prueba inicial</strong></span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
@@ -1325,57 +1052,18 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Grabación 2: Palworld con game-performance → 70 FPS → queda como <strong className="text-[var(--caution)]">Después</strong></span>
+              <span>Grabación 2: Palworld con game-performance → 70 FPS → queda como <strong className="text-[var(--caution)]">prueba final</strong></span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, gana el Después 🎉</span>
+              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, gana la prueba final 🎉</span>
             </div>
           </div>
         </div>
       </article>
 
-      {/* Cuadro de confirmación (sin animaciones ni diálogos nativos) */}
-      {confirmState && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60"
-          onClick={() => setConfirmState(null)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="confirm-title"
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--border)] shadow-2xl"
-          >
-            <h4 id="confirm-title" className="text-base font-bold text-[var(--text)] mb-2">
-              {confirmState.title}
-            </h4>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{confirmState.message}</p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                autoFocus
-                onClick={() => setConfirmState(null)}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const run = confirmState.onConfirm;
-                  setConfirmState(null);
-                  run();
-                }}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--error)] text-white hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
-              >
-                {confirmState.confirmLabel}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Cuadro de confirmación (estilo de la app, no el nativo) */}
+      {confirmState && <ConfirmDialog state={confirmState} onClose={close} />}
     </div>
   );
 }

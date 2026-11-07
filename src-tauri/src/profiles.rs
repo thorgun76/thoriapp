@@ -191,6 +191,9 @@ fn resolve_export_path(raw: &str, default_name: &str) -> Result<PathBuf, String>
     Ok(path)
 }
 
+// La firma es plana a propósito: es el contrato que invoca el frontend.
+// Cambiarla por un struct obligaría a tocar api.ts y todos los llamadores.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn save_profile(
     name: String,
@@ -396,6 +399,8 @@ pub fn import_profile_from_text(content: String) -> Result<Vec<Profile>, String>
     import_from_content(&content)
 }
 
+// Mismo contrato plano que save_profile (ver comentario allí).
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn update_profile(
     profile_id: String,

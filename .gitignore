@@ -9,6 +9,9 @@ src-tauri/target/
 dist/
 build/
 
+# Caché de dependencias de Vite (cacheDir en vite.config.ts)
+.vite-cache/
+
 # Logs
 *.log
 npm-debug.log*

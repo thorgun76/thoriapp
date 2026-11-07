@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   TrendingUp, BarChart3, Calendar,
@@ -7,26 +6,16 @@ import {
   Terminal, Trophy, Copy,
 } from 'lucide-react';
 import { ComparisonResultCard, summarizeComparison } from './BenchmarksView';
-import type { BenchmarkComparison } from './BenchmarksView';
-
-/** Una comparación guardada desde Benchmarks (copia completa, no una referencia). */
-interface SavedComparison {
-  id: string;
-  saved_at: string;
-  game_name: string;
-  before_fps: number;
-  after_fps: number;
-  fps_change_percent: number;
-  comparison: BenchmarkComparison;
-}
-
-// Aviso entre pantallas: Benchmarks y Mis pruebas se actualizan cuando cambia la lista.
-const CHANGED_EVENT = 'thoriapp:comparisons-changed';
+import type { SavedComparison } from '../hooks/useSavedComparisons';
+import type { BenchmarkComparison } from '../lib/types';
+import { useSavedComparisons } from '../hooks/useSavedComparisons';
+import { useConfirm, useToast } from '../hooks/useConfirm';
+import { ConfirmDialog, Toast } from './ConfirmDialog';
 
 // "2026-11-03 10:47:42" -> formato ISO, que todos los motores web entienden
 const parseDate = (s: string) => new Date(s.replace(' ', 'T'));
 
-// La fecha de la prueba es la de la grabación "Después", no la del momento de guardar.
+// La fecha de la prueba es la de la grabación final, no la del momento de guardar.
 const testDateOf = (c: SavedComparison) => c.comparison.test.timestamp;
 
 const normGame = (n: string) => n.trim().toLowerCase();
@@ -111,9 +100,9 @@ function ArgumentCard({
 
   const badge =
     summary.winner === 'despues'
-      ? { text: 'Ganó el Después', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      ? { text: 'Ganó la prueba final', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
       : summary.winner === 'antes'
-      ? { text: 'Ganó el Antes', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      ? { text: 'Ganó la prueba inicial', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
       : summary.winner === 'empate'
       ? { text: 'Sin ganador claro', cls: 'bg-[var(--bg)] text-[var(--text-muted)] border-[var(--border)]' }
       : { text: 'Depende de lo que prefieras', cls: 'bg-[var(--caution)]/10 text-[var(--caution)] border-[var(--caution)]/40' };
@@ -127,7 +116,7 @@ function ArgumentCard({
 
       {/* Qué cambió */}
       <div className="mb-4">
-        <p className="text-xs text-[var(--text-muted)] mb-2">Lo que cambió entre el Antes y el Después</p>
+        <p className="text-xs text-[var(--text-muted)] mb-2">Lo que cambió entre la prueba inicial y la final</p>
         {hasChange ? (
           <div className="flex flex-wrap gap-2">
             {added.map((t) => (
@@ -165,14 +154,14 @@ function ArgumentCard({
       {/* Comandos completos */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <CommandBox
-          label="Antes"
+          label="Inicial"
           color="#38bdf8"
           command={beforeCmd}
           isWinner={summary.winner === 'antes'}
           onCopy={onCopy}
         />
         <CommandBox
-          label="Después"
+          label="Final"
           color="var(--caution)"
           command={afterCmd}
           isWinner={summary.winner === 'despues'}
@@ -184,55 +173,10 @@ function ArgumentCard({
 }
 
 export function DashboardView() {
-  const [items, setItems] = useState<SavedComparison[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { toast, setToast } = useToast();
+  const { confirmState, ask, close } = useConfirm();
+  const { items, loading, remove, removeAll } = useSavedComparisons(setToast);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-  const [confirmState, setConfirmState] = useState<{
-    title: string;
-    message: string;
-    confirmLabel: string;
-    onConfirm: () => void;
-  } | null>(null);
-
-  const loadComparisons = useCallback(async () => {
-    try {
-      const list = await invoke<SavedComparison[]>('load_comparisons');
-      setItems(list);
-    } catch (e) {
-      console.error('Error al cargar las pruebas guardadas:', e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadComparisons();
-    const onChanged = () => {
-      loadComparisons();
-    };
-    window.addEventListener(CHANGED_EVENT, onChanged);
-    return () => window.removeEventListener(CHANGED_EVENT, onChanged);
-  }, [loadComparisons]);
-
-  useEffect(() => {
-    if (toast) {
-      const timer = setTimeout(() => setToast(null), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [toast]);
-
-  // Cerrar el cuadro de confirmación con Escape
-  useEffect(() => {
-    if (!confirmState) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setConfirmState(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [confirmState]);
-
-  const notifyChanged = () => window.dispatchEvent(new Event(CHANGED_EVENT));
 
   const copyText = async (text: string) => {
     try {
@@ -244,29 +188,17 @@ export function DashboardView() {
   };
 
   const deleteOne = async (id: string) => {
-    try {
-      await invoke('delete_comparison', { comparisonId: id });
-      if (selectedId === id) setSelectedId(null);
-      setToast('✓ Prueba eliminada');
-      notifyChanged();
-    } catch (e) {
-      setToast(`❌ Error al eliminar: ${e}`);
-    }
+    await remove(id);
+    if (selectedId === id) setSelectedId(null);
   };
 
   const deleteAll = async () => {
-    try {
-      await invoke('delete_all_comparisons');
-      setSelectedId(null);
-      setToast('✓ Se eliminaron todas las pruebas');
-      notifyChanged();
-    } catch (e) {
-      setToast(`❌ Error al eliminar: ${e}`);
-    }
+    await removeAll();
+    setSelectedId(null);
   };
 
   const askDeleteOne = (c: SavedComparison) =>
-    setConfirmState({
+    ask({
       title: 'Eliminar prueba',
       message: `Se eliminará la prueba de ${c.game_name || 'este juego'}. Esta acción no se puede deshacer.`,
       confirmLabel: 'Eliminar',
@@ -274,7 +206,7 @@ export function DashboardView() {
     });
 
   const askDeleteAll = () =>
-    setConfirmState({
+    ask({
       title: 'Borrar todas las pruebas',
       message: `Se eliminarán las ${items.length} pruebas guardadas. Esta acción no se puede deshacer.`,
       confirmLabel: 'Borrar todas',
@@ -319,55 +251,8 @@ export function DashboardView() {
   // ── Cuadro de confirmación y aviso (se muestran en todas las pantallas) ──
   const overlays = (
     <>
-      {toast && (
-        <div
-          role="status"
-          className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/20 text-sm font-semibold text-white"
-        >
-          {toast}
-        </div>
-      )}
-
-      {confirmState && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60"
-          onClick={() => setConfirmState(null)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="confirm-title"
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--border)] shadow-2xl"
-          >
-            <h4 id="confirm-title" className="text-base font-bold text-[var(--text)] mb-2">
-              {confirmState.title}
-            </h4>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{confirmState.message}</p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                autoFocus
-                onClick={() => setConfirmState(null)}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const run = confirmState.onConfirm;
-                  setConfirmState(null);
-                  run();
-                }}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--error)] text-white hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
-              >
-                {confirmState.confirmLabel}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {toast && <Toast message={toast} />}
+      {confirmState && <ConfirmDialog state={confirmState} onClose={close} />}
     </>
   );
 

@@ -81,7 +81,7 @@ pub fn detect() -> Hardware {
         .or(gpus.first())
         .copied()
         .unwrap_or("");
-    let raw_gpu = pick.splitn(2, ": ").nth(1).unwrap_or("No detectada");
+    let raw_gpu = pick.split_once(": ").map(|x| x.1).unwrap_or("No detectada");
     hw.gpu = clean_gpu_name(raw_gpu);
     hw.vendor = if pick.contains("NVIDIA") {
         Vendor::Nvidia

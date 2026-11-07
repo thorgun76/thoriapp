@@ -24,6 +24,10 @@ thiserror = "1.0"
 anyhow = "1.0"
 regex = "1.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Carátulas locales -> data URI base64
+base64 = "0.22"
+# Nombre de archivo que Heronite usa en su caché de imágenes (sha256 de la URL)
+sha2 = "0.10"
 
 [features]
 default = ["custom-protocol"]

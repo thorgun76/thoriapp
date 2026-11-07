@@ -256,7 +256,7 @@ fn find_latest_mangohud_log(dir: &Path) -> Result<std::path::PathBuf, String> {
         ));
     }
 
-    log_files.sort_by(|a, b| b.1.cmp(&a.1));
+    log_files.sort_by_key(|f| std::cmp::Reverse(f.1));
 
     let latest = &log_files[0].0;
     println!("[Benchmark] Usando el log más reciente: {:?}", latest);
@@ -325,7 +325,7 @@ fn extract_game_name_from_file(file_path: &Path) -> String {
         let name_lower = name.to_lowercase();
         if name_lower.starts_with(prefix) {
             let rest = name[prefix.len()..].to_string();
-            let trimmed = rest.trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ');
+            let trimmed = rest.trim_start_matches(['_', '-', ' ']);
             if !trimmed.is_empty() {
                 name = trimmed.to_string();
                 println!(
@@ -339,10 +339,10 @@ fn extract_game_name_from_file(file_path: &Path) -> String {
 
     // PASO 4: Limpiar separadores finales y espacios extra
     name = name
-        .trim_end_matches(|c: char| c == '_' || c == '-' || c == ' ')
+        .trim_end_matches(['_', '-', ' '])
         .to_string();
     name = name
-        .trim_start_matches(|c: char| c == '_' || c == '-' || c == ' ')
+        .trim_start_matches(['_', '-', ' '])
         .to_string();
 
     // PASO 5: Si quedó vacío, usar el nombre original del archivo
@@ -550,7 +550,7 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     Ok(Benchmark {
         id: format!("bench_{}", now.replace([':', ' ', '-', '.'], "")),
         profile_id: String::new(),
-        game_name: game_name,
+        game_name,
         appid: 0,
         timestamp: file_timestamp,
         duration_seconds,
@@ -617,10 +617,11 @@ pub fn save_benchmark(
 
     benchmark.profile_id = profile_id;
 
-    if benchmark.game_name.is_empty() || benchmark.game_name == "Desconocido" {
-        if !game_name.is_empty() && game_name != "Desconocido" {
-            benchmark.game_name = game_name;
-        }
+    if (benchmark.game_name.is_empty() || benchmark.game_name == "Desconocido")
+        && !game_name.is_empty()
+        && game_name != "Desconocido"
+    {
+        benchmark.game_name = game_name;
     }
 
     benchmark.appid = appid;
@@ -1140,4 +1141,160 @@ pub fn delete_all_comparisons() -> Result<(), String> {
         comparisons: Vec::new(),
     };
     save_saved_data(&data)
+}
+
+// ==================== TESTS ====================
+// Solo cubren la lógica pura: no tocan disco ni el runtime de Tauri.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bench(appid: u32, name: &str) -> Benchmark {
+        Benchmark {
+            id: format!("{}-{}", appid, name),
+            profile_id: String::new(),
+            game_name: name.to_string(),
+            appid,
+            timestamp: String::new(),
+            duration_seconds: 60.0,
+            avg_fps: 60.0,
+            fps_1_percent_low: 30.0,
+            fps_0_1_percent_low: 20.0,
+            max_fps: 120.0,
+            min_fps: 10.0,
+            frame_time_avg: 16.6,
+            frame_time_1_percent_high: 33.0,
+            total_frames: 3600,
+            notes: None,
+            launch_command: "%command%".to_string(),
+            spikes_per_min: None,
+            pct_over_33ms: None,
+            jitter_ms: None,
+            worst_frame_ms: None,
+        }
+    }
+
+    fn sample(fps: f64, ft: f64) -> Sample {
+        Sample { fps, frame_time: ft, elapsed_ns: None }
+    }
+
+    #[test]
+    fn percentile_interpola_entre_valores_vecinos() {
+        let v = [0.0, 10.0, 20.0, 30.0];
+        assert_eq!(percentile_sorted(&v, 0.0), 0.0);
+        assert_eq!(percentile_sorted(&v, 100.0), 30.0);
+        // rank = 0.5 * 3 = 1.5 → entre 10 y 20
+        assert_eq!(percentile_sorted(&v, 50.0), 15.0);
+    }
+
+    #[test]
+    fn percentile_con_un_solo_valor_lo_devuelve() {
+        assert_eq!(percentile_sorted(&[42.0], 99.0), 42.0);
+    }
+
+    #[test]
+    fn percentile_con_lista_vacia_da_cero_sin_panico() {
+        assert_eq!(percentile_sorted(&[], 50.0), 0.0);
+    }
+
+    #[test]
+    fn percentile_satura_fuera_de_rango() {
+        let v = [1.0, 2.0, 3.0];
+        assert_eq!(percentile_sorted(&v, -10.0), 1.0);
+        assert_eq!(percentile_sorted(&v, 500.0), 3.0);
+    }
+
+    #[test]
+    fn descarta_muestras_repetidas_consecutivas() {
+        let (out, removed) = drop_stuck_samples(vec![
+            sample(60.0, 16.6),
+            sample(60.0, 16.6), // repetida
+            sample(59.0, 16.9),
+            sample(59.0, 16.9), // repetida
+            sample(60.0, 16.6), // no es consecutiva: se conserva
+        ]);
+        assert_eq!(removed, 2);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2].fps, 60.0);
+    }
+
+    #[test]
+    fn sin_repetidas_no_descarta_nada() {
+        let (out, removed) = drop_stuck_samples(vec![sample(60.0, 16.6), sample(70.0, 14.2)]);
+        assert_eq!(removed, 0);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn stutter_detecta_picos_y_frames_lentos() {
+        // 8 frames normales de 16 ms y 2 picos de 100 ms.
+        let mut ft = vec![16.0; 8];
+        ft.push(100.0);
+        ft.push(100.0);
+        let s = compute_stutter(&ft, 60.0);
+
+        // mediana 16 → umbral max(32, 25) = 32 → los dos de 100 son picos
+        assert_eq!(s.spikes_per_min, 2.0); // 2 picos en 1 minuto
+        assert!((s.pct_over_33ms - 20.0).abs() < 1e-9); // 2 de 10
+        assert!(s.jitter_ms > 0.0);
+        assert!((s.worst_frame_ms - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stutter_con_frame_times_uniformes_no_hay_jitter() {
+        let ft = vec![16.0; 60];
+        let s = compute_stutter(&ft, 60.0);
+        assert_eq!(s.spikes_per_min, 0.0);
+        assert_eq!(s.pct_over_33ms, 0.0);
+        assert_eq!(s.jitter_ms, 0.0);
+    }
+
+    #[test]
+    fn stutter_con_duracion_cero_no_divide_por_cero() {
+        let s = compute_stutter(&[16.0, 200.0], 0.0);
+        assert_eq!(s.spikes_per_min, 0.0);
+    }
+
+    #[test]
+    fn same_game_usa_appid_si_ambos_lo_tienen() {
+        assert!(same_game(&bench(440, "TF2"), &bench(440, "Otro nombre")));
+        assert!(!same_game(&bench(440, "TF2"), &bench(730, "CS2")));
+    }
+
+    #[test]
+    fn same_game_cae_al_nombre_si_falta_appid() {
+        // Un juego de Lutris no tiene appid (0): se compara el nombre, sin
+        // distinguir mayúsculas ni espacios sobrantes.
+        assert!(same_game(&bench(0, "Hollow Knight"), &bench(0, "hollow knight ")));
+        assert!(!same_game(&bench(0, "Hollow Knight"), &bench(0, "Celeste")));
+    }
+
+    #[test]
+    fn pair_only_deja_antes_y_ultimo() {
+        let list = vec![bench(1, "a"), bench(1, "b"), bench(1, "c"), bench(1, "d")];
+        let out = pair_only(list);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].game_name, "a"); // el Antes original
+        assert_eq!(out[1].game_name, "d"); // el Después más reciente
+    }
+
+    #[test]
+    fn pair_only_no_toca_listas_de_dos_o_menos() {
+        assert_eq!(pair_only(vec![bench(1, "a")]).len(), 1);
+        assert_eq!(pair_only(vec![bench(1, "a"), bench(1, "b")]).len(), 2);
+        assert_eq!(pair_only(vec![]).len(), 0);
+    }
+
+    #[test]
+    fn norm_game_name_ignora_mayusculas_y_espacios() {
+        assert_eq!(norm_game_name("  Hollow Knight  "), norm_game_name("hollow knight"));
+    }
+
+    #[test]
+    fn norm_game_name_quita_la_extension_del_ejecutable() {
+        assert_eq!(norm_game_name("Celeste.exe"), "celeste");
+        assert_eq!(norm_game_name("Game.x86_64"), "game");
+        assert_eq!(norm_game_name("Game.bin"), "game");
+    }
 }
