@@ -864,12 +864,40 @@ pub fn local_cover(launcher: &str, appid: Option<u32>, key: &str) -> Option<Stri
 /// Igual que [`local_cover`], con el runner del launcher (`gog`, `sideload`...).
 /// Heronite indexa su arte por `"<runner>:<appName>"`, así que sin el runner
 /// solo se encontraría el arte guardado bajo la clave sin prefijo.
+/// Punto de entrada de `get_local_cover`: valida lo que manda el frontend antes
+/// de tocar el disco.
+///
+/// `key` y `runner` los decide la UI, así que se tratan como dato no confiable.
+/// `key` lleva candidatas separadas por `|`: basta con que **una** sea insegura
+/// para descartar la petición entera, porque un solo `../` revela que el valor no
+/// viene de un launcher real.
 pub fn local_cover_with_runner(
     launcher: &str,
     appid: Option<u32>,
     key: &str,
     runner: Option<&str>,
 ) -> Option<String> {
+    // Cada candidata se valida por separado: `build_lutris_cover_key` y el escaneo
+    // de Heronite ya generan `slug|slug` y claves tipo `steam_123|titulo`.
+    if key
+        .split('|')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .any(|k| !is_safe_cover_name(k))
+    {
+        println!("[Covers] ✗ clave de carátula no permitida: {:?}", key);
+        return None;
+    }
+
+    // `runner` solo se usa como prefijo de búsqueda en los JSON de Heronite, pero
+    // era el único campo de la ruta que no se filtraba.
+    if let Some(r) = runner.filter(|r| !r.trim().is_empty()) {
+        if !is_safe_cover_name(r) {
+            println!("[Covers] ✗ runner no permitido: {:?}", r);
+            return None;
+        }
+    }
+
     match launcher {
         "lutris" => lutris_cover(key),
         "heroic" => heroic_cover(key),
@@ -890,6 +918,28 @@ mod tests {
         assert!(lutris_cover("../etc/passwd").is_none());
         assert!(lutris_cover("a/b").is_none());
         assert!(heroic_cover("../../x").is_none());
+    }
+
+    #[test]
+    fn local_cover_valida_lo_que_manda_el_frontend() {
+        // Ninguna de estas debe llegar al disco. No hace falta que el archivo
+        // exista: si la validación falla, se corta antes de mirar carpetas.
+        assert!(local_cover_with_runner("lutris", None, "../../../etc/passwd", None).is_none());
+        assert!(local_cover_with_runner("lutris", None, "ok|../../secreto", None).is_none());
+        assert!(local_cover_with_runner("heroic", None, "a/b", None).is_none());
+        // El runner tampoco puede traer ruta: solo es prefijo de una clave JSON.
+        assert!(
+            local_cover_with_runner("heronite", None, "juego", Some("../legendary")).is_none()
+        );
+    }
+
+    #[test]
+    fn local_cover_acepta_una_clave_con_varias_candidatas() {
+        // `slug|slug-timestamp|123` es lo que genera el escáner de Lutris.
+        assert!(local_cover_with_runner("lutris", None, "a|b|c", None).is_none());
+        // ...pero solo porque no existe la imagen, no porque se rechace la clave.
+        assert!(is_safe_cover_name("a"));
+        assert!(is_safe_cover_name("steam_123|titulo con espacios"));
     }
 
     #[test]

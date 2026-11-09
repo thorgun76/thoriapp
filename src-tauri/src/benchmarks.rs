@@ -1310,6 +1310,62 @@ pub fn get_mangohud_log_duration() -> Result<u32, String> {
     Ok(0)
 }
 
+/// Rechaza la escritura si el archivo es un enlace simbólico o no es un archivo
+/// normal.
+///
+/// `MangoHud.conf` es un archivo **del usuario**, no nuestro: si apunta a otro
+/// sitio (a `~/.bashrc`, o a algo fuera del home), reescribirlo tocaría un archivo
+/// que no nos corresponde. `fs::metadata` seguiría el enlace sin avisar; aquí se
+/// mira el enlace en sí con `symlink_metadata`.
+fn ensure_regular_file(path: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("No se pudo comprobar {:?}: {}", path, e))?;
+
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "«{}» es un enlace simbólico. Por seguridad Thoriapp no escribe a través de él; \
+             edita el archivo real a mano.",
+            path.display()
+        ));
+    }
+
+    if !meta.is_file() {
+        return Err(format!("«{}» no es un archivo normal.", path.display()));
+    }
+
+    Ok(())
+}
+
+/// Escritura atómica: archivo temporal + `rename`. Un corte a mitad no deja el
+/// `.conf` a medias (que MangoHud leería mal), igual que en los perfiles.
+fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let mut tmp_name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    tmp_name.push(".thoriapp.tmp");
+    let tmp = path.with_file_name(tmp_name);
+
+    fs::write(&tmp, content).map_err(|e| format!("No se pudo escribir el temporal: {}", e))?;
+
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("No se pudo guardar {:?}: {}", path, e));
+    }
+    Ok(())
+}
+
+/// Ruta de la copia de seguridad de un `.conf` (`MangoHud.conf` ->
+/// `MangoHud.conf.thoriapp.bak`).
+fn backup_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".thoriapp.bak");
+    path.with_file_name(name)
+}
+
 /// Cambia `log_duration` en MangoHud.conf (y en el de GOverlay si existe).
 /// Solo toca esa línea; el resto de la configuración queda igual.
 #[tauri::command]
@@ -1321,15 +1377,18 @@ pub fn set_mangohud_log_duration(seconds: u32) -> Result<u32, String> {
     let mut updated = 0;
 
     for path in mangohud_conf_paths() {
-        if !path.exists() {
+        // `exists()` sigue enlaces: un enlace roto daría `false` y se saltaría sin
+        // avisar. `symlink_metadata` ve el enlace aunque su destino no exista.
+        if fs::symlink_metadata(&path).is_err() {
             continue;
         }
+        ensure_regular_file(&path)?;
 
         let content = fs::read_to_string(&path)
             .map_err(|e| format!("No se pudo leer {:?}: {}", path, e))?;
 
-        // Copia de seguridad (solo la primera vez)
-        let backup = path.with_extension("conf.thoriapp.bak");
+        // Copia de seguridad (solo la primera vez).
+        let backup = backup_path(&path);
         if !backup.exists() {
             fs::write(&backup, &content).ok();
         }
@@ -1360,8 +1419,7 @@ pub fn set_mangohud_log_duration(seconds: u32) -> Result<u32, String> {
         let mut output = lines.join("\n");
         output.push('\n');
 
-        fs::write(&path, output)
-            .map_err(|e| format!("No se pudo guardar {:?}: {}", path, e))?;
+        write_atomic(&path, &output)?;
 
         println!("[MangoHud] log_duration={} guardado en {:?}", seconds, path);
         updated += 1;
@@ -1375,6 +1433,52 @@ pub fn set_mangohud_log_duration(seconds: u32) -> Result<u32, String> {
     }
 
     Ok(seconds)
+}
+
+/// Restaura MangoHud.conf desde la copia creada por
+/// [`set_mangohud_log_duration`].
+///
+/// Antes había copia `.bak` pero ninguna forma de usarla: un respaldo que no se
+/// puede restaurar desde la app no protege de nada. Devuelve cuántos archivos se
+/// restauraron.
+#[tauri::command]
+pub fn restore_mangohud_conf() -> Result<u32, String> {
+    let mut restored = 0;
+
+    for path in mangohud_conf_paths() {
+        let backup = backup_path(&path);
+        if !backup.is_file() {
+            continue;
+        }
+
+        // La copia se escribió nosotros, pero se comprueba igual: puede haber sido
+        // sustituida por un enlace desde entonces.
+        ensure_regular_file(&backup)?;
+
+        let original = fs::read_to_string(&backup)
+            .map_err(|e| format!("No se pudo leer la copia {:?}: {}", backup, e))?;
+
+        // Si el `.conf` actual es un enlace, no se escribe a través de él.
+        // `symlink_metadata` distingue "no existe" de "es un enlace", que es
+        // justo lo que interesa aquí: un enlace roto también debe rechazarse.
+        if fs::symlink_metadata(&path).is_ok() {
+            ensure_regular_file(&path)?;
+        }
+
+        write_atomic(&path, &original)?;
+        fs::remove_file(&backup).ok();
+
+        println!("[MangoHud] Configuración restaurada desde {:?}", backup);
+        restored += 1;
+    }
+
+    if restored == 0 {
+        return Err(
+            "No hay ninguna copia de seguridad de MangoHud.conf que restaurar.".to_string(),
+        );
+    }
+
+    Ok(restored)
 }
 
 // ───────────────────────── Pruebas guardadas ("Mis pruebas") ─────────────────────────
@@ -1501,6 +1605,78 @@ pub fn delete_all_comparisons() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Carpeta temporal propia por test: los tests son de archivos, así que no
+    /// pueden compartir directorio. Se borra antes de usarla para que una
+    /// ejecución anterior interrumpida no deje basura que haga fallar asserts
+    /// por motivos ajenos al código.
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "thoriapp-test-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn backup_path_anade_sufijo_sin_pisar_la_extension() {
+        // `.with_extension("conf.thoriapp.bak")` convertía MangoHud.conf en
+        // MangoHud.conf.thoriapp.bak, pero con nombres raros cambiaba de más.
+        let p = Path::new("/home/u/.config/MangoHud/MangoHud.conf");
+        assert_eq!(
+            backup_path(p),
+            Path::new("/home/u/.config/MangoHud/MangoHud.conf.thoriapp.bak")
+        );
+    }
+
+    #[test]
+    fn ensure_regular_file_rechaza_un_enlace_simbolico() {
+        let dir = tmp_dir("symlink");
+        let target = dir.join("real.conf");
+        let link = dir.join("link.conf");
+        fs::write(&target, "log_duration=10\n").unwrap();
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = ensure_regular_file(&link).unwrap_err();
+        assert!(err.contains("enlace simbólico"), "mensaje inesperado: {err}");
+
+        // El archivo real sí se acepta.
+        assert!(ensure_regular_file(&target).is_ok());
+
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn ensure_regular_file_rechaza_un_directorio() {
+        let dir = tmp_dir("dird").join("soy-carpeta");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(ensure_regular_file(&dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_no_deja_temporales_y_conserva_el_contenido() {
+        let dir = tmp_dir("atomic");
+        let file = dir.join("MangoHud.conf");
+        fs::write(&file, "viejos\n").unwrap();
+
+        write_atomic(&file, "nuevos=1\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "nuevos=1\n");
+        // El temporal no debe quedar huérfano.
+        let tmp = dir.join("MangoHud.conf.thoriapp.tmp");
+        assert!(!tmp.exists(), "quedó el temporal {:?}", tmp);
+
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir(&dir);
+    }
 
     fn bench(appid: u32, name: &str) -> Benchmark {
         Benchmark {

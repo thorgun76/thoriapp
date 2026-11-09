@@ -239,9 +239,40 @@ fn heronite_uninstalled_count() -> usize {
     launchers::heronite_desinstalados()
 }
 
+/// ¿Se está ejecutando como root?
+///
+/// Thoriapp escribe en la configuración del usuario (`~/.config/MangoHud`,
+/// `~/.config/thoriapp`). Lanzada con `sudo`, crearía archivos con dueño root que
+/// luego el usuario no puede modificar, y rompería el escritorio del usuario. Se
+/// lee `/proc/self/status` para no añadir la dependencia `libc` solo por esto.
+/// Interpreta el campo `Uid:` de `/proc/self/status`. Separado de
+/// [`running_as_root`] para poder probarlo sin depender de con qué usuario
+/// corren los tests.
+fn uid_is_root(status: &str) -> bool {
+    status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|uid| uid.parse::<u32>().ok())
+        == Some(0)
+}
+
+fn running_as_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .map(|s| uid_is_root(&s))
+        .unwrap_or(false)
+}
+
 fn main() {
+    if running_as_root() {
+        eprintln!(
+            "Thoriapp no debe ejecutarse como root: escribiría la configuración del \
+             escritorio con dueño root. Ejecútala con tu usuario normal."
+        );
+        std::process::exit(1);
+    }
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             get_hardware,
             get_rules,
@@ -261,8 +292,8 @@ fn main() {
             profiles::delete_profile,
             profiles::export_profile,
             profiles::export_all_profiles,
-            profiles::import_profile,
             profiles::import_profile_from_text,
+            profiles::preview_import_profile,
             profiles::update_profile,
             profiles::reorder_profiles,
             benchmarks::save_benchmark,
@@ -278,6 +309,7 @@ fn main() {
             heronite_uninstalled_count,
             benchmarks::get_mangohud_log_duration,
             benchmarks::set_mangohud_log_duration,
+            benchmarks::restore_mangohud_conf,
             preflight::get_runtime_env_command,
             anticheat::get_anticheat_info,
             proton_pulse::get_proton_pulse_reports,
@@ -298,7 +330,25 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::host_matches;
+    use super::{host_matches, uid_is_root};
+
+    #[test]
+    fn el_chequeo_de_root_entiende_el_formato_de_proc() {
+        // Formato real: "Uid:\t<real>\t<efectivo>\t<salvado>\t<fs>". Se usa el
+        // primero, que es el del usuario real del proceso.
+        assert!(uid_is_root("Name:\tthoriapp\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0"));
+        assert!(!uid_is_root("Name:\tthoriapp\nUid:\t1000\t1000\t1000\t1000"));
+    }
+
+    #[test]
+    fn el_chequeo_de_root_no_acepta_basura() {
+        // Sin línea `Uid:` no se asume root (mejor abrir que bloquear por un
+        // formato inesperado en otro sistema).
+        assert!(!uid_is_root(""));
+        assert!(!uid_is_root("Gid:\t0\t0\t0\t0"));
+        assert!(!uid_is_root("Uid:\troot\t0\t0\t0"));
+        assert!(!uid_is_root("Uid:"));
+    }
 
     #[test]
     fn acepta_el_dominio_exacto() {

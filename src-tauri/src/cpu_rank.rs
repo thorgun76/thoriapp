@@ -129,8 +129,7 @@ pub const CPUS: &[Cpu] = &[
 /// Minúsculas y espacios colapsados, con `™`/`®` fuera (Steam mete `Intel®`).
 fn normalize(s: &str) -> String {
     s.to_lowercase()
-        .replace('®', " ")
-        .replace('™', " ")
+        .replace(['®', '™'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

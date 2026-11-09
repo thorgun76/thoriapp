@@ -439,8 +439,8 @@ pub struct Machine {
 ///
 /// - `Ok`:    `actual >= needed`. Cumple incluso con el coste extra de Proton.
 /// - `Tight`: `requerido <= actual < needed`. Cumple el mínimo de Steam en crudo,
-///            pero sin el margen que pide Proton. Avisa, no bloquea: es honesto
-///            decir "vas justo" cuando el número de Steam es de Windows.
+///   pero sin el margen que pide Proton. Avisa, no bloquea: es honesto
+///   decir "vas justo" cuando el número de Steam es de Windows.
 /// - `Fail`:  `actual < requerido`. No llega ni al mínimo publicado.
 ///
 /// Antes había un corte arbitrario de `ratio >= 1.25` para `Ok`, que convertía
