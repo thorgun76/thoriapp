@@ -10,7 +10,9 @@
         "value": "game-performance",
         "impact": "medio",
         "default_on": false,
-        "requires": ["game-performance"],
+        "requires": [
+          "game-performance"
+        ],
         "title": "CPU en modo performance (CachyOS)",
         "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
         "evidence": "heuristica",
@@ -54,7 +56,9 @@
         "value": "PROTON_ENABLE_WAYLAND=1",
         "impact": "bajo",
         "default_on": false,
-        "requires": ["wayland"],
+        "requires": [
+          "wayland"
+        ],
         "title": "Renderizar nativo en Wayland",
         "why": "Puede reducir overhead si ya estás en Wayland.",
         "warn": "Experimental: puede dar fallos con el cursor o el foco.",
@@ -64,7 +68,9 @@
         "kind": "env",
         "value": "RADV_DEBUG=nofastclears",
         "impact": "evitar",
-        "requires": ["amd"],
+        "requires": [
+          "amd"
+        ],
         "title": "Desactivar fast clears (debug)",
         "why": "Parámetro de depuración que baja el rendimiento.",
         "evidence": "heuristica"
@@ -73,6 +79,530 @@
     "tips": [
       "Cambia un solo parámetro cada vez y compara 1% lows sobre el mismo recorrido.",
       "Si un parámetro no mejora de forma medible, quítalo."
+    ]
+  },
+  {
+    "name": "Cyberpunk 2077",
+    "appid": 1091500,
+    "bottleneck": "GPU (path tracing) y CPU en Night City",
+    "summary": "Juego de REDengine 4 con DXVK sobre Vulkan por defecto. El cuello real es la GPU; en el centro de Night City también la CPU, que es donde se notan los 1% lows. Nada de ray tracing forzado: cuesta FPS y es lo contrario de lo que busca esta app.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_LOCAL_SHADER_CACHE=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Caché de shaders por juego",
+        "why": "Menos stuttering por compilación de shaders tras actualizar drivers.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Reduce stuttering al cargar zonas nuevas"
+      },
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": [
+          "game-performance"
+        ],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "env",
+        "value": "DXVK_ASYNC=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Compilación de shaders en segundo plano",
+        "why": "En un mundo abierto con miles de shaders distintos, la compilación se nota como tirones la primera vez que entras a una zona. DXVK_ASYNC los compila sin bloquear el hilo de render. Con DXVK 2.x es un no-op (ya es asíncrono por defecto), pero no rompe nada.",
+        "evidence": "documentado",
+        "source": "https://github.com/doitsujin/dxvk",
+        "essential": false,
+        "simple_why": "Quita los tirones la primera vez que entras a una zona"
+      },
+      {
+        "kind": "env",
+        "value": "RADV_PERFTEST=gpl",
+        "impact": "bajo",
+        "requires": [
+          "amd"
+        ],
+        "default_on": false,
+        "title": "Pipeline ejecutable en RADV (AMD)",
+        "why": "En GPUs AMD (RADV) el pipeline precompilado reduce los tirones de compilación de shaders. En NVIDIA/Intel no aplica.",
+        "evidence": "documentado",
+        "source": "https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/amd/vulkan/radv_nir_compiler.c",
+        "essential": false,
+        "simple_why": "Suaviza la primera pasada en tarjetas AMD"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_ENABLE_NVAPI=1",
+        "impact": "bajo",
+        "requires": [
+          "nvidia"
+        ],
+        "default_on": false,
+        "title": "NVAPI de Proton (NVIDIA)",
+        "why": "Cyberpunk usa NVAPI para el estado de las funciones de NVIDIA. Activarlo en Proton permite que el juego lo detecte en vez de caer al camino genérico.",
+        "evidence": "documentado",
+        "source": "https://github.com/ValveSoftware/Proton",
+        "essential": false,
+        "simple_why": "Deja que el juego vea tu tarjeta NVIDIA como tal"
+      },
+      {
+        "kind": "config",
+        "value": "DLSS/FSR: calidad antes que cualquier env",
+        "impact": "alto",
+        "default_on": false,
+        "title": "Usa reescalado dentro del juego",
+        "why": "En este juego el ajuste que más FPS da está en el menú, no en una variable: DLSS (NVIDIA) o FSR (AMD/Intel) en modo Calidad dan más que cualquier combinación de envs. Antes de tocar variables, baja el reescalado.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "DLSS o FSR en Calidad da más FPS que cualquier truco de la app"
+      },
+      {
+        "kind": "env",
+        "value": "VKD3D_CONFIG=dxr",
+        "impact": "evitar",
+        "requires": [
+          "rt"
+        ],
+        "title": "Forzar ray tracing en VKD3D",
+        "why": "Activa el trazado de rayos. En GPUs sin unidades de RT, o con las de primera generación, los FPS se desploman. La app solo lo ofrece si tu tarjeta lo mueve con soltura; si lo activas a mano, mide antes y después.",
+        "warn": "Solo tiene sentido en GPUs con RT de última generación. En el resto es pérdida de FPS.",
+        "evidence": "documentado",
+        "not_recommended_for": [
+          "gpu_sin_rt"
+        ],
+        "simple_why": "Solo si tu tarjeta mueve ray tracing con soltura"
+      },
+      {
+        "kind": "env",
+        "value": "MANGOHUD_CONFIG=fps_limit=0",
+        "impact": "bajo",
+        "default_on": false,
+        "title": "Quitar el límite de FPS de MangoHud",
+        "why": "Un límite de FPS en el overlay con VRR mal configurado causa judder. Si tienes FreeSync/GSync, limita dentro del juego, no en MangoHud.",
+        "evidence": "heuristica",
+        "essential": false,
+        "simple_why": "Evita que el overlay se pelee con tu FreeSync"
+      }
+    ],
+    "tips": [
+      "El ajuste que más rinde está dentro del juego: reescalado (DLSS/FSR) en Calidad antes que cualquier variable.",
+      "Baja «Sombras de multitud» y «Distancia de dibujado detallado» antes que el reescalado: se nota menos y da más FPS.",
+      "Mide en el centro de Night City, no en el desierto: es el peor caso y el que vas a jugar.",
+      "No uses `VKD3D_CONFIG=dxr` si no tienes RT de última generación: cuesta entre 20 y 40 % de rendimiento."
+    ]
+  },
+  {
+    "name": "Elden Ring",
+    "appid": 1245620,
+    "bottleneck": "CPU monohilo y shaders en el primer arranque",
+    "summary": "Usa D3D12 vía VKD3D. El juego es famoso por el stuttering de compilación de shaders y por un límite de 60 FPS. En Linux se arregla en buena parte con caché de shaders persistente; lo demás es limitar FPS y no pelear con el motor.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_LOCAL_SHADER_CACHE=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Caché de shaders por juego",
+        "why": "Menos stuttering por compilación de shaders tras actualizar drivers.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Reduce stuttering al cargar zonas nuevas"
+      },
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": [
+          "game-performance"
+        ],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "env",
+        "value": "DXVK_HUD=fps,frametimes",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "HUD de frametimes de DXVK",
+        "why": "Para ver el stuttering real hace falta el gráfico de frametimes, no solo los FPS. MangoHud da 1% lows; el HUD de DXVK muestra el pico exacto.",
+        "evidence": "documentado",
+        "essential": false,
+        "simple_why": "Muestra en pantalla cuándo hay tirones reales"
+      },
+      {
+        "kind": "env",
+        "value": "VKD3D_FEATURE_LEVEL=12_0",
+        "impact": "bajo",
+        "default_on": false,
+        "title": "Forzar feature level 12_0 en VKD3D",
+        "why": "En algunas versiones de VKD3D-Proton el juego elige un nivel de características superior al necesario y compila más pipelines. Forzar 12_0 reduce compilaciones; si el juego no arranca, quítalo.",
+        "warn": "Puede impedir el arranque en según qué versión de Proton. Quítalo si el juego no pasa del logo.",
+        "evidence": "heuristica",
+        "essential": false,
+        "simple_why": "Menos compilaciones de shaders; quítalo si no arranca"
+      },
+      {
+        "kind": "config",
+        "value": "Limitar a 60 FPS (el motor no admite más)",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Limitador de FPS dentro del juego",
+        "why": "Sin límite, la GPU trabaja en vacío subiendo la temperatura y el consumo sin ganar nada. Activa «Limitar a 60 FPS» en el menú de vídeo y elige Calidad de imagen media; subirla solo sube la carga.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "El juego no pasa de 60 FPS: limitarlo enfría la GPU y no pierdes nada"
+      },
+      {
+        "kind": "config",
+        "value": "Desactiva EAC solo si no vas a jugar online",
+        "impact": "evitar",
+        "default_on": false,
+        "title": "No toques el anti-cheat para el online",
+        "why": "Elden Ring usa Easy Anti-Cheat en el modo online. Cualquier intento de desactivarlo, aunque sea para ganar rendimiento en el modo offline, se trata como manipulación por el sistema: no hay segundo aviso.",
+        "warn": "Desactivar el anti-cheat es motivo de bloqueo en el modo online.",
+        "evidence": "documentado",
+        "not_recommended_for": [
+          "online"
+        ],
+        "simple_why": "Tocar el anti-cheat te puede banear; no lo hagas"
+      }
+    ],
+    "tips": [
+      "El stuttering de los primeros minutos es compilación de shaders. Juega un rato, ciérralo y vuelve: la segunda sesión va mucho mejor.",
+      "La caché de shaders de Steam se guarda en `~/.steam/steam/steamapps/shadercache`. Si añades el juego a otro perfil, se regenera.",
+      "Si mueres con tirones constantes: baja «Calidad del agua» y «Calidad de sombras»; el resto apenas mueve la aguja."
+    ]
+  },
+  {
+    "name": "Baldur's Gate 3",
+    "appid": 1086940,
+    "bottleneck": "CPU (turnos y físicas) y shaders en escenas con mucha luz",
+    "summary": "Usa Vulkan nativo en Linux, así que no pasa por DXVK. El cuello está en la CPU en el acto 3 (muchos objetos y sombras en tiempo real) y en la compilación de shaders al entrar a escenas nuevas.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_LOCAL_SHADER_CACHE=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Caché de shaders por juego",
+        "why": "Menos stuttering por compilación de shaders tras actualizar drivers.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Reduce stuttering al cargar zonas nuevas"
+      },
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": [
+          "game-performance"
+        ],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "env",
+        "value": "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
+        "impact": "evitar",
+        "default_on": false,
+        "title": "Forzar el ICD de AMD",
+        "why": "Forzar a mano un ICD concreto salta la selección automática y puede cargar el driver equivocado (o ninguno). Si hay varios GPU, deja que Vulkan elija.",
+        "warn": "Forzar un ICD puede impedir que el juego arranque.",
+        "evidence": "heuristica",
+        "simple_why": "Puede romper el arranque: casi nunca hace falta"
+      },
+      {
+        "kind": "config",
+        "value": "Activa el FSR dentro del juego",
+        "impact": "alto",
+        "default_on": false,
+        "title": "Reescalado FSR del juego",
+        "why": "En el acto 3 la GPU deja de sostenerse a 1440p. El juego trae FSR: ponlo en Calidad antes de bajar la distancia de dibujado, que en un CRPG se nota más.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "FSR en Calidad da más FPS que bajar calidad a mano"
+      },
+      {
+        "kind": "config",
+        "value": "Desactiva \"Sombra dinámica\" y baja \"Sombra de multitud\"",
+        "impact": "alto",
+        "default_on": false,
+        "title": "Dos ajustes concretos que dan FPS",
+        "why": "En el acto 3, la ciudad tiene cientos de NPCs con sombras en tiempo real: bajar «Sombra de multitud» y desactivar «Sombra dinámica» sube los 1% lows más que ninguna variable de entorno.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "Quita las sombras de las multitudes: es lo que más pesa al llegar a la ciudad"
+      }
+    ],
+    "tips": [
+      "El acto 3 rinde mucho peor que los dos primeros. No ajustes en el acto 1: mide donde vas a jugar.",
+      "Es un juego por turnos: 30 FPS estables se juegan, 50 con tirones no. Prioriza los 1% lows.",
+      "Cierre y vuelve a abrir entre actos: libera la caché de shaders acumulada."
+    ]
+  },
+  {
+    "name": "Elden Ring: Nightreign",
+    "appid": 2622380,
+    "bottleneck": "CPU y shaders en un mundo que cambia cada partida",
+    "summary": "Mismo motor que Elden Ring con partidas de 40 minutos y un mapa que cambia: menos caché de shaders reutilizable y más compilación sobre la marcha.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "env",
+        "value": "PROTON_LOCAL_SHADER_CACHE=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Caché de shaders por juego",
+        "why": "Menos stuttering por compilación de shaders tras actualizar drivers.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Reduce stuttering al cargar zonas nuevas"
+      },
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": [
+          "game-performance"
+        ],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "env",
+        "value": "DXVK_ASYNC=1",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Compilación asíncrona de shaders",
+        "why": "Con mapas distintos cada partida, la caché sirve menos y la compilación en primer plano se nota en cada zona nueva. Dejar la compilación en segundo plano cambia los tirones por shaders que aparecen un instante después.",
+        "evidence": "documentado",
+        "essential": false,
+        "simple_why": "Reduce los tirones al entrar a zonas que no habías visto"
+      },
+      {
+        "kind": "config",
+        "value": "No elijas \"Calidad máxima\" de distancia",
+        "impact": "alto",
+        "default_on": false,
+        "title": "Distancia de dibujado media",
+        "why": "La distancia de dibujado es el ajuste que más carga la CPU en un mundo abierto. En modo Calidad la partida se llena de tirones cuando aparecen varios enemigos a la vez.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "La distancia de dibujado es lo que más tira de CPU en las oleadas"
+      }
+    ],
+    "tips": [
+      "Mide durante una oleada, no explorando: el peor caso está en los combates con muchos enemigos.",
+      "Es online con anti-cheat: no apliques nada que toque el anti-cheat ni el ejecutable."
+    ]
+  },
+  {
+    "name": "Red Dead Redemption 2",
+    "appid": 1174180,
+    "bottleneck": "GPU y CPU (Vulkan nativo)",
+    "summary": "Usa Vulkan nativo: no pasa por DXVK, así que las variables DXVK_* no hacen nada. El cuello es la GPU, y el ajuste que más rinde es el reescalado interno del juego.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": [
+          "game-performance"
+        ],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "config",
+        "value": "Reescalado interno del juego (0.75x)",
+        "impact": "alto",
+        "default_on": false,
+        "title": "Reescalado interno en el menú",
+        "why": "RDR2 trae reescalado propio. Bajarlo a 0.75x a 1080p sube los FPS mucho más que tocar «Calidad de texturas», que apenas cuesta rendimiento.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "Baja el reescalado interno antes que la calidad de texturas"
+      },
+      {
+        "kind": "config",
+        "value": "Calidad de agua y física a medio",
+        "impact": "medio",
+        "default_on": false,
+        "title": "Agua y física de tejidos a medio",
+        "why": "El agua y la física del pelo y la ropa son caros en este juego y se notan poco. Bajarlos a medio no cambia el aspecto general.",
+        "evidence": "heuristica",
+        "essential": false,
+        "simple_why": "Agua y pelo cuestan mucho y se notan poco"
+      },
+      {
+        "kind": "env",
+        "value": "DXVK_HUD=1",
+        "impact": "evitar",
+        "default_on": false,
+        "title": "HUD de DXVK",
+        "why": "RDR2 no usa DXVK: el HUD no aparecerá. Usa MangoHud.",
+        "evidence": "documentado",
+        "simple_why": "No hace nada en este juego: usa MangoHud"
+      }
+    ],
+    "tips": [
+      "El modo online usa anti-cheat: no apliques nada que lo toque.",
+      "La primera carga compila shaders en Vulkan; el segundo arranque va mucho mejor."
+    ]
+  },
+  {
+    "name": "Counter-Strike 2",
+    "appid": 730,
+    "bottleneck": "CPU y consistencia de frametimes",
+    "summary": "Vulkan nativo sobre Source 2. Aquí los FPS medios importan menos que los 1% lows: un pico en el round decide la partida. El objetivo es latencia, no promedio.",
+    "params": [
+      {
+        "kind": "wrapper",
+        "value": "mangohud",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud (overlay y logs)",
+        "why": "Imprescindible para medir 1% lows antes y después de cada cambio.",
+        "evidence": "documentado",
+        "source": "https://github.com/flightlessmango/MangoHud",
+        "essential": true,
+        "simple_why": "Muestra FPS y rendimiento en pantalla. Shift+F2 para grabar"
+      },
+      {
+        "kind": "wrapper",
+        "value": "game-performance",
+        "impact": "medio",
+        "default_on": false,
+        "requires": [
+          "game-performance"
+        ],
+        "title": "CPU en modo performance (CachyOS)",
+        "why": "Evita que la CPU baje de frecuencia entre picos de carga. Ayuda sobre todo a los juegos limitados por CPU.",
+        "evidence": "heuristica",
+        "essential": true,
+        "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
+      },
+      {
+        "kind": "env",
+        "value": "MANGOHUD_CONFIG=fps_limit=0,io_stats=0",
+        "impact": "medicion",
+        "default_on": false,
+        "title": "MangoHud solo con lo necesario",
+        "why": "El overlay consume tiempo de GPU. En un juego competitivo, muestra solo FPS y 1% lows: cada elemento extra del overlay cuesta un poco de rendimiento.",
+        "evidence": "documentado",
+        "essential": false,
+        "simple_why": "Cuanto menos overlay, más FPS estables"
+      },
+      {
+        "kind": "env",
+        "value": "PULSE_LATENCY_MSEC=60",
+        "impact": "bajo",
+        "default_on": false,
+        "title": "Latencia de audio de PulseAudio",
+        "why": "Reducir el búfer de audio baja la latencia del sonido, útil cuando se juega por sonido con auriculares. No sube los FPS.",
+        "evidence": "documentado",
+        "essential": false,
+        "simple_why": "Baja la latencia del sonido, útil con auriculares"
+      },
+      {
+        "kind": "config",
+        "value": "Modo de vídeo nativo y vsync OFF",
+        "impact": "alto",
+        "default_on": false,
+        "title": "V-Sync desactivado en el juego",
+        "why": "En un competitivo, V-Sync añade un frame de latencia. Con FreeSync/GSync activo en el monitor no necesitas V-Sync.",
+        "evidence": "documentado",
+        "essential": true,
+        "simple_why": "Quita V-Sync: añade retraso a cada frame"
+      }
+    ],
+    "tips": [
+      "Es online con VAC: no toques el anti-cheat ni el ejecutable, es ban directo.",
+      "Mide con `-console` y `fps_max` ajustado a tu refresco más 10-20 FPS."
     ]
   }
 ]

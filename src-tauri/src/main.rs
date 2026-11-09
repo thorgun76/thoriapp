@@ -1,11 +1,18 @@
+mod anticheat;
 mod benchmarks;
 mod covers;
+mod cpu_rank;
 mod engine;
+mod gpu_rank;
 mod hw;
 mod launchers;
 mod log;
+mod preflight;
 mod profiles;
+mod proton_pulse;
+mod requirements;
 mod rules;
+mod shaders;
 mod steam;
 
 use serde::Serialize;
@@ -62,6 +69,43 @@ async fn get_hardware() -> Result<HwInfo, String> {
 #[tauri::command]
 fn get_rules(appid: u32) -> rules::Game {
     rules::for_appid(appid)
+}
+
+/// Requisitos del juego comparados con esta máquina.
+///
+/// `install_path` es opcional: si se conoce la carpeta del juego se comprueba el
+/// espacio libre en esa partición (la que importa), no en `/`.
+#[tauri::command]
+async fn get_requirements(
+    appid: u32,
+    install_path: Option<String>,
+) -> Result<requirements::RequirementsReport, String> {
+    spawn_blocking(move || {
+        let hw = hw::detect();
+        let raw = steam::pc_requirements(appid);
+        let machine = requirements::Machine {
+            ram_gb: hw.ram_gb,
+            vram_mb: hw.vram_mb,
+            cpu_threads: hw.cpu_threads,
+            cpu_cores: hw.cpu_cores,
+            cpu_name: hw.cpu.clone(),
+            gpu_name: hw.gpu.clone(),
+            free_disk_gb: requirements::free_disk_gb(install_path.as_deref()),
+        };
+        // La API del motor decide el margen (VKD3D 20 %, DXVK 10 %, Vulkan 0).
+        // Se detecta por firma de disco en la ruta real de instalacion; si no se
+        // pasa ruta o no encaja ninguna firma, `api` queda `None` y
+        // `proton_margin_percent` aplica el 10 % por defecto de forma explicita.
+        // Ya no se consulta ninguna tabla `appid -> motor`: la que habia daba a
+        // Elden Ring "Unreal Engine/dxvk" cuando es FromSoftware/VKD3D.
+        let api = install_path
+            .as_deref()
+            .and_then(engine::detect_from_install_path)
+            .map(|e| e.api);
+        requirements::evaluate(&raw, &machine, api.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -146,13 +190,33 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn detect_engine(appid: u32, game_name: String) -> Option<engine::GameEngine> {
-    engine::detect_engine(appid, &game_name)
+fn detect_engine(appid: u32, game_name: String, install_path: Option<String>) -> Option<engine::GameEngine> {
+    // Primero por firma de disco (fiable); si no hay ruta, se intenta con el
+    // nombre, que solo acierta en casos muy obvios.
+    install_path
+        .as_deref()
+        .and_then(engine::detect_from_install_path)
+        .or_else(|| engine::detect_engine(appid, &game_name))
 }
 
 #[tauri::command]
 fn get_engine_recommendations(engine: engine::GameEngine) -> Vec<String> {
-    engine::get_engine_recommendations(&engine)
+    // Sin GPU el filtro de RT no puede decidir, así que `dxr` se queda fuera: es
+    // una opción que puede costar FPS y sin dato no se sostiene.
+    engine::get_engine_recommendations_for(&engine, None)
+}
+
+/// Igual que `get_engine_recommendations`, sabiendo qué GPU hay en el equipo.
+///
+/// Es la que usa la UI: el nombre se detecta una vez al arrancar (`get_hardware`) y
+/// se pasa aquí para que decisiones que dependen del modelo —hoy, recomendar o no
+/// `VKD3D_CONFIG=dxr`— se tomen con dato en vez de a ciegas.
+#[tauri::command]
+fn get_engine_recommendations_for_gpu(
+    engine: engine::GameEngine,
+    gpu_name: Option<String>,
+) -> Vec<String> {
+    engine::get_engine_recommendations_for(&engine, gpu_name.as_deref())
 }
 
 #[tauri::command]
@@ -181,6 +245,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_hardware,
             get_rules,
+            get_requirements,
             scan_library,
             search_store,
             game_info,
@@ -188,6 +253,7 @@ fn main() {
             open_url,
             detect_engine,
             get_engine_recommendations,
+            get_engine_recommendations_for_gpu,
             get_community_recommendations,
             profiles::save_profile,
             profiles::load_profiles,
@@ -212,6 +278,10 @@ fn main() {
             heronite_uninstalled_count,
             benchmarks::get_mangohud_log_duration,
             benchmarks::set_mangohud_log_duration,
+            preflight::get_runtime_env_command,
+            anticheat::get_anticheat_info,
+            proton_pulse::get_proton_pulse_reports,
+            shaders::get_shader_cache,
             benchmarks::save_comparison,
             benchmarks::load_comparisons,
             benchmarks::delete_comparison,

@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -31,7 +32,84 @@ pub struct Benchmark {
     pub jitter_ms: Option<f64>,
     #[serde(default)]
     pub worst_frame_ms: Option<f64>,
+    /// Segundos iniciales que se descartaron (calentamiento). `None` en benchmarks
+    /// guardados antes de existir esta métrica.
+    #[serde(default)]
+    pub warmup_seconds: Option<f64>,
+    /// Margen de ruido de esta grabación: cuánto puede moverse el FPS promedio solo por
+    /// variación natural (95 % de confianza), en %. Sirve para no llamar "mejora" a una
+    /// diferencia que está dentro del ruido.
+    #[serde(default)]
+    pub noise_percent: Option<f64>,
+    /// Los primeros segundos de la grabación (antes del calentamiento) frente al resto:
+    /// ahí se ve el coste de compilar shaders la primera vez. `None` si no hay datos
+    /// suficientes para compararlo.
+    #[serde(default)]
+    pub shader_stutter: Option<ShaderStutter>,
 }
+
+/// Coste del arranque: lo que se pierde en los primeros segundos de la grabación,
+/// cuando los shaders todavía se están compilando.
+///
+/// Es la diferencia entre la primera ventana y el resto de la grabación, medida en el
+/// **peor 1 %** de frames. Se usa el peor 1 % y no el FPS promedio porque la compilación
+/// de shaders no baja el promedio: provoca tirones puntuales, que es justo lo que el
+/// promedio esconde.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShaderStutter {
+    /// Segundos comparados al principio (0 = no se pudo comparar).
+    pub window_seconds: f64,
+    /// Peor 1 % de FPS en esa ventana inicial.
+    pub early_fps_1_percent_low: f64,
+    /// Peor 1 % de FPS en el resto de la grabación.
+    pub steady_fps_1_percent_low: f64,
+    /// % de frames por encima de 33 ms (menos de 30 FPS) en la ventana inicial.
+    pub early_pct_over_33ms: f64,
+    /// Lo mismo en el resto de la grabación.
+    pub steady_pct_over_33ms: f64,
+    /// Cuánto peor es el arranque que el resto, en % sobre el peor 1 %. Se queda en 0
+    /// si el arranque no es peor (un juego que precarga puede ir mejor al principio).
+    pub stutter_penalty_percent: f64,
+}
+
+/// Segundos que se descartan al principio de cada grabación por defecto.
+/// Incluye la carga del nivel y la compilación inicial de shaders, que no representan
+/// el rendimiento en juego y ensucian sobre todo los percentiles bajos.
+pub const DEFAULT_WARMUP_SECONDS: f64 = 10.0;
+
+/// Si tras descartar el calentamiento quedan menos segundos que esto, no se descarta
+/// nada: quedarían tan pocas muestras que el resultado sería peor que no filtrar.
+const MIN_STEADY_SECONDS: f64 = 20.0;
+
+/// Mínimo de muestras para que el análisis tenga sentido.
+const MIN_SAMPLES: usize = 100;
+
+/// Margen mínimo de ruido que se asume entre dos grabaciones del mismo juego (% FPS).
+/// Por debajo de esto no se puede afirmar nada aunque la estadística diga otra cosa.
+const MIN_NOISE: f64 = 3.0;
+
+/// Segundos iniciales que se comparan contra el resto para medir el coste de compilar
+/// shaders. Coincide con el calentamiento por defecto: es exactamente el trozo que se
+/// descarta, así que se enseña lo que se está tirando en vez de esconderlo.
+pub const SHADER_WINDOW_SECONDS: f64 = DEFAULT_WARMUP_SECONDS;
+
+/// Muestras mínimas en cada lado para poder comparar arranque y resto.
+const MIN_SHADER_SAMPLES: usize = 50;
+
+/// Por debajo de este empeoramiento (%) el arranque no se considera un problema de
+/// shaders. El peor 1 % es una medida ruidosa, así que el listón es alto.
+///
+/// Lo consume la interfaz, no este módulo: `stutter_penalty_percent` se calcula aquí y
+/// lo compara `SIGNIFICANT_PENALTY` en `src/lib/shaders.ts`. La constante existe para que
+/// el test `el_umbral_coincide_con_la_interfaz` compruebe que los dos lados no se
+/// separan, y por eso lleva `#[allow(dead_code)]`: en compilación normal nadie la lee,
+/// pero borrarla dejaría el umbral duplicado a ciegas en TypeScript.
+#[allow(dead_code)]
+pub const SIGNIFICANT_SHADER_PENALTY: f64 = 20.0;
+
+/// Grabaciones que se conservan de cada juego. Al guardar la número 11, la más antigua
+/// de ese juego se borra sola; las de los demás juegos no se tocan.
+pub const MAX_BENCHMARKS_PER_GAME: usize = 10;
 
 /// Métricas que miden los "tirones" (stutter) a partir de los frame times (en ms).
 struct StutterStats {
@@ -87,6 +165,198 @@ fn drop_stuck_samples(samples: Vec<Sample>) -> (Vec<Sample>, usize) {
     (cleaned, removed)
 }
 
+/// Descarta las muestras de los primeros `seconds` segundos de la grabación.
+///
+/// Devuelve las muestras que quedan y los segundos descartados de verdad. No descarta
+/// nada (y devuelve 0) cuando no hay columna `elapsed` —sin reloj real no se sabe dónde
+/// cae el corte—, cuando quedarían menos de [`MIN_STEADY_SECONDS`] segundos, o cuando
+/// quedarían menos de [`MIN_SAMPLES`] muestras.
+fn split_warmup(samples: Vec<Sample>, seconds: f64) -> (Vec<Sample>, f64) {
+    if seconds <= 0.0 || samples.len() < MIN_SAMPLES {
+        return (samples, 0.0);
+    }
+
+    let (Some(first), Some(last)) = (
+        samples.first().and_then(|s| s.elapsed_ns),
+        samples.last().and_then(|s| s.elapsed_ns),
+    ) else {
+        return (samples, 0.0);
+    };
+
+    let total = (last - first) / 1e9;
+    // Si el corte deja menos de lo exigible, es mejor analizar todo que analizar un
+    // trozo diminuto y presentarlo como si fuera representativo.
+    if total - seconds < MIN_STEADY_SECONDS {
+        return (samples, 0.0);
+    }
+
+    let cutoff = first + seconds * 1e9;
+    let cut = samples
+        .iter()
+        .position(|s| s.elapsed_ns.map(|e| e >= cutoff).unwrap_or(false));
+
+    let Some(cut) = cut else {
+        return (samples, 0.0);
+    };
+    if cut == 0 || samples.len() - cut < MIN_SAMPLES {
+        return (samples, 0.0);
+    }
+
+    let applied = (samples[cut].elapsed_ns.unwrap_or(cutoff) - first) / 1e9;
+    let kept = samples.into_iter().skip(cut).collect();
+    (kept, applied)
+}
+
+/// Parte las muestras en (primera ventana, resto).
+///
+/// La ventana se elige por tiempo real (`elapsed_ns`) y se corta por índice, así que
+/// los dos tramos son disjuntos y un mismo frame nunca cuenta en los dos. Si no hay
+/// reloj (`elapsed_ns` ausente, logs antiguos) o la ventana no deja frames en un lado,
+/// devuelve dos listas vacías: sin datos fiables es mejor no decir nada.
+fn sample_window(samples: &[Sample], seconds: f64) -> (Vec<f64>, Vec<f64>) {
+    let empty = (Vec::new(), Vec::new());
+    if seconds <= 0.0 || samples.len() < MIN_SHADER_SAMPLES * 2 {
+        return empty;
+    }
+    let Some(first) = samples.first().and_then(|s| s.elapsed_ns) else {
+        return empty;
+    };
+    let cutoff = first + seconds * 1e9;
+    let Some(cut) = samples
+        .iter()
+        .position(|s| s.elapsed_ns.map(|e| e >= cutoff).unwrap_or(false))
+    else {
+        return empty;
+    };
+    if cut < MIN_SHADER_SAMPLES || samples.len() - cut < MIN_SHADER_SAMPLES {
+        return empty;
+    }
+    let early: Vec<f64> = samples[..cut].iter().map(|s| s.frame_time).collect();
+    let steady: Vec<f64> = samples[cut..].iter().map(|s| s.frame_time).collect();
+    (early, steady)
+}
+
+/// Peor 1 % de FPS de un tramo de frames (o `None` si hay muy pocos).
+fn worst_one_percent_fps(frame_times: &[f64]) -> Option<f64> {
+    if frame_times.len() < MIN_SHADER_SAMPLES {
+        return None;
+    }
+    let mut sorted = frame_times.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99 = percentile_sorted(&sorted, 99.0);
+    if p99 <= 0.0 {
+        return None;
+    }
+    Some(1000.0 / p99)
+}
+
+/// % de frames de un tramo que tardaron más de 33 ms (bajada por debajo de 30 FPS).
+fn pct_over_33ms(frame_times: &[f64]) -> f64 {
+    if frame_times.is_empty() {
+        return 0.0;
+    }
+    let n = frame_times.iter().filter(|&&f| f > 33.3).count();
+    (n as f64 / frame_times.len() as f64) * 100.0
+}
+
+/// Compara los primeros `window_seconds` de la grabación con el resto.
+///
+/// Por qué existe: el calentamiento (`DEFAULT_WARMUP_SECONDS`) se descarta para que el
+/// análisis no salga contaminado por la compilación inicial de shaders. Pero descartarlo
+/// en silencio oculta información útil: si el primer minuto de cada partida va a tirones,
+/// el jugador lo sufre igual y no sabe por qué. Aquí se mide ese coste y se enseña.
+///
+/// Se trabaja con los frame times del tramo inicial ANTES de descartar el calentamiento,
+/// así que las muestras tienen que llegar ya separadas: esta función recibe las dos
+/// mitades hechas.
+///
+/// Devuelve `None` si algún lado tiene menos de [`MIN_SHADER_SAMPLES`] frames: con tan
+/// poco no se puede afirmar nada sobre el arranque.
+pub fn shader_stutter(early: &[f64], steady: &[f64], window_seconds: f64) -> Option<ShaderStutter> {
+    if window_seconds <= 0.0 {
+        return None;
+    }
+    let early_low = worst_one_percent_fps(early)?;
+    let steady_low = worst_one_percent_fps(steady)?;
+
+    // Penalización en % sobre el peor 1 %. Si el arranque va MEJOR que el resto no se
+    // informa de una "mejora" (no tiene sentido: no has optimizado nada), se deja en 0.
+    let penalty = if steady_low > 0.0 && early_low < steady_low {
+        ((steady_low - early_low) / steady_low) * 100.0
+    } else {
+        0.0
+    };
+
+    Some(ShaderStutter {
+        window_seconds,
+        early_fps_1_percent_low: early_low,
+        steady_fps_1_percent_low: steady_low,
+        early_pct_over_33ms: pct_over_33ms(early),
+        steady_pct_over_33ms: pct_over_33ms(steady),
+        stutter_penalty_percent: penalty,
+    })
+}
+
+/// Margen de ruido del FPS promedio de una grabación, en % (95 % de confianza).
+///
+/// La grabación se parte en bloques contiguos, se calcula la media de cada bloque y se
+/// estima el error estándar **entre bloques**. Así la autocorrelación de los frame times
+/// (un tirón afecta a varias filas seguidas) no se cuenta como si fueran muestras
+/// independientes, que es el error de usar el desvío estándar por muestra.
+///
+/// `None` si hay muy pocas muestras para estimarlo con un mínimo de rigor.
+fn noise_percent(fps: &[f64]) -> Option<f64> {
+    let n = fps.len();
+    if n < MIN_SAMPLES * 2 {
+        return None;
+    }
+
+    // Bloques de ~60 filas (~6 s con MangoHud guardando cada 100 ms), entre 5 y 30.
+    let blocks = (n / 60).clamp(5, 30);
+    let size = n / blocks;
+    if size < 20 {
+        return None;
+    }
+
+    let means: Vec<f64> = (0..blocks)
+        .map(|b| {
+            let chunk = &fps[b * size..(b + 1) * size];
+            chunk.iter().sum::<f64>() / chunk.len() as f64
+        })
+        .collect();
+
+    let mean = means.iter().sum::<f64>() / means.len() as f64;
+    if !mean.is_finite() || mean <= 0.0 {
+        return None;
+    }
+
+    let var = means.iter().map(|m| (m - mean) * (m - mean)).sum::<f64>()
+        / (means.len() as f64 - 1.0);
+    let se = (var / means.len() as f64).sqrt();
+
+    Some((1.96 * se / mean) * 100.0)
+}
+
+/// Margen de ruido combinado de dos grabaciones, en % sobre el FPS promedio.
+/// Los errores de las dos medidas se suman en cuadratura (son independientes).
+///
+/// Si falta el dato de alguna de las dos, esa parte no aporta: el margen no puede
+/// inventarse más incertidumbre de la que hay. Con una sola grabación medida el margen
+/// es el de esa grabación, no `√2` veces mayor; con ninguna, el mínimo de la casa.
+fn combined_noise(a: Option<f64>, b: Option<f64>) -> f64 {
+    let a = a.filter(|v| v.is_finite() && *v > 0.0);
+    let b = b.filter(|v| v.is_finite() && *v > 0.0);
+
+    let combined = match (a, b) {
+        (Some(a), Some(b)) => (a * a + b * b).sqrt(),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => MIN_NOISE,
+    };
+
+    combined.max(MIN_NOISE)
+}
+
 fn compute_stutter(frame_times: &[f64], duration_seconds: f64) -> StutterStats {
     let n = frame_times.len();
 
@@ -133,6 +403,13 @@ pub struct BenchmarkComparison {
     pub fps_0_1_percent_change_percent: f64,
     pub frame_time_change_percent: f64,
     pub conclusion: String,
+    /// Margen de ruido combinado de las dos grabaciones (%). Una diferencia menor que
+    /// esto no se puede distinguir de la variación normal del juego.
+    #[serde(default)]
+    pub noise_percent: Option<f64>,
+    /// `true` cuando el cambio de FPS promedio entra dentro del margen de ruido.
+    #[serde(default)]
+    pub within_noise: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,7 +656,7 @@ fn get_file_modified_time(file_path: &Path) -> String {
     }
 }
 
-pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
+pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Benchmark, String> {
     let path = Path::new(log_path);
 
     if !path.exists() {
@@ -490,11 +767,30 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     );
     println!("[Benchmark] Duración real de la grabación: {:.1} s", duration_seconds);
 
-    if samples.len() < 100 {
+    // La ventana inicial se guarda ANTES de descartar el calentamiento: es justo el
+    // trozo que se tira, y compararlo con el resto es lo que dice cuánto cuesta compilar
+    // shaders la primera vez. La ventana busca su propio corte por tiempo sobre las
+    // muestras completas, así que las dos mitades salen disjuntas por construcción y el
+    // trozo que se compara como "arranque" es el mismo que luego se descarta.
+    let (early_frames, steady_frames) = sample_window(&samples, SHADER_WINDOW_SECONDS);
+
+    // El arranque (carga del nivel, compilación inicial de shaders) no representa el
+    // rendimiento en juego y estropea sobre todo los percentiles bajos.
+    let (samples, warmup_applied) = split_warmup(samples, warmup_seconds);
+    if warmup_applied > 0.0 {
+        println!(
+            "[Benchmark] Calentamiento descartado: {:.1} s (quedan {:.1} s de estado estable)",
+            warmup_applied,
+            (duration_seconds - warmup_applied).max(0.0)
+        );
+    }
+
+    if samples.len() < MIN_SAMPLES {
         return Err(format!(
-            "El log tiene muy pocas muestras ({} útiles, mínimo 100 requeridas).\n\n\
+            "El log tiene muy pocas muestras ({} útiles, mínimo {} requeridas).\n\n\
             Graba el log durante al menos 30 segundos (lo ideal es 60).",
-            samples.len()
+            samples.len(),
+            MIN_SAMPLES
         ));
     }
 
@@ -534,7 +830,10 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         worst.iter().sum::<f64>() / worst.len() as f64
     };
 
-    let stutter = compute_stutter(&frame_times, duration_seconds);
+    let steady_duration = (duration_seconds - warmup_applied).max(0.0);
+    let stutter = compute_stutter(&frame_times, steady_duration);
+    let noise = noise_percent(&fps_values);
+    let shader = shader_stutter(&early_frames, &steady_frames, SHADER_WINDOW_SECONDS);
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
 
@@ -545,6 +844,18 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
     println!("[Benchmark]    1% Low: {:.1}", fps_1_percent_low);
     println!("[Benchmark]    0.1% Low: {:.1}", fps_0_1_percent_low);
     println!("[Benchmark]    Picos/min: {:.1}", stutter.spikes_per_min);
+    if let Some(n) = noise {
+        println!("[Benchmark]    Margen de ruido: ±{:.1} %", n);
+    }
+    if let Some(sh) = &shader {
+        println!(
+            "[Benchmark]    Arranque ({}s): peor 1% {:.0} FPS vs {:.0} FPS del resto ({:+.1} %)",
+            sh.window_seconds,
+            sh.early_fps_1_percent_low,
+            sh.steady_fps_1_percent_low,
+            -sh.stutter_penalty_percent
+        );
+    }
     println!("[Benchmark] ============================================");
 
     Ok(Benchmark {
@@ -568,6 +879,9 @@ pub fn analyze_mangohud_log(log_path: &str) -> Result<Benchmark, String> {
         pct_over_33ms: Some(stutter.pct_over_33ms),
         jitter_ms: Some(stutter.jitter_ms),
         worst_frame_ms: Some(stutter.worst_frame_ms),
+        warmup_seconds: Some(warmup_applied),
+        noise_percent: noise,
+        shader_stutter: shader,
     })
 }
 
@@ -582,26 +896,50 @@ fn norm_game_name(name: &str) -> String {
     lower
 }
 
-/// ¿Las dos grabaciones son del mismo juego? Se usa el appid de Steam cuando ambos lo
-/// tienen; si no, se compara el nombre.
-fn same_game(a: &Benchmark, b: &Benchmark) -> bool {
-    if a.appid != 0 && b.appid != 0 {
-        a.appid == b.appid
+/// Clave de agrupación del historial: el appid si lo hay, el nombre normalizado si no.
+fn game_key(b: &Benchmark) -> String {
+    if b.appid != 0 {
+        format!("appid:{}", b.appid)
     } else {
-        norm_game_name(&a.game_name) == norm_game_name(&b.game_name)
+        format!("name:{}", norm_game_name(&b.game_name))
     }
 }
 
-/// Deja solo el Antes (primero) y el Después (último). Sirve para archivos guardados
-/// con versiones antiguas, que podían tener muchas grabaciones. No modifica el archivo.
-fn pair_only(mut list: Vec<Benchmark>) -> Vec<Benchmark> {
-    if list.len() > 2 {
-        if let Some(last) = list.pop() {
-            list.truncate(1);
-            list.push(last);
+/// Recorta el historial a las `MAX_BENCHMARKS_PER_GAME` grabaciones más recientes de
+/// cada juego, descartando las más antiguas.
+///
+/// Es por juego, no global: guardar en un juego no borra las pruebas de otro, así que
+/// puedes volver a un juego de hace semanas y seguir comparando. Dentro de un juego el
+/// exceso se va por la cola según `timestamp` (formato ISO, que ordena bien como texto).
+/// Si dos grabaciones comparten fecha, gana la que está más al final de la lista, que es
+/// la última que se añadió. Conserva el orden original de lo que sobrevive.
+fn trim_history(list: &mut Vec<Benchmark>) {
+    let mut keep: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, b) in list.iter().enumerate() {
+        keep.entry(game_key(b)).or_default().push(i);
+    }
+
+    let mut drop = vec![false; list.len()];
+    for indices in keep.values() {
+        if indices.len() <= MAX_BENCHMARKS_PER_GAME {
+            continue;
+        }
+        // Índices a conservar: los últimos por fecha (y, a igualdad, los últimos en la
+        // lista). `sort_by` es estable, así que el desempate es el orden de inserción.
+        let mut ordered = indices.clone();
+        ordered.sort_by(|&a, &b| list[a].timestamp.cmp(&list[b].timestamp));
+        let excess = ordered.len() - MAX_BENCHMARKS_PER_GAME;
+        for &i in &ordered[..excess] {
+            drop[i] = true;
         }
     }
-    list
+
+    let mut i = 0;
+    list.retain(|_| {
+        let keep_it = !drop[i];
+        i += 1;
+        keep_it
+    });
 }
 
 #[tauri::command]
@@ -628,18 +966,16 @@ pub fn save_benchmark(
     benchmark.launch_command = launch_command;
     benchmark.notes = notes;
 
-    // Política "un Antes y un Después": se guardan como máximo 2 grabaciones.
-    //   [0] = Antes   (la primera, se mantiene como punto de partida)
-    //   [1] = Después (la más reciente; una grabación nueva reemplaza a la anterior)
-    // Si la grabación nueva es de OTRO juego, empieza una prueba nueva desde cero,
-    // porque comparar juegos distintos no tiene sentido.
-    if let Some(first) = data.benchmarks.first() {
-        if !same_game(first, &benchmark) {
-            data.benchmarks.clear();
-        }
-    }
-    data.benchmarks.truncate(1); // también limpia archivos antiguos con más de 2
+    // Historial por juego: se añade la grabación nueva y se conservan las
+    // `MAX_BENCHMARKS_PER_GAME` más recientes de ESTE juego; las más viejas se van solas.
+    // Los demás juegos no se tocan, y como el archivo entero se guarda, el recorte también
+    // limpia lo que quedara de versiones anteriores.
+    //
+    // Aquí NO se borran las grabaciones anteriores del mismo juego: el recorte es cosa de
+    // `trim_history`. Un `retain` por clave de juego en este punto dejaría una sola
+    // grabación por juego y el historial de 10 no llegaría a existir.
     data.benchmarks.push(benchmark.clone());
+    trim_history(&mut data.benchmarks);
     save_benchmarks_data(&data)?;
 
     Ok(benchmark)
@@ -648,18 +984,23 @@ pub fn save_benchmark(
 #[tauri::command]
 pub fn load_benchmarks() -> Result<Vec<Benchmark>, String> {
     let data = load_benchmarks_data();
-    Ok(pair_only(data.benchmarks))
+    let mut list = data.benchmarks;
+    // El recorte se aplica al leer y no solo al guardar: un archivo antiguo con más de
+    // 10 grabaciones por juego se limpia la próxima vez que se cargue.
+    trim_history(&mut list);
+    Ok(list)
 }
 
 #[tauri::command]
 pub fn load_benchmarks_for_game(appid: u32) -> Result<Vec<Benchmark>, String> {
     let data = load_benchmarks_data();
-    let benchmarks: Vec<Benchmark> = data
+    let mut benchmarks: Vec<Benchmark> = data
         .benchmarks
         .into_iter()
         .filter(|b| b.appid == appid)
         .collect();
-    Ok(pair_only(benchmarks))
+    trim_history(&mut benchmarks);
+    Ok(benchmarks)
 }
 
 #[tauri::command]
@@ -719,34 +1060,36 @@ pub fn compare_benchmarks(
         pct_change(baseline.fps_0_1_percent_low, test.fps_0_1_percent_low);
     let frame_time_change_percent = pct_change(baseline.frame_time_avg, test.frame_time_avg);
 
-    // Entre dos grabaciones del mismo juego en las mismas condiciones, el propio ruido ronda
-    // el 2-3 %. Por debajo de ese margen no se puede afirmar que haya mejora ni empeoramiento.
-    const NOISE: f64 = 3.0;
+    // Entre dos grabaciones del mismo juego en las mismas condiciones, el propio ruido
+    // se estima a partir de las propias grabaciones (variación entre bloques). El mínimo
+    // es MIN_NOISE: por debajo de eso nunca se afirma una mejora.
+    let noise = combined_noise(baseline.noise_percent, test.noise_percent);
+    let within_noise = fps_change_percent.abs() <= noise;
 
-    let mut conclusion = if fps_change_percent > NOISE && fps_1_percent_change_percent < -NOISE {
+    let mut conclusion = if within_noise {
+        format!(
+            "🟡 Sin diferencia clara ({:+.1}% FPS promedio, dentro del margen de ruido ±{:.1}%). Repite la prueba antes de decidir.",
+            fps_change_percent, noise
+        )
+    } else if fps_change_percent > noise && fps_1_percent_change_percent < -noise {
         format!(
             "⚠️ Más FPS promedio (+{:.1}%) pero los peores momentos empeoran ({:.1}%): puede haber más tirones",
             fps_change_percent, fps_1_percent_change_percent
         )
-    } else if fps_change_percent < -NOISE && fps_1_percent_change_percent > NOISE {
+    } else if fps_change_percent < -noise && fps_1_percent_change_percent > noise {
         format!(
             "⚠️ Menos FPS promedio ({:.1}%) pero los peores momentos mejoran (+{:.1}%): el juego puede sentirse más parejo",
             fps_change_percent, fps_1_percent_change_percent
         )
-    } else if fps_change_percent > NOISE {
+    } else if fps_change_percent > noise {
         format!(
-            "✅ Mejora: +{:.1}% FPS promedio",
-            fps_change_percent
-        )
-    } else if fps_change_percent < -NOISE {
-        format!(
-            "❌ Rendimiento degradado: {:.1}% FPS promedio",
-            fps_change_percent
+            "✅ Mejora: +{:.1}% FPS promedio (por encima del ruido, ±{:.1}%)",
+            fps_change_percent, noise
         )
     } else {
         format!(
-            "🟡 Sin diferencia clara ({:+.1}% FPS promedio, dentro del margen normal de ±{:.0}%)",
-            fps_change_percent, NOISE
+            "❌ Rendimiento degradado: {:.1}% FPS promedio (por encima del ruido, ±{:.1}%)",
+            fps_change_percent, noise
         )
     };
 
@@ -771,12 +1114,20 @@ pub fn compare_benchmarks(
         fps_0_1_percent_change_percent,
         frame_time_change_percent,
         conclusion,
+        noise_percent: Some(noise),
+        within_noise,
     })
 }
 
 #[tauri::command]
-pub fn analyze_mangohud_log_command(log_path: String) -> Result<Benchmark, String> {
-    analyze_mangohud_log(&log_path)
+pub fn analyze_mangohud_log_command(
+    log_path: String,
+    warmup_seconds: Option<f64>,
+) -> Result<Benchmark, String> {
+    analyze_mangohud_log(
+        &log_path,
+        warmup_seconds.unwrap_or(DEFAULT_WARMUP_SECONDS),
+    )
 }
 
 /// Lee el valor de una clave de MangoHud.conf (`clave=valor` o `clave = valor`).
@@ -887,16 +1238,16 @@ fn dir_has_mangohud_log(dir: &Path) -> bool {
 
 #[tauri::command]
 pub fn check_mangohud_installed() -> Result<bool, String> {
-    use std::process::Command;
-
-    let output = Command::new("which").arg("mangohud").output();
-
-    if let Ok(out) = output {
-        if out.status.success() {
-            return Ok(true);
-        }
+    // 1) Lo que de verdad decide si MangoHud funciona: el binario (wrapper) o la capa
+    // Vulkan. Antes solo se miraba `which mangohud`, y quien lo tiene instalado como
+    // capa (lo normal: el binario existe, pero el que actúa es la capa) o dentro de
+    // Steam Flatpak recibía un "no está instalado" falso.
+    let runtime = crate::preflight::get_runtime_env();
+    if runtime.mangohud_binary.is_some() || runtime.mangohud_vulkan_layer.is_some() {
+        return Ok(true);
     }
 
+    // 2) Configuración escrita por MangoHud o Goverlay: indicio de que está instalado.
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let config_paths = vec![
         format!("{}/.config/MangoHud/MangoHud.conf", home),
@@ -909,6 +1260,7 @@ pub fn check_mangohud_installed() -> Result<bool, String> {
         }
     }
 
+    // 3) Logs ya grabados: si hay un CSV de MangoHud, está instalado.
     let log_paths = vec![
         format!("{}/.local/share/goverlay/logs", home),
         format!("{}/.local/share/goverlay", home),
@@ -1172,6 +1524,9 @@ mod tests {
             pct_over_33ms: None,
             jitter_ms: None,
             worst_frame_ms: None,
+            warmup_seconds: None,
+            noise_percent: None,
+            shader_stutter: None,
         }
     }
 
@@ -1257,33 +1612,275 @@ mod tests {
     }
 
     #[test]
-    fn same_game_usa_appid_si_ambos_lo_tienen() {
-        assert!(same_game(&bench(440, "TF2"), &bench(440, "Otro nombre")));
-        assert!(!same_game(&bench(440, "TF2"), &bench(730, "CS2")));
-    }
-
-    #[test]
-    fn same_game_cae_al_nombre_si_falta_appid() {
+    fn same_game_cae_al_nombre_si_falta_appid_via_game_key() {
         // Un juego de Lutris no tiene appid (0): se compara el nombre, sin
-        // distinguir mayúsculas ni espacios sobrantes.
-        assert!(same_game(&bench(0, "Hollow Knight"), &bench(0, "hollow knight ")));
-        assert!(!same_game(&bench(0, "Hollow Knight"), &bench(0, "Celeste")));
+        // distinguir mayúsculas ni espacios sobrantes. Esto antes lo resolvía una
+        // función `same_game` que ya no existe: `game_key` la sustituyó y es la
+        // única que se usa de verdad, así que la cobertura vive aquí.
+        assert_eq!(
+            game_key(&bench(0, "Hollow Knight")),
+            game_key(&bench(0, "hollow knight "))
+        );
+        assert_ne!(
+            game_key(&bench(0, "Hollow Knight")),
+            game_key(&bench(0, "Celeste"))
+        );
+        // Y con appid manda el appid, aunque el nombre no coincida.
+        assert_eq!(
+            game_key(&bench(440, "TF2")),
+            game_key(&bench(440, "Otro nombre"))
+        );
+        assert_ne!(game_key(&bench(440, "TF2")), game_key(&bench(730, "CS2")));
+    }
+
+    /// Benchmark con fecha conocida, para probar el recorte por antigüedad.
+    ///
+    /// El `id` incluye la fecha a propósito: dos grabaciones del mismo juego nunca
+    /// comparten id en la app real (lleva la hora con milisegundos), y un test que las
+    /// hiciera chocar estaría probando algo que no puede pasar.
+    fn bench_at(appid: u32, name: &str, day: u32) -> Benchmark {
+        let mut b = bench(appid, name);
+        b.timestamp = format!("2026-01-{:02} 10:00:00", day);
+        b.id = format!("{}-{}", b.id, day);
+        b
     }
 
     #[test]
-    fn pair_only_deja_antes_y_ultimo() {
-        let list = vec![bench(1, "a"), bench(1, "b"), bench(1, "c"), bench(1, "d")];
-        let out = pair_only(list);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].game_name, "a"); // el Antes original
-        assert_eq!(out[1].game_name, "d"); // el Después más reciente
+    fn trim_history_conserva_las_diez_mas_recientes() {
+        // Se añaden en orden, y se recorta: deben quedar las 10 últimas (días 6..15).
+        let mut list: Vec<Benchmark> = (1..=15).map(|d| bench_at(440, "TF2", d)).collect();
+        trim_history(&mut list);
+
+        assert_eq!(list.len(), MAX_BENCHMARKS_PER_GAME);
+        assert_eq!(list.first().unwrap().timestamp, "2026-01-06 10:00:00");
+        assert_eq!(list.last().unwrap().timestamp, "2026-01-15 10:00:00");
+        // El orden original se respeta: no se reordena el archivo.
+        assert!(list.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
     }
 
     #[test]
-    fn pair_only_no_toca_listas_de_dos_o_menos() {
-        assert_eq!(pair_only(vec![bench(1, "a")]).len(), 1);
-        assert_eq!(pair_only(vec![bench(1, "a"), bench(1, "b")]).len(), 2);
-        assert_eq!(pair_only(vec![]).len(), 0);
+    fn trim_history_recorta_por_fecha_y_no_por_orden_de_lista() {
+        // Añadida la última pero con fecha vieja: es la que debe caer.
+        let mut list: Vec<Benchmark> = (1..=MAX_BENCHMARKS_PER_GAME as u32)
+            .map(|d| bench_at(440, "TF2", d + 10))
+            .collect();
+        list.push(bench_at(440, "TF2", 1));
+
+        trim_history(&mut list);
+        assert_eq!(list.len(), MAX_BENCHMARKS_PER_GAME);
+        assert!(!list.iter().any(|b| b.timestamp == "2026-01-01 10:00:00"));
+    }
+
+    #[test]
+    fn trim_history_no_toca_los_demas_juegos() {
+        // Un juego no se come el historial de otro, aunque comparta nombre.
+        let mut list: Vec<Benchmark> = (1..=MAX_BENCHMARKS_PER_GAME as u32 + 5)
+            .map(|d| bench_at(440, "TF2", d))
+            .collect();
+        list.extend((1..=3).map(|d| bench_at(730, "CS2", d)));
+
+        trim_history(&mut list);
+        assert_eq!(list.iter().filter(|b| b.appid == 440).count(), MAX_BENCHMARKS_PER_GAME);
+        assert_eq!(list.iter().filter(|b| b.appid == 730).count(), 3);
+    }
+
+    #[test]
+    fn trim_history_separa_juegos_sin_appid_por_nombre() {
+        let mut list: Vec<Benchmark> = (1..=MAX_BENCHMARKS_PER_GAME as u32 + 2)
+            .map(|d| bench_at(0, "Hollow Knight", d))
+            .collect();
+        list.push(bench_at(0, "Celeste", 99));
+
+        trim_history(&mut list);
+        assert_eq!(list.len(), MAX_BENCHMARKS_PER_GAME + 1);
+        assert!(list.iter().any(|b| b.game_name == "Celeste"));
+    }
+
+    #[test]
+    fn guardar_un_juego_no_borra_las_pruebas_de_otro() {
+        // La política anterior borraba todo al cambiar de juego; ahora el historial es
+        // por juego, así que se puede volver a un juego antiguo y seguir comparando.
+        let mut data = vec![
+            bench_at(440, "TF2", 1),
+            bench_at(440, "TF2", 2),
+            bench_at(730, "CS2", 3),
+        ];
+
+        // Llega una grabación nueva de TF2: se añade al historial sin tocar lo anterior
+        // ni la de CS2. La política anterior borraba todo al cambiar de juego.
+        data.push(bench_at(440, "TF2", 9));
+        trim_history(&mut data);
+
+        assert_eq!(data.iter().filter(|b| b.appid == 440).count(), 3);
+        assert_eq!(data.iter().filter(|b| b.appid == 730).count(), 1);
+        // Las tres de TF2 siguen ahí, en orden de guardado, y CS2 intacto.
+        let tf2: Vec<_> = data.iter().filter(|b| b.appid == 440).collect();
+        assert_eq!(tf2[0].timestamp, "2026-01-01 10:00:00");
+        assert_eq!(tf2[1].timestamp, "2026-01-02 10:00:00");
+        assert_eq!(tf2[2].timestamp, "2026-01-09 10:00:00");
+    }
+
+    #[test]
+    fn trim_history_no_hace_nada_si_no_sobra_nada() {
+        let mut list: Vec<Benchmark> = vec![bench_at(440, "TF2", 1), bench_at(440, "TF2", 2)];
+        trim_history(&mut list);
+        assert_eq!(list.len(), 2);
+
+        let mut empty: Vec<Benchmark> = vec![];
+        trim_history(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    /// Frame times con reloj real: `n` filas cada 100 ms, con el frametime indicado.
+    fn timed_frames(counts: &[(usize, f64)]) -> Vec<Sample> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        for (n, ft) in counts {
+            for _ in 0..*n {
+                out.push(Sample {
+                    fps: 1000.0 / ft,
+                    frame_time: *ft,
+                    elapsed_ns: Some(i as f64 * 1e8),
+                });
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn sample_window_parte_en_dos_tramos_disjuntos() {
+        // 600 muestras = 60 s. Ventana de 10 s = 100 muestras.
+        let samples = timed_frames(&[(600, 16.0)]);
+        let (early, steady) = sample_window(&samples, 10.0);
+        assert_eq!(early.len(), 100);
+        assert_eq!(steady.len(), 500);
+        assert_eq!(early.len() + steady.len(), samples.len());
+    }
+
+    #[test]
+    fn sample_window_sin_reloj_no_inventa_nada() {
+        // Log antiguo sin columna `elapsed`: imposible saber dónde está el corte.
+        let samples: Vec<Sample> = (0..600)
+            .map(|_| Sample { fps: 60.0, frame_time: 16.0, elapsed_ns: None })
+            .collect();
+        let (early, steady) = sample_window(&samples, 10.0);
+        assert!(early.is_empty());
+        assert!(steady.is_empty());
+    }
+
+    #[test]
+    fn sample_window_exige_muestras_en_los_dos_lados() {
+        // Grabación de 5 s con ventana de 10: no queda resto con el que comparar.
+        let samples = timed_frames(&[(50, 16.0)]);
+        let (early, steady) = sample_window(&samples, 10.0);
+        assert!(early.is_empty());
+        assert!(steady.is_empty());
+    }
+
+    #[test]
+    fn arranque_con_tirones_se_detecta_por_el_peor_uno_por_ciento() {
+        // El arranque tiene los mismos FPS medios que el resto, pero con tirones
+        // puntuales: es exactamente el caso que el promedio esconde.
+        let mut early = vec![16.0; 2000];
+        for i in (0..2000).step_by(10) {
+            early[i] = 80.0; // 12,5 FPS: tirón de compilación de shaders
+        }
+        let steady = vec![16.0; 2000];
+
+        let sh = shader_stutter(&early, &steady, 10.0).expect("debería medirse");
+        assert!(
+            sh.stutter_penalty_percent >= SIGNIFICANT_SHADER_PENALTY,
+            "penalización: {}",
+            sh.stutter_penalty_percent
+        );
+        assert!(sh.early_pct_over_33ms > sh.steady_pct_over_33ms);
+    }
+
+    #[test]
+    fn arranque_igual_al_resto_no_es_un_problema() {
+        let steady = vec![16.0; 2000];
+        let sh = shader_stutter(&steady, &steady, 10.0).unwrap();
+        assert_eq!(sh.stutter_penalty_percent, 0.0);
+    }
+
+    #[test]
+    fn arranque_mejor_que_el_resto_no_se_presenta_como_mejora() {
+        // Si el principio va mejor (precarga), no se informa de penalización negativa.
+        let early = vec![10.0; 2000];
+        let steady = vec![16.0; 2000];
+        let sh = shader_stutter(&early, &steady, 10.0).unwrap();
+        assert_eq!(sh.stutter_penalty_percent, 0.0);
+    }
+
+    #[test]
+    fn sin_muestras_suficientes_no_se_opina_sobre_shaders() {
+        assert!(shader_stutter(&[16.0; 10], &[16.0; 2000], 10.0).is_none());
+        assert!(shader_stutter(&[16.0; 2000], &[16.0; 10], 10.0).is_none());
+        assert!(shader_stutter(&[16.0; 2000], &[16.0; 2000], 0.0).is_none());
+    }
+
+    #[test]
+    fn benchmark_viejo_sin_datos_de_shaders_se_sigue_cargando() {
+        // Compatibilidad: los benchmarks guardados antes de esta mejora no tienen el
+        // campo `shader_stutter` y deben deserializar sin error.
+        let json = r#"{"id":"x","profile_id":"","game_name":"TF2","appid":440,"timestamp":"",
+            "duration_seconds":60.0,"avg_fps":60.0,"fps_1_percent_low":30.0,
+            "fps_0_1_percent_low":20.0,"max_fps":120.0,"min_fps":10.0,
+            "frame_time_avg":16.6,"frame_time_1_percent_high":33.0,"total_frames":3600,
+            "notes":null,"launch_command":"%command%"}"#;
+        let b: Benchmark = serde_json::from_str(json).unwrap();
+        assert!(b.shader_stutter.is_none());
+        assert!(b.noise_percent.is_none());
+    }
+
+    #[test]
+    fn el_umbral_coincide_con_el_de_la_interfaz() {
+        // `src/lib/shaders.ts` tiene su propia copia (SIGNIFICANT_PENALTY) porque la
+        // decisión se toma en el frontend, donde está testeada. Si alguien cambia una y
+        // no la otra, el test lo detecta.
+        let ts = include_str!("../../src/lib/shaders.ts");
+        // Se busca la declaración exacta (`= 20;`), no solo el número, para que un
+        // cambio a 200 u 2 no pase por casualidad.
+        let expected = format!("SIGNIFICANT_PENALTY = {};", SIGNIFICANT_SHADER_PENALTY);
+        assert!(
+            ts.contains(&expected),
+            "src/lib/shaders.ts debe declarar `{}`",
+            expected
+        );
+    }
+
+    #[test]
+    fn guardar_diez_veces_conserva_las_diez_y_no_solo_una() {
+        // Recorre la misma secuencia que `save_benchmark` (push + trim_history) sin tocar
+        // disco. Existía un `retain` por juego que borraba todas las grabaciones
+        // anteriores del juego antes de recortar, así que el historial de 10 nunca llegaba
+        // a llenarse. Este test lo habría detectado.
+        let mut data: Vec<Benchmark> = Vec::new();
+        for day in 1..=10u32 {
+            data.push(bench_at(440, "TF2", day));
+            trim_history(&mut data);
+            assert_eq!(
+                data.iter().filter(|b| b.appid == 440).count() as u32,
+                day,
+                "tras {} grabaciones deberían quedar {}",
+                day,
+                day
+            );
+        }
+
+        // La número 11 tira la más antigua (día 1) y conserva la 2..11.
+        data.push(bench_at(440, "TF2", 11));
+        trim_history(&mut data);
+        assert_eq!(data.len(), 10);
+        assert_eq!(data[0].timestamp, "2026-01-02 10:00:00");
+        assert_eq!(data[9].timestamp, "2026-01-11 10:00:00");
+    }
+
+    #[test]
+    fn game_key_usa_appid_y_cae_al_nombre() {
+        assert_eq!(game_key(&bench(440, "TF2")), "appid:440");
+        assert_eq!(game_key(&bench(0, "Hollow Knight")), "name:hollow knight");
     }
 
     #[test]
@@ -1296,5 +1893,88 @@ mod tests {
         assert_eq!(norm_game_name("Celeste.exe"), "celeste");
         assert_eq!(norm_game_name("Game.x86_64"), "game");
         assert_eq!(norm_game_name("Game.bin"), "game");
+    }
+
+    /// Serie de muestras con reloj real: `n` filas separadas 100 ms (como MangoHud).
+    fn samples_with_clock(n: usize, fps: f64) -> Vec<Sample> {
+        (0..n)
+            .map(|i| Sample {
+                fps,
+                frame_time: 1000.0 / fps,
+                elapsed_ns: Some(i as f64 * 1e8),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn warmup_descarta_los_primeros_segundos() {
+        // 600 filas = 60 s → descartar los primeros 10 s quita 100 filas.
+        let (kept, applied) = split_warmup(samples_with_clock(600, 60.0), 10.0);
+        assert_eq!(kept.len(), 500);
+        assert!((applied - 10.0).abs() < 0.11);
+    }
+
+    #[test]
+    fn warmup_no_se_aplica_si_queda_poco() {
+        // 25 s de grabación: descartar 10 dejaría 15 s (< MIN_STEADY_SECONDS).
+        let (kept, applied) = split_warmup(samples_with_clock(250, 60.0), 10.0);
+        assert_eq!(kept.len(), 250);
+        assert_eq!(applied, 0.0);
+    }
+
+    #[test]
+    fn warmup_sin_columna_elapsed_no_hace_nada() {
+        let samples: Vec<Sample> = (0..600).map(|_| sample(60.0, 16.6)).collect();
+        let (kept, applied) = split_warmup(samples, 10.0);
+        assert_eq!(kept.len(), 600);
+        assert_eq!(applied, 0.0);
+    }
+
+    #[test]
+    fn warmup_cero_no_toca_nada() {
+        let (kept, applied) = split_warmup(samples_with_clock(600, 60.0), 0.0);
+        assert_eq!(kept.len(), 600);
+        assert_eq!(applied, 0.0);
+    }
+
+    #[test]
+    fn ruido_es_cero_si_la_serie_es_constante() {
+        let fps: Vec<f64> = (0..600).map(|_| 60.0).collect();
+        let noise = noise_percent(&fps).expect("debería poder estimarse");
+        assert!(noise < 1e-9);
+    }
+
+    #[test]
+    fn ruido_crece_cuando_los_bloques_varian() {
+        // 600 filas en 10 bloques: cada bloque con una media distinta (±10 FPS).
+        let fps: Vec<f64> = (0..600)
+            .map(|i| if (i / 60) % 2 == 0 { 50.0 } else { 70.0 })
+            .collect();
+        let noise = noise_percent(&fps).expect("debería poder estimarse");
+        // Medias 50 y 70 con 5 bloques de cada: media 60, error estándar ≈ 3,33
+        // → ±10,9 % con 95 % de confianza.
+        assert!(noise > 6.0 && noise < 15.0, "ruido inesperado: {}", noise);
+    }
+
+    #[test]
+    fn ruido_no_se_estima_con_muy_pocas_muestras() {
+        let fps: Vec<f64> = (0..150).map(|_| 60.0).collect();
+        assert!(noise_percent(&fps).is_none());
+    }
+
+    #[test]
+    fn ruido_combinado_suma_en_cuadratura() {
+        // 3-4-5: √(9+16) = 5
+        assert!((combined_noise(Some(3.0), Some(4.0)) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ruido_combinado_respeta_el_minimo_si_falta_el_dato() {
+        // Un dato ausente o absurdo no se inventa: no aporta margen.
+        assert!((combined_noise(Some(0.0), None) - MIN_NOISE).abs() < 1e-9);
+        assert!((combined_noise(Some(0.1), Some(0.1)) - MIN_NOISE).abs() < 1e-9);
+        assert!((combined_noise(None, None) - MIN_NOISE).abs() < 1e-9);
+        // Con una sola grabación medida, el margen es el suyo (no √2 veces mayor).
+        assert!((combined_noise(Some(8.0), None) - 8.0).abs() < 1e-9);
     }
 }
