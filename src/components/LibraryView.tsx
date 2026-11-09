@@ -1,11 +1,27 @@
 import { useState } from 'react';
-import { Filter, Gamepad2, Home, RefreshCw, Stethoscope } from 'lucide-react';
+import { ArrowDownAZ, ArrowUpAZ, Filter, Gamepad2, Home, RefreshCw, Stethoscope } from 'lucide-react';
 import { api } from '../lib/api';
 import type { Game, LauncherFilter } from '../lib/types';
+import { matchesSearch } from '../lib/format';
 import { GameCard } from './GameCard';
 
-const matchesQuery = (g: Game, query: string) =>
-  g.name.toLowerCase().includes(query.toLowerCase());
+const matchesQuery = (g: Game, query: string) => matchesSearch(g.name, query);
+
+/**
+ * Orden de la rejilla. Solo alfabético: la biblioteca no trae horas jugadas ni
+ * fecha de la última partida, así que ordenar por «recientes» o «más jugados»
+ * sería inventarse datos. El nombre se compara sin acentos ni mayúsculas para
+ * que «Á» quede junto a «A» y no al final.
+ */
+export type SortOrder = 'az' | 'za';
+
+export function sortGames(games: Game[], order: SortOrder): Game[] {
+  const collator = new Intl.Collator('es', { sensitivity: 'base', numeric: true });
+  return [...games].sort((a, b) => {
+    const cmp = collator.compare(a.name, b.name);
+    return order === 'az' ? cmp : -cmp;
+  });
+}
 
 /** Juegos de Steam filtrados por texto y launcher. */
 export function filterSteamGames(library: Game[], query: string, launcherFilter: LauncherFilter) {
@@ -73,6 +89,8 @@ export function LibraryView({
   // Diagnóstico de carátulas: muestra en un modal qué archivos hay realmente en
   // cada launcher, para depurar sin adivinar nombres.
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<SortOrder>('az');
+  const shown = sortGames(games, sortOrder);
 
   const runDiagnostic = async () => {
     try {
@@ -183,7 +201,7 @@ export function LibraryView({
           <Filter className="w-4 h-4 text-[var(--action)]" />
           <span className="text-sm font-semibold text-[var(--text)]">Filtrar por plataforma</span>
         </div>
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
           {filters.map((f) => (
             <button
               key={f.key}
@@ -200,6 +218,34 @@ export function LibraryView({
         </div>
       </div>
 
+      {/* ORDEN DE LA REJILLA */}
+      {games.length > 1 && (
+        <div className="flex items-center justify-end gap-2 mb-4 -mt-2">
+          <span className="text-xs text-[var(--text-muted)]">Ordenar</span>
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
+            {([
+              { key: 'az' as const, label: 'A-Z', Icon: ArrowDownAZ, title: 'Nombre, de la A a la Z' },
+              { key: 'za' as const, label: 'Z-A', Icon: ArrowUpAZ, title: 'Nombre, de la Z a la A' },
+            ]).map(({ key, label, Icon, title }) => (
+              <button
+                key={key}
+                onClick={() => setSortOrder(key)}
+                title={title}
+                aria-pressed={sortOrder === key}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  sortOrder === key
+                    ? 'bg-[var(--action)]/15 text-[var(--action)]'
+                    : 'bg-[var(--surface)] text-[var(--text-muted)] hover:bg-[var(--card-hover)]'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {games.length === 0 ? (
         <div className="text-center py-16">
           <Home className="w-12 h-12 text-[var(--text-dim)] mx-auto mb-4" />
@@ -210,7 +256,7 @@ export function LibraryView({
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-          {games.map((g) => (
+          {shown.map((g) => (
             <GameCard key={`${g.launcher || 'steam'}-${g.appid || g.name}`} game={g} onOpen={onOpenGame} />
           ))}
         </div>

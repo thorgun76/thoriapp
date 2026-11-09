@@ -208,3 +208,34 @@ describe('buildProfileCommand', () => {
     );
   });
 });
+
+describe('buildProfileCommand: parámetros que no son del lanzador', () => {
+  it('un ajuste del juego (`config`) nunca acaba dentro del comando', () => {
+    // Los perfiles por juego traen consejos tipo «usa FSR en Calidad»: llevan
+    // espacios y, si se pegaran al comando, el lanzador de Steam lo rechazaría.
+    const cmd = buildProfileCommand(
+      profile({ enabled_params: [true, true] }),
+      rules([
+        param({ kind: 'env', value: 'DXVK_HUD=0' }),
+        param({ kind: 'config', value: 'Activa FSR dentro del juego' }),
+      ]),
+      [],
+      null,
+      []
+    );
+
+    expect(cmd).toBe('DXVK_HUD=0 %command%');
+    expect(cmd).not.toContain('FSR');
+  });
+
+  it('un argumento de verdad (`arg`) sí va detrás de %command%', () => {
+    const cmd = buildProfileCommand(
+      profile({ enabled_params: [true] }),
+      rules([param({ kind: 'arg', value: '-novid' })]),
+      [],
+      null,
+      []
+    );
+    expect(cmd).toBe('%command% -novid');
+  });
+});

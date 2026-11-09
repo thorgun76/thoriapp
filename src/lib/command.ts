@@ -64,7 +64,9 @@ export function buildProfileCommand(
     if (!profile.enabled_params[i]) return;
     if (p.kind === 'env') parts.envVars.push(p.value);
     else if (p.kind === 'wrapper') parts.wrappers.push(p.value);
-    else parts.args.push(p.value);
+    // `config` es un ajuste dentro del juego (no un parámetro del lanzador) y sus
+    // textos llevan espacios: dentro del comando lo dejarían inválido.
+    else if (p.kind === 'arg') parts.args.push(p.value);
   });
 
   // 2) Recomendaciones de la comunidad (filtradas por hardware)

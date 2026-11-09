@@ -65,7 +65,7 @@ export function GameSidebar({ hardware, onAdjustOptimization, onMeasurePerforman
             onClick={onMeasurePerformance}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] transition-colors"
           >
-            <TrendingUp className="w-4 h-4" /> Medir rendimiento
+            <TrendingUp className="w-4 h-4" /> Medir y comparar
           </button>
         </div>
       </aside>

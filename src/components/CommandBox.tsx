@@ -1,15 +1,50 @@
-import { Check, Copy, Star } from 'lucide-react';
-import type { GameInfo } from '../lib/types';
+import { AlertCircle, AlertTriangle, Check, Copy, Info, Star } from 'lucide-react';
+import type { GameInfo, RuntimeEnv } from '../lib/types';
+import { preflight, type PreflightCheck } from '../lib/preflight';
+import { tierDescription, tierLabel } from '../lib/format';
+
+/** Clases del badge de ProtonDB según el tier (verde → naranja → rojo). */
+export function tierColor(tier: string): string {
+  switch (tier.toLowerCase()) {
+    case 'platinum':
+      return 'bg-[var(--compatible-bg)] text-[var(--compatible)] border-[var(--compatible)]/30';
+    case 'gold':
+    case 'bronze':
+      return 'bg-[var(--caution-bg)] text-[var(--caution)] border-[var(--caution)]/30';
+    case 'silver':
+      return 'bg-[var(--surface)] text-[var(--text)] border-[var(--border)]';
+    default:
+      return 'bg-[var(--error-bg)] text-[var(--error)] border-[var(--error)]/30';
+  }
+}
 
 interface CommandBoxProps {
   gameName: string;
   launchCommand: string;
   activeCount: number;
+  /**
+   * Qué lleva el comando ahora mismo, para resumirlo en chips debajo del código.
+   * `{ value, kind }` con `kind` en `env` (variable), `wrapper` (envoltorio como
+   * gamemoderun/mangohud) y `arg` (bandera del juego).
+   */
+  activeParts?: { value: string; kind: 'env' | 'wrapper' | 'arg' }[];
   copied: boolean;
   expertMode: boolean;
   manualEditing: boolean;
   manualCommand: string;
   info: GameInfo;
+  /** Estado real de la máquina; `null` mientras carga (no se muestran avisos). */
+  env: RuntimeEnv | null;
+  /** Launcher del juego (`steam`, `lutris`…) para avisos de sandbox. */
+  launcher?: string;
+  /**
+   * Anti-cheat denegado: **no hay comando**. La caja deja de ofrecer copiar,
+   * guardar o editar, y explica por qué. El texto llega ya montado en
+   * `launchCommand`/`blockedReason` para no duplicar el criterio de `isDenied`.
+   */
+  blocked?: boolean;
+  /** Motivo del bloqueo (mismo texto que usa el portapapeles). */
+  blockedReason?: string;
   onCopy: () => void;
   onSaveProfile: () => void;
   onReset: () => void;
@@ -22,17 +57,54 @@ export function CommandBox({
   gameName,
   launchCommand,
   activeCount,
+  activeParts = [],
   copied,
   expertMode,
   manualEditing,
   manualCommand,
   info,
+  env,
+  launcher,
+  blocked = false,
+  blockedReason = '',
   onCopy,
   onSaveProfile,
   onReset,
   onToggleManualEditing,
   onManualCommandChange,
 }: CommandBoxProps) {
+  // Revisión previa: los problemas que se pagan con un "el juego no arranca",
+  // detectados antes de copiar el comando al lanzador. Con el juego bloqueado no
+  // se revisa nada: no hay comando que revisar y los avisos serían ruido.
+  const checks = blocked
+    ? []
+    : preflight(launchCommand, env, {
+        native: info.native === true,
+        launcher,
+        manual: manualEditing,
+      });
+
+  if (blocked) {
+    return (
+      <section className="mb-8 p-6 rounded-2xl bg-[var(--error-bg)] border-2 border-[var(--error)]/50">
+        <div className="flex items-start gap-3">
+          <AlertCircle className="w-6 h-6 mt-0.5 shrink-0 text-[var(--error)]" />
+          <div className="min-w-0">
+            <p className="text-xs text-[var(--error)] font-bold uppercase tracking-wider mb-2">
+              Sin comando de lanzamiento
+            </p>
+            <h2 className="text-2xl font-bold mb-1">{gameName}</h2>
+            <p className="text-sm text-[var(--text)] leading-relaxed">{blockedReason}</p>
+            <p className="text-xs text-[var(--text-muted)] mt-3 leading-relaxed">
+              Ningún parámetro de esta app cambia una decisión del desarrollador. Si el dato
+              cambia, la lista de anti-cheat se refresca sola una vez al día.
+            </p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="mb-8 p-6 rounded-2xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-lg shadow-[var(--action)]/10">
       <div className="flex items-start justify-between mb-4">
@@ -56,14 +128,11 @@ export function CommandBox({
           {info.tier && (
             <span
               className={`text-xs px-3 py-1 rounded-full border font-semibold ${
-                info.tier.toLowerCase() === 'platinum'
-                  ? 'bg-[var(--compatible-bg)] text-[var(--compatible)] border-[var(--compatible)]/30'
-                  : info.tier.toLowerCase() === 'gold'
-                  ? 'bg-[var(--caution-bg)] text-[var(--caution)] border-[var(--caution)]/30'
-                  : 'bg-[var(--surface)] text-[var(--text-muted)] border-[var(--border)]'
+                tierColor(info.tier)
               }`}
+              title={tierDescription(info.tier) ?? undefined}
             >
-              ProtonDB: {info.tier}
+              ProtonDB: {tierLabel(info.tier)}
             </span>
           )}
         </div>
@@ -75,6 +144,42 @@ export function CommandBox({
           {launchCommand}
         </code>
       </div>
+
+      {/* Resumen de lo que lleva el comando. El código de arriba es la verdad,
+          pero leer una cadena larga de variables no dice de un vistazo qué se
+          está metiendo en el juego. Los ajustes del juego (`config`) no salen
+          aquí a propósito: no forman parte del comando. */}
+      {activeParts.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mr-1">
+            Incluye
+          </span>
+          {activeParts.map((part, i) => (
+            <span
+              key={`${part.kind}-${part.value}-${i}`}
+              className={`text-[11px] px-2 py-1 rounded-md font-mono border ${PART_STYLES[part.kind]}`}
+              title={PART_TITLES[part.kind]}
+            >
+              {part.value}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Comprobaciones sobre el sistema real (wrappers, capa Vulkan, sandbox…) */}
+      {checks.length > 0 && (
+        <ul className="mb-4 space-y-2">
+          {checks.map((check) => (
+            <PreflightRow key={check.id} check={check} />
+          ))}
+        </ul>
+      )}
+      {env && checks.length === 0 && (
+        <p className="mb-4 text-xs text-[var(--text-muted)] flex items-center gap-1.5">
+          <Check className="w-3.5 h-3.5 text-[var(--compatible)]" />
+          Todo lo que usa este comando está instalado en tu sistema.
+        </p>
+      )}
 
       <div className="flex gap-3">
         <button
@@ -147,5 +252,53 @@ export function CommandBox({
         </div>
       )}
     </section>
+  );
+}
+
+/** Color de los chips del resumen, por tipo de pieza del comando. */
+const PART_STYLES: Record<'env' | 'wrapper' | 'arg', string> = {
+  env: 'bg-[var(--action)]/10 text-[var(--action)] border-[var(--action)]/25',
+  wrapper: 'bg-[var(--caution-bg)] text-[var(--caution)] border-[var(--caution)]/25',
+  arg: 'bg-[var(--compatible-bg)] text-[var(--compatible)] border-[var(--compatible)]/25',
+};
+
+const PART_TITLES: Record<'env' | 'wrapper' | 'arg', string> = {
+  env: 'Variable de entorno: se aplica a todos los procesos del juego',
+  wrapper: 'Programa que envuelve el lanzamiento (overlay, gestor de energía…)',
+  arg: 'Argumento propio del juego',
+};
+
+/** Colores e icono de cada nivel de aviso. */
+const SEVERITY_STYLES = {  error: {
+    Icon: AlertCircle,
+    box: 'bg-[var(--error-bg)] border-[var(--error)]/40',
+    text: 'text-[var(--error)]',
+  },
+  warn: {
+    Icon: AlertTriangle,
+    box: 'bg-[var(--caution-bg)] border-[var(--caution)]/40',
+    text: 'text-[var(--caution)]',
+  },
+  info: {
+    Icon: Info,
+    box: 'bg-[var(--surface)] border-[var(--border)]',
+    text: 'text-[var(--text-muted)]',
+  },
+} as const;
+
+function PreflightRow({ check }: { check: PreflightCheck }) {
+  const { Icon, box, text } = SEVERITY_STYLES[check.severity];
+
+  return (
+    <li className={`flex items-start gap-3 p-3 rounded-xl border ${box}`}>
+      <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${text}`} />
+      <div className="min-w-0">
+        <p className={`text-sm font-semibold ${text}`}>{check.title}</p>
+        <p className="text-xs text-[var(--text-muted)] mt-0.5">{check.detail}</p>
+        {check.hint && (
+          <p className="text-xs text-[var(--text-muted)] mt-1 opacity-80">{check.hint}</p>
+        )}
+      </div>
+    </li>
   );
 }

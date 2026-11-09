@@ -26,7 +26,6 @@ import { SaveProfileModal } from './components/SaveProfileModal';
 import { SortableProfile } from './components/SortableProfile';
 import { CommandBox } from './components/CommandBox';
 import { GameSidebar } from './components/GameSidebar';
-import { DiagnosticTab } from './components/DiagnosticTab';
 import { Topbar } from './components/Topbar';
 import { CompatTab } from './components/CompatTab';
 import { OptimizeTab } from './components/OptimizeTab';
@@ -43,10 +42,13 @@ import { useHardware } from './hooks/useHardware';
 import { useLibrary } from './hooks/useLibrary';
 import { useProfiles } from './hooks/useProfiles';
 import { useGameDetails } from './hooks/useGameDetails';
+import { useRuntimeEnv } from './hooks/useRuntimeEnv';
 import { useConfirm, useToast } from './hooks/useConfirm';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { missingReason, recommendationStatus } from './lib/recommendations';
 import { classifyParameter, joinCommand, type CommandParts } from './lib/command';
+import { matchesSearch } from './lib/format';
+import { deniedReason, isDenied } from './lib/anticheat';
 
 // Abre el diálogo de archivo, lee el JSON y se lo pasa al backend.
 // (El navegador no expone la ruta real del archivo: hay que leer el contenido.)
@@ -68,12 +70,21 @@ function App() {
   const [view, setView] = useState<View>('recommendations');
   // Hardware: detectado una sola vez por su propio hook (ver src/hooks/useHardware.ts)
   const { hw } = useHardware();
+  // Estado real de la maquina (wrappers instalados, capa Vulkan, Flatpak...) para
+  // avisar antes de que el comando falle al lanzar el juego.
+  const runtimeEnv = useRuntimeEnv();
   const [showExternalGames, setShowExternalGames] = useState(true);
   // Juego abierto: reglas, ProtonDB, motor y recomendaciones (useGameDetails)
   const {
     current,
     rules,
     info,
+    antiCheat,
+    requirements,
+    requirementsLoading,
+    requirementsError,
+    protonPulse,
+    protonPulseLoading,
     engine,
     engineRecommendations,
     communityRecommendations,
@@ -81,7 +92,7 @@ function App() {
     error: gameError,
     openGame: loadGameDetails,
     closeGame,
-  } = useGameDetails({ getHwTags: () => hw?.tags || [] });
+  } = useGameDetails({ getHwTags: () => hw?.tags || [], getGpuName: () => hw?.gpu || null });
 
   // Estados de selección
   const [enabled, setEnabled] = useState<boolean[]>([]);
@@ -126,7 +137,11 @@ function App() {
     importFromText: importProfilesFromText,
     exportAll: exportAllProfiles,
     exportOne: exportProfile,
-  } = useProfiles({ getHwTags: () => hw?.tags || [], onNotify: setToast });
+  } = useProfiles({
+    getHwTags: () => hw?.tags || [],
+    getGpuName: () => hw?.gpu || null,
+    onNotify: setToast,
+  });
 
   // Fase 3: Toggle para forzar Proton en juegos nativos
   const [forceProton, setForceProton] = useState(false);
@@ -268,6 +283,12 @@ function App() {
 
   const getStatusOptions = () => ({ hwTags: hw?.tags || [], forceProton });
 
+  // Anti-cheat denegado = sin comando. Se calcula aquí y no dentro de `launchLine`
+  // para que la caja del comando, el portapapeles, el guardado de perfil y la
+  // pestaña de benchmarks usen el MISMO criterio.
+  const blockedByAnticheat = isDenied(antiCheat);
+  const blockedMessage = blockedByAnticheat ? deniedReason(antiCheat) : '';
+
   const missing = (p: Param): string | null =>
     missingReason(p, { isNative: info?.native === true, ...getStatusOptions() });
 
@@ -309,19 +330,23 @@ function App() {
     setSelectedEngineRecs(newSet);
   };
 
-  const launchLine = (): string => {
-    if (useManualCommand && manualCommand.trim()) {
-      return manualCommand.trim();
-    }
-    if (!rules) return '%command%';
-
+  /**
+   * Piezas del comando, en el orden en que se montan. Devuelve también las del
+   * modo manual no: ahí el texto lo pone el usuario y no se puede trocear sin
+   * inventarse qué es cada cosa.
+   */
+  const commandParts = (): CommandParts => {
     const parts: CommandParts = { envVars: [], wrappers: [], args: [] };
+    if (blockedByAnticheat || !rules) return parts;
 
     rules.params.forEach((p, i) => {
       if (enabled[i] !== true) return;
       if (p.kind === 'env') parts.envVars.push(p.value);
       else if (p.kind === 'wrapper') parts.wrappers.push(p.value);
-      else parts.args.push(p.value);
+      // `kind: "config"` no es un parámetro de lanzador: es un ajuste dentro del
+      // juego ("usa FSR en Calidad"). Algunos textos llevan espacios, así que sin
+      // este filtro acabaría dentro del comando y lo rompería.
+      else if (p.kind === 'arg') parts.args.push(p.value);
     });
 
     communityRecommendations.forEach((rec, i) => {
@@ -337,19 +362,60 @@ function App() {
       parts.envVars.push(rec);
     });
 
-    const { envVars, wrappers, args } = parts;
+    return parts;
+  };
+
+  /** Resumen visual del comando: se deriva de las mismas piezas, no de un cálculo aparte. */
+  const activeParts = (): { value: string; kind: 'env' | 'wrapper' | 'arg' }[] => {
+    if (useManualCommand) return [];
+    const { envVars, wrappers, args } = commandParts();
+    return [
+      ...wrappers.map((value) => ({ value, kind: 'wrapper' as const })),
+      ...envVars.map((value) => ({ value, kind: 'env' as const })),
+      ...args.map((value) => ({ value, kind: 'arg' as const })),
+    ];
+  };
+
+  const launchLine = (): string => {
+    // Puerta dura del anti-cheat: si el juego está `Denied`, no hay comando. Antes
+    // se avisaba en la pestaña Compatibilidad y aun así se generaba uno, que es
+    // cómo un usuario acaba baneado siguiendo un consejo de la app.
+    if (blockedByAnticheat) return blockedMessage;
+
+    if (useManualCommand && manualCommand.trim()) {
+      return manualCommand.trim();
+    }
+    if (!rules) return '%command%';
+
+    const { envVars, wrappers, args } = commandParts();
     if (envVars.length === 0 && wrappers.length === 0 && args.length === 0) {
       return '%command%';
     }
-    return joinCommand(parts);
+    return joinCommand({ envVars, wrappers, args });
   };
 
   const copyCmd = async () => {
+    if (blockedByAnticheat) {
+      setToast('Comando no generado: anti-cheat denegado');
+      return;
+    }
     try {
       await navigator.clipboard.writeText(launchLine());
       setCopied(true);
       setToast('Comando copiado: ' + launchLine());
       setTimeout(() => setCopied(false), 2000);
+    } catch (e) { console.error(e); }
+  };
+
+  /**
+   * Copia las opciones de lanzamiento de un reporte de Proton Pulse. Es el texto de
+   * otra persona: se copia tal cual y se dice de dónde sale, sin fusionarlo con el
+   * comando actual (mezclar dos `%command%` produce un comando que no arranca).
+   */
+  const copyLaunchOptions = async (options: string) => {
+    try {
+      await navigator.clipboard.writeText(options);
+      setToast('Opciones de otro usuario copiadas: ' + options);
     } catch (e) { console.error(e); }
   };
 
@@ -385,13 +451,13 @@ function App() {
 
   // NUEVO: Filtrar por launcher
   const filteredLib = library.filter(g => {
-    const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
+    const matchesQuery = matchesSearch(g.name, query);
     const matchesLauncher = launcherFilter === 'all' || launcherFilter === 'steam';
     return matchesQuery && matchesLauncher;
   });
 
   const filteredExternalGames = externalGames.filter(g => {
-    const matchesQuery = g.name.toLowerCase().includes(query.toLowerCase());
+    const matchesQuery = matchesSearch(g.name, query);
     const matchesLauncher = launcherFilter === 'all' || g.launcher === launcherFilter;
     return matchesQuery && matchesLauncher;
   });
@@ -400,8 +466,17 @@ function App() {
     ? [...filteredLib, ...filteredExternalGames]
     : filteredLib;
 
+  // Total real de la biblioteca (sin filtrar), para el contador de arriba.
+  const libraryTotal = showExternalGames ? library.length + externalGames.length : library.length;
+
   const saveProfile = async () => {
     if (!current || !newProfileName.trim()) return;
+    // Guardar un perfil de un juego denegado equivale a guardar el comando: no se
+    // permite, para que la puerta no se pueda saltar por la puerta de atrás.
+    if (blockedByAnticheat) {
+      setToast('No se guardan perfiles de juegos bloqueados por el anti-cheat');
+      return;
+    }
     const ok = await saveProfileInStore(
       {
         name: newProfileName,
@@ -453,7 +528,8 @@ function App() {
           query={query}
           suggestions={suggestions}
           showSuggestions={showSug}
-          gameCount={combinedLibrary.length}
+          gameCount={libraryTotal}
+          matchedCount={combinedLibrary.length}
           scanningLaunchers={scanningLaunchers}
           hardware={hw}
           onQueryChange={handleQueryChange}
@@ -535,16 +611,25 @@ function App() {
                   <CommandBox
                     gameName={current.name}
                     launchCommand={launchLine()}
+                    activeParts={activeParts()}
+                    // Bloqueado por anti-cheat: se oculta cualquier opción activa
+                    // para no sugerir que el comando existe.
                     activeCount={
-                      enabled.filter(Boolean).length +
-                      selectedCommunityRecs.size +
-                      selectedEngineRecs.size
+                      blockedByAnticheat
+                        ? 0
+                        : enabled.filter(Boolean).length +
+                          selectedCommunityRecs.size +
+                          selectedEngineRecs.size
                     }
+                    blocked={blockedByAnticheat}
+                    blockedReason={blockedMessage}
                     copied={copied}
                     expertMode={expertMode}
                     manualEditing={useManualCommand}
                     manualCommand={manualCommand}
                     info={info}
+                    env={runtimeEnv}
+                    launcher={current.launcher}
                     onCopy={copyCmd}
                     onSaveProfile={() => setShowSaveProfileModal(true)}
                     onReset={() => {
@@ -560,7 +645,7 @@ function App() {
                     onManualCommandChange={setManualCommand}
                   />
 
-                  {/* TABS: Compatibilidad, Optimización, Diagnóstico */}
+                  {/* TABS: Compatibilidad, Optimización */}
                   <div className="mb-6 border-b border-[var(--border)]">
                     <div className="flex gap-1">
                       <button
@@ -582,16 +667,6 @@ function App() {
                         }`}
                       >
                         Optimización
-                      </button>
-                      <button
-                        onClick={() => setView('tests')}
-                        className={`px-5 py-3 text-sm font-semibold transition-colors border-b-2 ${
-                          view === 'tests'
-                            ? 'text-[var(--action)] border-[var(--action)]'
-                            : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                        }`}
-                      >
-                        Diagnóstico
                       </button>
                     </div>
                   </div>
@@ -621,9 +696,14 @@ function App() {
                           current={current}
                           rules={rules}
                           info={info}
+                          antiCheat={antiCheat}
+                          protonPulse={protonPulse}
+                          protonPulseLoading={protonPulseLoading}
+                          onCopyLaunchOptions={copyLaunchOptions}
                           engine={engine}
-                          forceProton={forceProton}
-                          onToggleProton={() => setForceProton(!forceProton)}
+                          requirements={requirements}
+                          requirementsLoading={requirementsLoading}
+                          requirementsError={requirementsError}
                         />
                       )}
 
@@ -652,8 +732,6 @@ function App() {
                         />
                       )}
 
-                      {/* TAB: DIAGNÓSTICO */}
-                      {view === 'tests' && <DiagnosticTab />}
                     </div>
 
                     {/* Sidebar Column */}
@@ -664,8 +742,8 @@ function App() {
                         setToast('Selecciona ajustes en la pestaña Optimización');
                       }}
                       onMeasurePerformance={() => {
-                        setView('tests');
-                        setToast('Sigue el tutorial de medición');
+                        setSidebarView('benchmarks');
+                        setToast('Graba con MangoHud y analiza aquí el resultado');
                       }}
                     />
                   </div>

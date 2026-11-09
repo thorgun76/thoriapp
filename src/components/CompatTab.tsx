@@ -1,20 +1,133 @@
-import { ExternalLink } from 'lucide-react';
+import { AlertTriangle, ExternalLink, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react';
 import { openExternal } from '../lib/links';
-import type { Game, GameEngine, GameInfo, GameRules } from '../lib/types';
+import { tierDescription, tierLabel } from '../lib/format';
+import { antiCheatsLabel, antiCheatVerdict, type AcSeverity } from '../lib/anticheat';
+import { RequirementsCard } from './RequirementsCard';
+import { ProtonPulseCard } from './ProtonPulseCard';
+import type {
+  AntiCheatInfo,
+  Game,
+  GameEngine,
+  GameInfo,
+  GameRules,
+  ProtonPulseSummary,
+  RequirementsReport,
+} from '../lib/types';
 
 interface CompatTabProps {
   current: Game;
   rules: GameRules;
   info: GameInfo;
   engine: GameEngine | null;
-  forceProton: boolean;
-  onToggleProton: () => void;
+  /** Anti-cheat del juego; `null` si no hay dato. */
+  antiCheat: AntiCheatInfo | null;
+  /** Reportes de Proton Pulse filtrados por la GPU del equipo; `null` = sin datos. */
+  protonPulse?: ProtonPulseSummary | null;
+  protonPulseLoading?: boolean;
+  /** Copia al portapapeles las opciones de lanzamiento de un reporte ajeno. */
+  onCopyLaunchOptions?: (options: string) => void;
+  /** Requisitos de Steam comparados con esta máquina; `null` mientras carga. */
+  requirements?: RequirementsReport | null;
+  requirementsLoading?: boolean;
+  requirementsError?: string | null;
+}
+
+const AC_STYLES: Record<AcSeverity, { box: string; text: string; Icon: typeof ShieldCheck }> = {
+  ok: {
+    box: 'bg-[var(--compatible-bg)] border-[var(--compatible)]/30',
+    text: 'text-[var(--compatible)]',
+    Icon: ShieldCheck,
+  },
+  caution: {
+    box: 'bg-[var(--caution-bg)] border-[var(--caution)]/40',
+    text: 'text-[var(--caution)]',
+    Icon: AlertTriangle,
+  },
+  blocked: {
+    box: 'bg-[var(--error-bg)] border-[var(--error)]/40',
+    text: 'text-[var(--error)]',
+    Icon: ShieldAlert,
+  },
+  unknown: {
+    box: 'bg-[var(--surface)] border-[var(--border)]',
+    text: 'text-[var(--text-muted)]',
+    Icon: ShieldQuestion,
+  },
+};
+
+/** Aviso de anti-cheat: lo primero que hay que saber antes de configurar nada. */
+function AntiCheatCard({ info }: { info: AntiCheatInfo | null }) {
+  const verdict = antiCheatVerdict(info);
+  const { box, text, Icon } = AC_STYLES[verdict.severity];
+  const cheats = antiCheatsLabel(info);
+
+  return (
+    <article className={`p-5 rounded-xl border ${box}`}>
+      <div className="flex items-start gap-3">
+        <Icon className={`w-5 h-5 mt-0.5 shrink-0 ${text}`} />
+        <div className="min-w-0">
+          <h3 className="text-base font-bold text-[var(--text)]">Anti-cheat</h3>
+          <p className={`text-sm font-semibold ${text}`}>{verdict.label}</p>
+          {cheats && <p className="text-xs text-[var(--text-muted)] mt-1">Usa: {cheats}</p>}
+          <p className="text-sm text-[var(--text-muted)] mt-2 leading-relaxed">{verdict.detail}</p>
+          {verdict.advice && (
+            <p className="text-sm text-[var(--text)] mt-2 leading-relaxed">{verdict.advice}</p>
+          )}
+          {info?.note && (
+            <p className="text-xs text-[var(--text-muted)] mt-2 italic leading-relaxed">
+              Último cambio conocido: {info.note}
+            </p>
+          )}
+          {info?.reference && (
+            <button
+              onClick={() => openExternal(info.reference!)}
+              className="mt-3 flex items-center gap-2 text-xs font-semibold text-[var(--action)] hover:underline"
+            >
+              <ExternalLink className="w-3.5 h-3.5" /> Ver la fuente
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
+  );
 }
 
 /** Pestaña "Compatibilidad": datos de ProtonDB, nativo/Proton y cuello de botella. */
-export function CompatTab({ current, rules, info, engine, forceProton, onToggleProton }: CompatTabProps) {
+export function CompatTab({
+  current,
+  rules,
+  info,
+  engine,
+  antiCheat,
+  protonPulse = null,
+  protonPulseLoading = false,
+  onCopyLaunchOptions,
+  requirements = null,
+  requirementsLoading = false,
+  requirementsError = null,
+}: CompatTabProps) {
   return (
     <div className="space-y-4">
+                        {/* Antes que anti-cheat y antes que ProtonDB: si el equipo no
+                            llega al mínimo, lo demás es secundario. */}
+                        <RequirementsCard
+                          report={requirements}
+                          loading={requirementsLoading}
+                          error={requirementsError}
+                        />
+
+                        {/* Va antes de los ajustes: si el anti-cheat bloquea, no sirven de nada. */}
+                        <AntiCheatCard info={antiCheat} />
+
+                        {/* Después del anti-cheat (si bloquea, estos reportes no
+                            importan) pero antes del bloque de información: aquí sí
+                            hay hardware concreto del que hablar. */}
+                        <ProtonPulseCard
+                          summary={protonPulse}
+                          loading={protonPulseLoading}
+                          onCopyOptions={(o) => onCopyLaunchOptions?.(o)}
+                        />
+
                         <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
                           <h3 className="text-base font-bold mb-3 text-[var(--text)]">Información del juego</h3>
                           <div className="space-y-3">
@@ -32,41 +145,6 @@ export function CompatTab({ current, rules, info, engine, forceProton, onToggleP
                                 {info.native ? 'Linux nativo' : 'Requiere Proton'}
                               </strong>
                             </div>
-
-                            {/* Fase 3: Toggle para forzar Proton en juegos nativos */}
-                            {info.native === true && (
-                              <div className="mt-3 p-3 rounded-lg bg-[var(--card)] border border-[var(--border)]">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex-1">
-                                    <p className="text-sm font-semibold text-[var(--text)]">Probar con Proton</p>
-                                    <p className="text-xs text-[var(--text-muted)] mt-1">
-                                      Algunos juegos nativos funcionan mejor con Proton. Actívalo para ver parámetros de compatibilidad.
-                                    </p>
-                                  </div>
-                                  <button
-                                    onClick={() => onToggleProton()}
-                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${
-                                      forceProton ? 'bg-[var(--action)]' : 'bg-[var(--border)]'
-                                    }`}
-                                    role="switch"
-                                    aria-checked={forceProton}
-                                  >
-                                    <span
-                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ease-in-out ${
-                                        forceProton ? 'translate-x-6' : 'translate-x-1'
-                                      }`}
-                                    />
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-
-                            {engine && (
-                              <div className="flex justify-between text-sm">
-                                <span className="text-[var(--text-muted)]">Motor</span>
-                                <strong className="text-[var(--text)]">{engine.name}</strong>
-                              </div>
-                            )}
                             {engine && (
                               <div className="flex justify-between text-sm">
                                 <span className="text-[var(--text-muted)]">API gráfica</span>
@@ -89,14 +167,22 @@ export function CompatTab({ current, rules, info, engine, forceProton, onToggleP
                                   info.tier.toLowerCase() === 'bronze' ? 'text-[var(--caution)]' :
                                   'text-[var(--error)]'
                                 }`}>
-                                  {info.tier.toLowerCase() === 'platinum' ? 'Platino' :
-                                   info.tier.toLowerCase() === 'gold' ? 'Oro' :
-                                   info.tier.toLowerCase() === 'silver' ? 'Plata' :
-                                   info.tier.toLowerCase() === 'bronze' ? 'Bronce' :
-                                   info.tier.toLowerCase() === 'borked' ? 'No funciona' :
-                                   info.tier}
+                                  {tierLabel(info.tier)}
                                 </strong>
                               </div>
+                              {/* Un tier solo no dice si hay que tocar algo: se explica. */}
+                              {tierDescription(info.tier) && (
+                                <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+                                  {tierDescription(info.tier)}
+                                </p>
+                              )}
+                              {info.tier.toLowerCase() === 'borked' && (
+                                <p className="flex items-start gap-2 text-xs text-[var(--caution)] leading-relaxed">
+                                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                                  Antes de invertir tiempo: ProtonDB recoge que este juego no arranca.
+                                  Los ajustes de esta app no lo van a arreglar por sí solos.
+                                </p>
+                              )}
                               {info.total && (
                                 <div className="flex justify-between text-sm">
                                   <span className="text-[var(--text-muted)]">Reportes</span>

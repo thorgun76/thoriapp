@@ -291,17 +291,36 @@ export function OptimizeTab({
                                   .map((p, i) => {
                                     const idx = rules.params.indexOf(p);
                                     const isMissing = missing(p);
+                                    // Un `config` es un ajuste DENTRO del juego ("usa FSR en
+                                    // Calidad"), no un parámetro del lanzador: si se pudiera
+                                    // activar, acabaría pegado al comando y lo rompería. Se
+                                    // muestra como consejo, sin interruptor.
+                                    const esAjusteInterno = p.kind === 'config';
                                     return (
-                                      <button
+                                      <div
                                         key={i}
-                                        disabled={!!isMissing}
-                                        onClick={() => onToggleRule(idx)}
+                                        role={esAjusteInterno || isMissing ? undefined : 'checkbox'}
+                                        aria-checked={esAjusteInterno || isMissing ? undefined : !!enabled[idx]}
+                                        aria-disabled={esAjusteInterno || isMissing ? undefined : false}
+                                        tabIndex={esAjusteInterno || isMissing ? undefined : 0}
+                                        onClick={() => {
+                                          if (!isMissing && !esAjusteInterno) onToggleRule(idx);
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (isMissing || esAjusteInterno) return;
+                                          if (e.key === ' ' || e.key === 'Enter') {
+                                            e.preventDefault();
+                                            onToggleRule(idx);
+                                          }
+                                        }}
                                         className={`w-full text-left p-4 rounded-lg border transition-all ${
-                                          isMissing
-                                            ? 'opacity-50 bg-[var(--bg)] border-[var(--border)] cursor-not-allowed'
-                                            : enabled[idx]
-                                              ? 'bg-[var(--caution-bg)] border-[var(--caution)]/50'
-                                              : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--caution)]/40'
+                                          esAjusteInterno
+                                            ? 'bg-[var(--bg)] border-dashed border-[var(--border)] cursor-default'
+                                            : isMissing
+                                              ? 'opacity-50 bg-[var(--bg)] border-[var(--border)] cursor-not-allowed'
+                                              : enabled[idx]
+                                                ? 'bg-[var(--caution-bg)] border-[var(--caution)]/50'
+                                                : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--caution)]/40'
                                         }`}
                                       >
                                         <div className="flex items-start justify-between gap-3">
@@ -311,6 +330,17 @@ export function OptimizeTab({
                                               <span className={`text-[10px] px-1.5 py-0.5 rounded border ${impactColor(p.impact)}`}>
                                                 {p.impact.toUpperCase()}
                                               </span>
+                                              {/* Qué acaba en el comando y qué no. Sin esta distinción
+                                                  el usuario no sabe qué está tocando al activar la tarjeta. */}
+                                              {esAjusteInterno ? (
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card)] text-[var(--text-muted)] border border-[var(--border)]">
+                                                  🎮 En el juego
+                                                </span>
+                                              ) : (
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg)] text-[var(--text-dim)] border border-[var(--border)] font-mono">
+                                                  {p.kind === 'wrapper' ? 'envoltorio' : p.kind === 'arg' ? 'argumento' : 'variable'}
+                                                </span>
+                                              )}
 
                                               {/* Fase 3: Badges de recomendación */}
                                               {(() => {
@@ -351,16 +381,19 @@ export function OptimizeTab({
                                             <p className="text-sm text-[var(--text-muted)]">
                                               {expertMode ? p.why : (p.simple_why || p.why)}
                                             </p>
-                                            {enabled[idx] && p.warn && (
+                                            {/* Un ajuste interno se lee siempre, aunque esté
+                                                «desactivado»: es un consejo, no un toggle. */}
+                                            {(esAjusteInterno || enabled[idx]) && p.warn && (
                                               <p className="text-sm text-[var(--caution)] mt-2 flex items-start gap-2">
                                                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                                                 {p.warn}
                                               </p>
                                             )}
-                                            {enabled[idx] && p.source && (
+                                            {(esAjusteInterno || enabled[idx]) && p.source && (
                                               <button
                                                 onClick={(e) => { e.stopPropagation(); openExternal(p.source!); }}
-                                                className="text-sm text-[var(--action)] hover:text-[var(--action-hover)] mt-2 inline-flex items-center gap-1"
+                                                aria-label={`Abrir la fuente de «${p.title}» en el navegador`}
+                                                className="text-sm text-[var(--action)] hover:text-[var(--action-hover)] mt-2 inline-flex items-center gap-1 rounded"
                                               >
                                                 <ExternalLink className="w-4 h-4" /> Fuente
                                               </button>
@@ -400,7 +433,7 @@ export function OptimizeTab({
                                             )}
                                           </div>
                                         </div>
-                                      </button>
+                                      </div>
                                     );
                                   })}
                               </div>

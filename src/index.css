@@ -55,3 +55,40 @@ html, body, #root {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-hover);
 }
+
+/* ── Foco visible ────────────────────────────────────────────────────────────
+   Varios componentes hacen `focus:outline-none` y se quedan sin ninguna señal
+   de dónde está el foco al navegar con Tab. Se pone aquí, una sola vez, en vez
+   de repetir `focus-visible:ring-2` en cada botón de la app.
+
+   `:focus-visible` y no `:focus`: el anillo debe salir al moverse con teclado,
+   no al hacer clic con el ratón, donde ya hay feedback de hover/active. */
+:where(button, a, [role='switch'], [role='checkbox'], [role='button'], summary):focus-visible {
+  outline: 2px solid var(--action);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* En un contenedor con overflow oculto el anillo se recortaría: offset 0. */
+:where(.overflow-hidden) :where(button, a, [role='switch']):focus-visible {
+  outline-offset: -2px;
+}
+
+/* Un poco de margen al final de las listas largas: en pantallas con notch o
+   widgets flotantes la última tarjeta queda pegada al borde. */
+@supports (padding: max(0px)) {
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Respeta a quien pide menos movimiento en el sistema. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

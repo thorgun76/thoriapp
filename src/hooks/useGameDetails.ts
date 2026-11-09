@@ -1,16 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type {
+  AntiCheatInfo,
   CommunityRecommendation,
   Game,
   GameEngine,
   GameInfo,
   GameRules,
+  ProtonPulseSummary,
+  RequirementsReport,
 } from '../lib/types';
 
 interface UseGameDetailsOptions {
   /** Tags de hardware (getter, para no recrear callbacks). */
   getHwTags: () => string[];
+  /**
+   * GPU del equipo (`hardware.gpu`), como getter por el mismo motivo.
+   *
+   * No basta con los tags: decidir si recomendar `VKD3D_CONFIG=dxr` exige el
+   * MODELO (¿tiene ray tracing utilizable?), y el tag `nvidia` lo tienen igual una
+   * GTX 1660 Ti y una RTX 4070.
+   */
+  getGpuName?: () => string | null;
+}
+
+/** appid 0 = juego de Lutris/Heroic/Heronite sin AppID de Steam: no hay ficha
+ * que consultar, ni requisitos, ni motor. Se centraliza para no repetir `=== 0`. */
+function appidDe(g: Game): number {
+  return g.appid === 0 ? 0 : g.appid;
 }
 
 /**
@@ -20,10 +37,19 @@ interface UseGameDetailsOptions {
  * juntos, y existe `openToken` para descartar respuestas de un juego que el
  * usuario ya abandonó (evita que un clic rápido deje datos cruzados).
  */
-export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
+export function useGameDetails({ getHwTags, getGpuName }: UseGameDetailsOptions) {
   const [current, setCurrent] = useState<Game | null>(null);
   const [rules, setRules] = useState<GameRules | null>(null);
   const [info, setInfo] = useState<GameInfo | null>(null);
+  /** Anti-cheat del juego (AreWeAntiCheatYet). `null` = sin datos o aún cargando. */
+  const [antiCheat, setAntiCheat] = useState<AntiCheatInfo | null>(null);
+  /** Requisitos de Steam frente a esta máquina. `null` = sin datos. */
+  const [requirements, setRequirements] = useState<RequirementsReport | null>(null);
+  /** Reportes de Proton Pulse filtrados por esta GPU. `null` = sin datos. */
+  const [protonPulse, setProtonPulse] = useState<ProtonPulseSummary | null>(null);
+  const [protonPulseLoading, setProtonPulseLoading] = useState(false);
+  const [requirementsLoading, setRequirementsLoading] = useState(false);
+  const [requirementsError, setRequirementsError] = useState<string | null>(null);
   const [engine, setEngine] = useState<GameEngine | null>(null);
   const [engineRecommendations, setEngineRecommendations] = useState<string[]>([]);
   const [communityRecommendations, setCommunityRecommendations] = useState<CommunityRecommendation[]>([]);
@@ -48,6 +74,12 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
       setCurrent(g);
       setRules(null);
       setInfo(null);
+      setAntiCheat(null);
+      setProtonPulse(null);
+      setProtonPulseLoading(appidDe(g) !== 0);
+      setRequirements(null);
+      setRequirementsError(null);
+      setRequirementsLoading(appidDe(g) !== 0);
       setEngine(null);
       setEngineRecommendations([]);
       setCommunityRecommendations([]);
@@ -56,7 +88,7 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
 
       try {
         // appid 0 = juego de Lutris/Heroic/HeroNite → reglas genéricas
-        const appidToUse = g.appid === 0 ? 0 : g.appid;
+        const appidToUse = appidDe(g);
 
         const [r, i, eng] = await Promise.all([
           api.getRules(appidToUse),
@@ -80,12 +112,23 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
         ]);
 
         // Motor y comunidad se pueden pedir ya, en paralelo
-        const [engineRecs, communityRecs] = await Promise.all([
-          eng ? api.getEngineRecommendations(eng) : Promise.resolve<string[]>([]),
+        const [engineRecs, communityRecs, ac] = await Promise.all([
+          eng ? api.getEngineRecommendations(eng, getGpuName?.() ?? null) : Promise.resolve<string[]>([]),
           api.getCommunityRecommendations(getHwTags()).catch((e) => {
             console.warn('No se pudieron cargar las recomendaciones de la comunidad:', e);
             return [] as CommunityRecommendation[];
           }),
+          // El anti-cheat decide si el juego arranca siquiera: si falla, se avisa en la
+          // UI como «sin datos» en vez de dar el juego por bueno.
+          g.appid === 0
+            ? Promise.resolve(null)
+            : api
+                .getAnticheatInfo(g.appid)
+                .then((r) => r.info)
+                .catch((e) => {
+                  console.warn('No se pudo consultar el anti-cheat:', e);
+                  return null;
+                }),
         ]);
 
         if (!mountedRef.current || token !== openTokenRef.current) return;
@@ -95,6 +138,49 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
         setEngine(eng);
         setEngineRecommendations(engineRecs);
         setCommunityRecommendations(communityRecs);
+        setAntiCheat(ac);
+
+        // Requisitos aparte y sin `await`: es lo que más tarda (Steam + disco) y
+        // no debe retrasar la vista. Si falla, la tarjeta dice por qué.
+        // Requisitos y Proton Pulse aparte y sin `await`: los dos van por red y
+        // ninguna vista debe esperar a ellos para pintarse.
+        if (appidToUse !== 0) {
+          api
+            .getProtonPulseReports(appidToUse, getGpuName?.() ?? null)
+            .then((sum) => {
+              if (mountedRef.current && token === openTokenRef.current) setProtonPulse(sum);
+            })
+            .catch((e) => {
+              // Sin reportes no se pierde nada: la tarjeta simplemente no sale.
+              console.warn('No se pudieron leer los reportes de Proton Pulse:', e);
+            })
+            .finally(() => {
+              if (mountedRef.current && token === openTokenRef.current) {
+                setProtonPulseLoading(false);
+              }
+            });
+        }
+
+        if (appidToUse !== 0) {
+          api
+            .getRequirements(appidToUse, g.install_path ?? null)
+            .then((rep) => {
+              if (mountedRef.current && token === openTokenRef.current) setRequirements(rep);
+            })
+            .catch((e) => {
+              console.warn('No se pudieron leer los requisitos:', e);
+              if (mountedRef.current && token === openTokenRef.current) {
+                setRequirementsError(
+                  typeof e === 'string' ? e : 'sin conexión con Steam'
+                );
+              }
+            })
+            .finally(() => {
+              if (mountedRef.current && token === openTokenRef.current) {
+                setRequirementsLoading(false);
+              }
+            });
+        }
       } catch (e) {
         console.error(e);
         if (mountedRef.current && token === openTokenRef.current) {
@@ -104,7 +190,7 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
         if (mountedRef.current && token === openTokenRef.current) setLoading(false);
       }
     },
-    [getHwTags]
+    [getHwTags, getGpuName]
   );
 
   /** Cierra el juego abierto (volver a la biblioteca). */
@@ -114,6 +200,12 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
     setCurrent(null);
     setRules(null);
     setInfo(null);
+    setAntiCheat(null);
+    setProtonPulse(null);
+    setProtonPulseLoading(false);
+    setRequirements(null);
+    setRequirementsError(null);
+    setRequirementsLoading(false);
     setEngine(null);
     setEngineRecommendations([]);
     setCommunityRecommendations([]);
@@ -123,6 +215,12 @@ export function useGameDetails({ getHwTags }: UseGameDetailsOptions) {
     current,
     rules,
     info,
+    antiCheat,
+    requirements,
+    requirementsLoading,
+    requirementsError,
+    protonPulse,
+    protonPulseLoading,
     engine,
     engineRecommendations,
     communityRecommendations,

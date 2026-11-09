@@ -25,11 +25,11 @@ npm run tauri dev
 ### ✅ 6 Fases Completadas
 
 1. **Interfaz moderna** 
-2. **Separación de conceptos** - Compatibilidad, Optimización, Diagnóstico
+2. **Separación de conceptos** - Compatibilidad y Optimización (dos pestañas, sin duplicar)
 3. **Recomendaciones inteligentes** - Filtrado por hardware, toggle Proton
 4. **Dos modos** - Guiado (simple) y Experto (detallado)
 5. **Perfiles guardados** - Drag & drop, exportar/importar
-6. **Benchmarks** - Análisis de MangoHud, comparación de rendimiento
+6. **Benchmarks** - Análisis de MangoHud, historial de las 10 últimas grabaciones por juego
 
 ### 🎨 Funcionalidades Principales
 
@@ -40,9 +40,14 @@ npm run tauri dev
 - Drag & drop para reordenar perfiles
 - Exportar/importar perfiles como JSON
 - Análisis de benchmarks con logs de MangoHud
-- Comparación de rendimiento antes/después
+- Historial por juego: las 10 grabaciones más recientes, las viejas se borran solas
+- Diagnóstico de stutter de shaders: primeros segundos frente al resto + estado de la caché en disco
+- Comparación de rendimiento antes/después con margen de ruido
 - Modo experto con detalles técnicos completos
 - Toggle "Probar con Proton" para juegos nativos
+- Revisión previa del comando: avisa si falta un wrapper, si MangoHud no es visible desde Steam Flatpak o si una variable de Proton no aplica al juego
+- Benchmarks con control de ruido: descarta el arranque y muestra el margen de error de cada grabación
+- Aviso de anti-cheat por juego (datos de AreWeAntiCheatYet): dice si el juego funciona, funciona sin soporte oficial o está bloqueado
 
 ## 🚀 Uso Básico
 
@@ -87,6 +92,8 @@ tauri-app/
 │   ├── src/
 │   │   ├── main.rs              # Comandos Tauri
 │   │   ├── hw.rs                # Detección de hardware
+│   │   ├── preflight.rs         # Estado real del sistema (wrappers, capa Vulkan, sandbox)
+│   │   ├── anticheat.rs         # Avisos de anti-cheat (AreWeAntiCheatYet, caché 24 h)
 │   │   ├── steam.rs             # API de Steam
 │   │   ├── rules.rs             # Sistema de reglas
 │   │   ├── engine.rs            # Detección de motor

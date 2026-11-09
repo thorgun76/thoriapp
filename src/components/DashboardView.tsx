@@ -15,7 +15,7 @@ import { ConfirmDialog, Toast } from './ConfirmDialog';
 // "2026-11-03 10:47:42" -> formato ISO, que todos los motores web entienden
 const parseDate = (s: string) => new Date(s.replace(' ', 'T'));
 
-// La fecha de la prueba es la de la grabación final, no la del momento de guardar.
+// La fecha de la prueba es la de la grabación nueva (el "después"), no la de cuando se guardó.
 const testDateOf = (c: SavedComparison) => c.comparison.test.timestamp;
 
 const normGame = (n: string) => n.trim().toLowerCase();
@@ -100,9 +100,9 @@ function ArgumentCard({
 
   const badge =
     summary.winner === 'despues'
-      ? { text: 'Ganó la prueba final', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      ? { text: 'Ganó la grabación nueva', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
       : summary.winner === 'antes'
-      ? { text: 'Ganó la prueba inicial', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      ? { text: 'Ganó la grabación anterior', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
       : summary.winner === 'empate'
       ? { text: 'Sin ganador claro', cls: 'bg-[var(--bg)] text-[var(--text-muted)] border-[var(--border)]' }
       : { text: 'Depende de lo que prefieras', cls: 'bg-[var(--caution)]/10 text-[var(--caution)] border-[var(--caution)]/40' };
@@ -116,7 +116,7 @@ function ArgumentCard({
 
       {/* Qué cambió */}
       <div className="mb-4">
-        <p className="text-xs text-[var(--text-muted)] mb-2">Lo que cambió entre la prueba inicial y la final</p>
+        <p className="text-xs text-[var(--text-muted)] mb-2">Lo que cambió entre las dos grabaciones</p>
         {hasChange ? (
           <div className="flex flex-wrap gap-2">
             {added.map((t) => (

@@ -4,6 +4,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AntiCheatReport,
   Benchmark,
   BenchmarkComparison,
   CommunityRecommendation,
@@ -13,6 +14,10 @@ import type {
   GameRules,
   Hardware,
   Profile,
+  ProtonPulseSummary,
+  RequirementsReport,
+  RuntimeEnv,
+  ShaderCache,
 } from './types';
 
 /** Forma cruda que devuelve el backend `scan_external_launchers`. */
@@ -102,11 +107,34 @@ export const api = {
 
   // ---------- Juego / reglas ----------
   getRules: (appid: number) => invoke<GameRules>('get_rules', { appid }),
+  /**
+   * Requisitos de Steam frente al hardware de esta máquina. `installPath` solo
+   * sirve para medir el espacio libre en la partición correcta.
+   */
+  getRequirements: (appid: number, installPath?: string | null) =>
+    invoke<RequirementsReport>('get_requirements', {
+      appid,
+      installPath: installPath ?? null,
+    }),
   gameInfo: (appid: number) => invoke<GameInfo>('game_info', { appid }),
-  detectEngine: (appid: number, gameName: string) =>
-    invoke<GameEngine | null>('detect_engine', { appid, gameName }),
-  getEngineRecommendations: (engine: GameEngine) =>
-    invoke<string[]>('get_engine_recommendations', { engine }),
+  detectEngine: (appid: number, gameName: string, installPath?: string | null) =>
+    invoke<GameEngine | null>('detect_engine', {
+      appid,
+      gameName,
+      installPath: installPath ?? null,
+    }),
+  /**
+   * Parámetros recomendados para el motor, ya filtrados por la GPU.
+   *
+   * El nombre de la GPU es obligatorio en la práctica: sin él no se sabe si la
+   * tarjeta aguanta ray tracing y los parámetros que lo activan (`VKD3D_CONFIG=dxr`)
+   * se quedan fuera. Pasar `null` es la opción segura, no la completa.
+   */
+  getEngineRecommendations: (engine: GameEngine, gpuName?: string | null) =>
+    invoke<string[]>('get_engine_recommendations_for_gpu', {
+      engine,
+      gpuName: gpuName ?? null,
+    }),
   getCommunityRecommendations: (hwTags: string[]) =>
     invoke<CommunityRecommendation[]>('get_community_recommendations', { hwTags }),
 
@@ -156,8 +184,8 @@ export const api = {
   loadBenchmarks: () => invoke<Benchmark[]>('load_benchmarks'),
   loadBenchmarksForGame: (appid: number) =>
     invoke<Benchmark[]>('load_benchmarks_for_game', { appid }),
-  analyzeMangohudLog: (logPath: string) =>
-    invoke<Benchmark>('analyze_mangohud_log_command', { logPath }),
+  analyzeMangohudLog: (logPath: string, warmupSeconds: number) =>
+    invoke<Benchmark>('analyze_mangohud_log_command', { logPath, warmupSeconds }),
   saveBenchmark: (p: SaveBenchmarkPayload) =>
     invoke<Benchmark>('save_benchmark', {
       benchmark: p.benchmark,
@@ -178,6 +206,24 @@ export const api = {
   openUrl: (url: string) => invoke<void>('open_url', { url }),
   detectMangohudLogPath: () => invoke<string>('detect_mangohud_log_path'),
   checkMangohudInstalled: () => invoke<boolean>('check_mangohud_installed'),
+  /** Qué wrappers, capas Vulkan y sandbox hay de verdad en la máquina. */
+  getRuntimeEnv: () => invoke<RuntimeEnv>('get_runtime_env_command'),
+  /** Anti-cheat del juego según AreWeAntiCheatYet (caché de 24 h en el backend). */
+  getAnticheatInfo: (appid: number) => invoke<AntiCheatReport>('get_anticheat_info', { appid }),
+  /**
+   * Reportes de Proton Pulse de ESTE juego, filtrados por la GPU del equipo.
+   *
+   * `null` = el juego no tiene reportes (o es de otro launcher, sin appid). El
+   * filtro por hardware se hace en Rust a partir del nombre de la GPU: pasar
+   * `null` deja todos los vendors mezclados, que es lo que NO se quiere.
+   */
+  getProtonPulseReports: (appid: number, gpu?: string | null) =>
+    invoke<ProtonPulseSummary | null>('get_proton_pulse_reports', {
+      appid,
+      gpu: gpu ?? null,
+    }),
+  /** Caché de shaders del juego en disco (solo recorre directorios, no lanza nada). */
+  getShaderCache: (appid: number) => invoke<ShaderCache>('get_shader_cache', { appid }),
   getMangohudLogDuration: () => invoke<number>('get_mangohud_log_duration'),
   setMangohudLogDuration: (seconds: number) =>
     invoke<number>('set_mangohud_log_duration', { seconds }),

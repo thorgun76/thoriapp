@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { LibraryView } from './LibraryView';
 
 vi.mock('../lib/api', () => ({
@@ -57,5 +57,42 @@ describe('LibraryView: avisos de juegos ocultos', () => {
 
     expect(screen.getByText(/1 juego ya está en Steam/)).toBeTruthy();
     expect(screen.getByText('4 juegos desinstalados en Heronite no se muestran')).toBeTruthy();
+  });
+});
+
+describe('LibraryView: orden de la rejilla', () => {
+  const games = [
+    { appid: 1, name: 'Zelda' },
+    { appid: 2, name: 'Ámbar' },
+    { appid: 3, name: 'Celeste' },
+    { appid: 4, name: 'Portal 2' },
+    { appid: 5, name: 'Portal 10' },
+  ];
+
+  const cardNames = () =>
+    screen
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('title'))
+      .filter((t): t is string => !!t && games.some((g) => g.name === t));
+
+  it('ordena de la A a la Z sin que los acentos se vayan al final', () => {
+    renderLibrary({ games });
+
+    // «Ámbar» debe quedar entre la A y la C, no después de la Z.
+    expect(cardNames()).toEqual(['Ámbar', 'Celeste', 'Portal 2', 'Portal 10', 'Zelda']);
+  });
+
+  it('y de la Z a la A al pulsar el botón', () => {
+    renderLibrary({ games });
+
+    fireEvent.click(screen.getByTitle('Nombre, de la Z a la A'));
+
+    expect(cardNames()).toEqual(['Zelda', 'Portal 10', 'Portal 2', 'Celeste', 'Ámbar']);
+  });
+
+  it('con un solo juego no se ofrece ordenar', () => {
+    renderLibrary({ games: [{ appid: 1, name: 'Celeste' }] });
+
+    expect(screen.queryByText('Ordenar')).toBeNull();
   });
 });

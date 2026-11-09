@@ -3,15 +3,37 @@ import type { ReactNode } from 'react';
 import type { Benchmark, BenchmarkComparison } from '../lib/types';
 import { useMangoHud } from '../hooks/useMangoHud';
 import { useBenchmarks } from '../hooks/useBenchmarks';
+import { useShaderCache } from '../hooks/useShaderCache';
+import { ShaderStutterCard } from './ShaderStutterCard';
 import { useComparison } from '../hooks/useComparison';
 import { useConfirm, useToast } from '../hooks/useConfirm';
 import { ConfirmDialog } from './ConfirmDialog';
 import { fmtDuration, formatTimestamp } from '../lib/format';
+import { MIN_TIE, marginLabel, tieThreshold } from '../lib/noise';
+import { openExternal } from '../lib/links';
 import {
   Upload, Trash2, BarChart3, AlertCircle, Zap, FileText, Search,
   Clock, Gamepad2, Gauge, Activity, ChevronDown, Timer, ThumbsUp, ThumbsDown,
-  Scale, Info, Save, Check,
+  Scale, Info, Save, Check, ExternalLink,
 } from 'lucide-react';
+
+/* ── Documentación que se enlaza desde esta pantalla ── */
+const MANGOHUD_URL = 'https://github.com/flightlessmango/MangoHud';
+const MANGOHUD_WIKI_URL = 'https://wiki.archlinux.org/title/MangoHud';
+
+/** Enlace externo pequeño: se abre con Rust, que valida el dominio contra su lista. */
+function HelpLink({ url, children }: { url: string; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={() => openExternal(url)}
+      className="text-xs font-semibold text-[var(--action)] hover:text-[var(--action-hover)] inline-flex items-center gap-1 underline underline-offset-2 hover:no-underline transition-colors rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+    >
+      <ExternalLink className="w-3 h-3" />
+      {children}
+    </button>
+  );
+}
 
 /* ────────────────────────────── Tipos ────────────────────────────── */
 
@@ -28,10 +50,11 @@ interface BenchmarksViewProps {
 
 /* ─────────────────────── Constantes y utilidades ─────────────────────── */
 
-// Inicial = azul (#38bdf8), final = amarillo (--caution). Verde y rojo se reservan para "mejor" y "peor".
+// La más reciente va en azul (#38bdf8); el resto, neutro. Verde y rojo se reservan para "mejor" y "peor".
 
-// Diferencias menores a este % se consideran "igual" (MangoHud tiene algo de ruido entre grabaciones)
-const TIE = 5;
+// Diferencias menores a este % se consideran "igual" (MangoHud tiene algo de ruido entre grabaciones).
+// Cada grabación trae su propio margen estimado; si es mayor, manda el suyo (ver noise.ts).
+const TIE = MIN_TIE;
 
 // Grabaciones más cortas que esto dan resultados poco fiables
 const SHORT_SECONDS = 45;
@@ -42,6 +65,18 @@ const DURATION_OPTIONS = [
   { seconds: 90, label: '1 min 30 s', note: 'Muy fiable' },
   { seconds: 120, label: '2 min', note: 'Máxima precisión' },
 ];
+
+// Segundos iniciales que se descartan: incluyen la carga del nivel y la compilación
+// inicial de shaders, que no representan el rendimiento en juego.
+const WARMUP_OPTIONS = [
+  { seconds: 0, label: 'Nada', note: 'Todo cuenta' },
+  { seconds: 10, label: '10 s', note: 'Recomendado' },
+  { seconds: 15, label: '15 s', note: 'Cargas lentas' },
+  { seconds: 30, label: '30 s', note: 'Muy estricto' },
+];
+
+const DEFAULT_WARMUP = 10;
+const WARMUP_STORAGE_KEY = 'mangohud_warmup_seconds';
 
 /** Fluidez 0-100: qué parte de tu velocidad media se mantiene en los peores momentos. */
 function smoothScore(b: Benchmark): number {
@@ -87,12 +122,22 @@ interface MetricRow {
 
 type RowDef = Omit<MetricRow, 'change' | 'gain' | 'winner'>;
 
+/** Ganador de una métrica: por debajo de `tie` % la diferencia se considera empate. */
+const winnerOf = (gain: number, tie: number): Winner =>
+  Math.abs(gain) < tie ? 'tie' : gain > 0 ? 'test' : 'base';
+
 function makeRow(d: RowDef): MetricRow {
   const denom = Math.max(Math.abs(d.base), d.floor);
   const change = ((d.test - d.base) / denom) * 100;
   const gain = d.higherIsBetter ? change : -change;
-  const winner: Winner = Math.abs(gain) < TIE ? 'tie' : gain > 0 ? 'test' : 'base';
+  const winner: Winner = winnerOf(gain, TIE);
   return { ...d, change, gain, winner };
+}
+
+/** Recalcula los ganadores con el margen de ruido real de las dos grabaciones. */
+function applyTie(rows: MetricRow[], tie: number): MetricRow[] {
+  if (!Number.isFinite(tie) || tie <= TIE) return rows;
+  return rows.map((r) => ({ ...r, winner: winnerOf(r.gain, tie) }));
 }
 
 function buildRows(c: BenchmarkComparison): MetricRow[] {
@@ -153,7 +198,7 @@ function buildRows(c: BenchmarkComparison): MetricRow[] {
     );
   }
 
-  return rows;
+  return applyTie(rows, tieThreshold(c.noise_percent));
 }
 
 const clamp = (n: number, lim = 50) => Math.max(-lim, Math.min(lim, n));
@@ -165,7 +210,7 @@ function groupScore(rows: MetricRow[], group: Group): number {
   return voters.reduce((s, r) => s + r.weight * clamp(r.gain), 0) / total;
 }
 
-const levelOf = (g: number): Level => (g > TIE ? 'better' : g < -TIE ? 'worse' : 'same');
+const levelOf = (g: number, tie: number = TIE): Level => (g > tie ? 'better' : g < -tie ? 'worse' : 'same');
 
 type VerdictKind = 'test' | 'base' | 'trade' | 'smooth' | 'tie';
 
@@ -179,12 +224,12 @@ interface Verdict {
 }
 
 /** La fluidez pesa más que los FPS: un juego con más FPS pero con tirones se siente peor. */
-function buildVerdict(rows: MetricRow[]): Verdict {
+function buildVerdict(rows: MetricRow[], tie: number = TIE): Verdict {
   const speed = groupScore(rows, 'speed');
   const smooth = groupScore(rows, 'smooth');
   const base = { speed, smooth };
 
-  if (smooth < -TIE && speed > TIE) {
+  if (smooth < -tie && speed > tie) {
     return {
       ...base, kind: 'trade',
       title: 'Más FPS, pero con más tirones',
@@ -192,15 +237,15 @@ function buildVerdict(rows: MetricRow[]): Verdict {
       advice: 'Si notas tirones al jugar, mejor desactiva este cambio.',
     };
   }
-  if (smooth < -TIE) {
+  if (smooth < -tie) {
     return {
       ...base, kind: 'base',
-      title: 'Gana la prueba inicial',
-      detail: speed < -TIE ? 'La prueba final va más lenta y con más tirones.' : 'La prueba final se siente menos suave.',
+      title: 'Gana la grabación anterior',
+      detail: speed < -tie ? 'La nueva va más lenta y con más tirones.' : 'La nueva se siente menos suave.',
       advice: 'Mejor desactiva este cambio.',
     };
   }
-  if (smooth > TIE && speed < -TIE) {
+  if (smooth > tie && speed < -tie) {
     return {
       ...base, kind: 'smooth',
       title: 'Menos FPS, pero más suave',
@@ -208,39 +253,43 @@ function buildVerdict(rows: MetricRow[]): Verdict {
       advice: 'Si prefieres suavidad antes que FPS, este cambio te conviene.',
     };
   }
-  if (smooth > TIE) {
+  if (smooth > tie) {
     return {
       ...base, kind: 'test',
-      title: 'Gana la prueba final',
-      detail: speed > TIE ? 'Va más rápido y se siente más suave.' : 'Se siente más suave, con la misma velocidad.',
+      title: 'Gana la grabación nueva',
+      detail: speed > tie ? 'Va más rápido y se siente más suave.' : 'Se siente más suave, con la misma velocidad.',
       advice: 'Puedes dejar este cambio activado.',
     };
   }
-  if (speed > TIE) {
+  if (speed > tie) {
     return {
       ...base, kind: 'test',
-      title: 'La prueba final va más rápido',
+      title: 'La grabación nueva va más rápido',
       detail: 'Más FPS, y la suavidad se mantiene igual.',
       advice: 'Puedes dejar este cambio activado.',
     };
   }
-  if (speed < -TIE) {
+  if (speed < -tie) {
     return {
       ...base, kind: 'base',
-      title: 'Gana la prueba inicial',
-      detail: 'La prueba final va más lenta y no gana suavidad.',
+      title: 'Gana la grabación anterior',
+      detail: 'La nueva va más lenta y no gana suavidad.',
       advice: 'Mejor desactiva este cambio.',
     };
   }
   return {
     ...base, kind: 'tie',
     title: 'Sin diferencias importantes',
-    detail: 'Las dos grabaciones se comportan casi igual.',
+    detail: `Las dos grabaciones se comportan casi igual: la diferencia entra dentro del ruido (±${Math.round(tie)}%).`,
     advice: 'Este cambio no se nota. Da igual dejarlo o no.',
   };
 }
 
 const normName = (n: string) => n.toLowerCase().replace(/\.(x86_64|x86|exe|bin)$/, '').trim();
+
+/** Segundos que de verdad se analizaron (descontando el calentamiento descartado). */
+const analyzedSeconds = (b: Benchmark) =>
+  Math.max(0, b.duration_seconds - (b.warmup_seconds ?? 0));
 
 function buildWarnings(c: BenchmarkComparison): string[] {
   const w: string[] = [];
@@ -253,8 +302,12 @@ function buildWarnings(c: BenchmarkComparison): string[] {
   if (a.duration_seconds > 0 && Math.abs(a.duration_seconds - b.duration_seconds) / a.duration_seconds > 0.3) {
     w.push('Las dos grabaciones duran muy distinto. Repite la prueba con la misma duración.');
   }
-  if (a.duration_seconds < SHORT_SECONDS || b.duration_seconds < SHORT_SECONDS) {
+  if (analyzedSeconds(a) < SHORT_SECONDS || analyzedSeconds(b) < SHORT_SECONDS) {
     w.push('Alguna grabación dura menos de 45 s, y el resultado puede variar. Prueba con 1 minuto.');
+  }
+  // Solo se avisa si las dos grabaciones se analizaron enteras (dato explícito).
+  if (a.warmup_seconds === 0 && b.warmup_seconds === 0) {
+    w.push('Se midió también el arranque de las dos grabaciones. Si empezaste a grabar en el menú o la carga, esa parte ensucia el resultado.');
   }
   return w;
 }
@@ -268,14 +321,14 @@ const VERDICT_STYLE: Record<VerdictKind, { box: string; iconBox: string; text: s
 };
 
 const LEVEL_STYLE: Record<Level, { chip: string; word: string }> = {
-  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Final: mejor' },
+  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Antes → ahora: mejor' },
   same:   { chip: 'bg-[var(--border)]/40 text-[var(--text-muted)]',     word: 'Igual' },
-  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Final: peor' },
+  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Antes → ahora: peor' },
 };
 
 /* ─────────────────────────── Componentes pequeños ─────────────────────────── */
 
-/** Dos barras (inicial y final) con el mismo criterio, para ver quién gana de un vistazo. */
+/** Dos barras (la de antes y la nueva) con el mismo criterio, para ver quién gana de un vistazo. */
 function CompareMeter({
   icon,
   title,
@@ -317,7 +370,7 @@ function CompareMeter({
       <div className="space-y-3">
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[#38bdf8]">Inicial</span>
+            <span className="font-semibold text-[#38bdf8]">Antes</span>
             <span className="font-bold text-[var(--text)]">{base.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -326,7 +379,7 @@ function CompareMeter({
         </div>
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[var(--caution)]">Final</span>
+            <span className="font-semibold text-[var(--caution)]">Ahora</span>
             <span className="font-bold text-[var(--text)]">{test.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -351,8 +404,8 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
       <div className="min-w-[520px] space-y-4">
         <div className="grid grid-cols-[1.6fr_0.8fr_0.8fr_1.4fr] gap-3 px-4 text-xs font-semibold">
           <span className="text-[var(--text-dim)]">Medida</span>
-          <span className="text-[#38bdf8] text-right">Inicial</span>
-          <span className="text-[var(--caution)] text-right">Final</span>
+          <span className="text-[#38bdf8] text-right">Antes</span>
+          <span className="text-[var(--caution)] text-right">Ahora</span>
           <span className="text-[var(--text-dim)] text-right">Resultado</span>
         </div>
 
@@ -402,7 +455,7 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
 export type OverallWinner = 'antes' | 'despues' | 'empate' | 'depende';
 
 export function summarizeComparison(c: BenchmarkComparison): { winner: OverallWinner; title: string; advice: string } {
-  const verdict = buildVerdict(buildRows(c));
+  const verdict = buildVerdict(buildRows(c), tieThreshold(c.noise_percent));
   const winner: OverallWinner =
     verdict.kind === 'test' ? 'despues'
     : verdict.kind === 'base' ? 'antes'
@@ -429,14 +482,16 @@ export function ComparisonResultCard({
   const [showDetails, setShowDetails] = useState(false);
 
   const rows = buildRows(comparison);
-  const verdict = buildVerdict(rows);
+  const tie = tieThreshold(comparison.noise_percent);
+  const verdict = buildVerdict(rows, tie);
   const warnings = buildWarnings(comparison);
   const style = VERDICT_STYLE[verdict.kind];
   const VerdictIcon = style.Icon;
 
   const speedRow = rows.find((r) => r.key === 'avg')!;
   const smoothRow = rows.find((r) => r.key === 'smooth')!;
-  const smoothLevel = levelOf(verdict.smooth);
+  const smoothLevel = levelOf(verdict.smooth, tie);
+  const noiseText = marginLabel(comparison.noise_percent);
 
   const smoothFooter =
     smoothLevel === 'better'
@@ -471,6 +526,15 @@ export function ComparisonResultCard({
           <p className={`text-xl font-bold ${style.text}`}>{verdict.title}</p>
           <p className="text-sm text-[var(--text)] mt-1">{verdict.detail}</p>
           <p className="text-sm font-semibold text-[var(--text)] mt-2">{verdict.advice}</p>
+          {noiseText && (
+            <p className="text-xs text-[var(--text-muted)] mt-2 flex items-start gap-1.5">
+              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                Margen de ruido de estas grabaciones: <strong>{noiseText}</strong>. Una diferencia menor
+                puede ser simple variación entre partidas; repite la prueba antes de decidir.
+              </span>
+            </p>
+          )}
         </div>
       </div>
 
@@ -484,8 +548,8 @@ export function ComparisonResultCard({
           test={speedRow.test}
           decimals={0}
           unit=" FPS"
-          level={levelOf(verdict.speed)}
-          footer={`${speedRow.change > 0 ? '+' : ''}${speedRow.change.toFixed(1)}% de FPS promedio.`}
+          level={levelOf(verdict.speed, tie)}
+          footer={`${speedRow.change > 0 ? '+' : ''}${speedRow.change.toFixed(1)}% de FPS promedio${noiseText ? ` (ruido ${noiseText})` : ''}.`}
         />
         <CompareMeter
           icon={<Activity className="w-4 h-4 text-[var(--action)]" />}
@@ -531,6 +595,12 @@ export function ComparisonResultCard({
 export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, mangohudLogPath, onLogPathChange }: BenchmarksViewProps) {
   const [logPath, setLogPath] = useState(mangohudLogPath || '/tmp/MangoHud');
   const [notes, setNotes] = useState('');
+  // Segundos iniciales que se descartan al analizar. Se recuerda entre sesiones.
+  const [warmup, setWarmup] = useState<number>(() => {
+    const raw = localStorage.getItem(WARMUP_STORAGE_KEY);
+    const saved = raw === null ? Number.NaN : Number(raw);
+    return WARMUP_OPTIONS.some((o) => o.seconds === saved) ? saved : DEFAULT_WARMUP;
+  });
   const { toast, setToast } = useToast();
   const { confirmState, ask, close } = useConfirm();
 
@@ -548,11 +618,15 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     removeAll: deleteAllBenchmarks,
   } = useBenchmarks({ currentAppid, currentGameName, currentLaunchCommand, onNotify: notify });
 
-  // Siempre hay como máximo una prueba inicial (la primera grabación) y una final (la última).
-  const shown: Benchmark[] =
-    benchmarks.length >= 2 ? [benchmarks[0], benchmarks[benchmarks.length - 1]] : benchmarks.slice(0, 1);
-  const antesId = shown[0]?.id;
-  const despuesId = shown.length >= 2 ? shown[1].id : undefined;
+  // Caché de shaders del juego para el diagnóstico del arranque (solo recorre discos).
+  const shaderCache = useShaderCache(currentAppid);
+
+  // La lista llega de Rust en orden de guardado (la más antigua primero). Aquí se
+  // muestra al revés: lo más reciente arriba, que es lo que interesa al entrar.
+  const shown: Benchmark[] = [...benchmarks].reverse();
+  // Se compara siempre la más reciente contra la siguiente más antigua del mismo juego.
+  const antesId = shown[1]?.id;
+  const despuesId = shown[0]?.id;
 
   const {
     comparison,
@@ -573,26 +647,28 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   };
 
   const analyzeLog = async () => {
-    const saved = await analyze(logPath, notes);
+    const saved = await analyze(logPath, notes, warmup);
     if (saved) setNotes('');
+  };
+
+  const changeWarmup = (seconds: number) => {
+    setWarmup(seconds);
+    localStorage.setItem(WARMUP_STORAGE_KEY, String(seconds));
   };
 
   // Confirmaciones propias de la app (en vez de confirm() nativo, que bloquea la ventana)
   const askDeleteAll = () =>
     ask({
-      title: 'Empezar de nuevo',
-      message: 'Se eliminarán la prueba inicial y la prueba final. Esta acción no se puede deshacer.',
-      confirmLabel: 'Empezar de nuevo',
+      title: 'Borrar el historial',
+      message: `Se eliminarán las ${shown.length} grabaciones de este juego. Los demás juegos no se tocan. Esta acción no se puede deshacer.`,
+      confirmLabel: 'Borrar historial',
       onConfirm: deleteAllBenchmarks,
     });
 
-  const askDeleteBenchmark = (id: string, isAntes: boolean) =>
+  const askDeleteBenchmark = (id: string) =>
     ask({
-      title: isAntes ? 'Eliminar la prueba inicial' : 'Eliminar la prueba final',
-      message:
-        isAntes && shown.length > 1
-          ? 'Se eliminará la prueba inicial. La prueba final pasará a ser tu nueva prueba inicial, y podrás grabar otra prueba final para compararla. Esta acción no se puede deshacer.'
-          : 'Se eliminará esta grabación. Esta acción no se puede deshacer.',
+      title: 'Eliminar esta grabación',
+      message: 'Se eliminará esta grabación del historial. Esta acción no se puede deshacer.',
       confirmLabel: 'Eliminar',
       onConfirm: () => deleteBenchmark(id),
     });
@@ -619,7 +695,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
         </div>
       )}
 
-      {/* Mensaje si MangoHud no está instalado */}
+      {/* Aviso: sin MangoHud no hay nada que grabar */}
       {mangohudInstalled === false && (
         <article className="p-5 rounded-xl bg-[var(--caution-bg)] border-2 border-[var(--caution)]">
           <div className="flex items-start gap-3">
@@ -641,6 +717,10 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                   <p className="text-[var(--text-dim)] mt-2"># Arch/Manjaro</p>
                   <p className="text-[var(--compatible)]">sudo pacman -S mangohud</p>
                 </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1">
+                  <HelpLink url={MANGOHUD_URL}>Documentación oficial</HelpLink>
+                  <HelpLink url={MANGOHUD_WIKI_URL}>Guía paso a paso (Arch Wiki)</HelpLink>
+                </div>
               </div>
             </div>
           </div>
@@ -655,8 +735,21 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             Grabar y analizar
           </h3>
           <p className="text-sm text-[var(--text-muted)] mt-1">
-            Graba con Shift + F2 dentro del juego y analiza el resultado aquí.
+            Graba con <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg)] border border-[var(--border)] text-[11px] font-semibold text-[var(--text)]">Shift + F2</kbd> dentro del juego y analiza el resultado aquí.
           </p>
+          <div className="mt-2 p-2.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            <p className="text-xs text-[var(--text-muted)] flex items-start gap-1.5">
+              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[var(--action)]" />
+              <span>
+                La grabación la hace <strong className="text-[var(--text)]">MangoHud</strong>, no esta app: tienes que
+                tenerlo instalado y activo en el juego. Sin él, Shift + F2 no hace nada.
+              </span>
+            </p>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 pl-5">
+              <HelpLink url={MANGOHUD_URL}>Cómo instalar MangoHud</HelpLink>
+              <HelpLink url={MANGOHUD_WIKI_URL}>Guía de MangoHud (Arch Wiki)</HelpLink>
+            </div>
+          </div>
         </div>
 
         <div className="space-y-4">
@@ -698,6 +791,50 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
               <span>
                 {durationHint} Más tiempo da resultados más fiables. Si cambias esto con el juego abierto y no se aplica, reinícialo.
+              </span>
+            </p>
+          </div>
+
+          {/* Calentamiento: se descarta el arranque de la grabación */}
+          <div className="p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            <div className="flex items-center gap-2 mb-3">
+              <Clock className="w-4 h-4 text-[var(--action)]" />
+              <p className="text-sm font-bold text-[var(--text)]">¿Cuánto arranque descartar?</p>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2" role="radiogroup" aria-label="Segundos iniciales que se descartan">
+              {WARMUP_OPTIONS.map((opt) => {
+                const active = warmup === opt.seconds;
+                return (
+                  <button
+                    key={opt.seconds}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => changeWarmup(opt.seconds)}
+                    className={`px-3 py-2.5 rounded-lg border-2 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] ${
+                      active
+                        ? 'border-[var(--action)] bg-[var(--action)]/15'
+                        : 'border-[var(--border)] hover:border-[var(--action)]/50'
+                    }`}
+                  >
+                    <span className={`block text-sm font-bold ${active ? 'text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
+                      {opt.label}
+                    </span>
+                    <span className={`block text-[11px] ${opt.seconds === DEFAULT_WARMUP ? 'text-[var(--action)] font-semibold' : 'text-[var(--text-dim)]'}`}>
+                      {opt.note}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <p className="text-xs text-[var(--text-muted)] mt-3 flex items-start gap-1.5">
+              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                Al empezar a grabar, el juego todavía carga el nivel y compila shaders: esos segundos hunden los
+                «peores momentos» sin que el juego vaya peor de verdad. Se descartan los primeros segundos de
+                cada grabación (si la grabación es muy corta, se analiza entera para no quedarte sin datos).
               </span>
             </p>
           </div>
@@ -763,13 +900,18 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
         </div>
       </article>
 
+      {/* Diagnóstico del arranque: shaders compilándose al principio */}
+      {shown.length > 0 && (
+        <ShaderStutterCard benchmark={shown[0]} cache={shaderCache} loadingCache={shaderCache === null && !!currentAppid} />
+      )}
+
       {/* Lista de Benchmarks */}
       {shown.length > 0 && (
         <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-base font-bold text-[var(--text)] flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-[var(--action)]" />
-              Benchmarks guardados
+              Historial de este juego
               <span className="text-xs font-normal text-[var(--text-muted)] bg-[var(--bg)] px-2 py-0.5 rounded-full">
                 {shown.length}
               </span>
@@ -777,16 +919,17 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             <button
               onClick={askDeleteAll}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
-              title="Borrar la prueba inicial y la final y empezar de nuevo"
+              title="Borrar todo el historial de este juego"
             >
               <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
-              Empezar de nuevo
+              Borrar historial
             </button>
           </div>
 
           <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
             {shown.map((bench, idx) => {
-              const isBaseline = idx === 0; // true = inicial, false = final
+              // idx 0 = la grabación más reciente, y es contra la que se compara.
+              const isLatest = idx === 0;
               const score = smoothScore(bench);
               const isShort = bench.duration_seconds < SHORT_SECONDS;
 
@@ -794,9 +937,9 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                 <div
                   key={bench.id}
                   className={`p-4 rounded-xl bg-[var(--bg)] border-2 transition-all duration-200 ${
-                    isBaseline
+                    isLatest
                       ? 'border-[#38bdf8] shadow-lg shadow-[#38bdf8]/10'
-                      : 'border-[var(--caution)] shadow-lg shadow-[var(--caution)]/10'
+                      : 'border-[var(--border)]'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -805,10 +948,10 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                       <div className="mb-3">
                         <span
                           className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold text-white ${
-                            isBaseline ? 'bg-[#38bdf8]' : 'bg-[var(--caution)]'
+                            isLatest ? 'bg-[#38bdf8]' : 'bg-[var(--border)]'
                           }`}
                         >
-                          {isBaseline ? 'Inicial' : 'Final'}
+                          {isLatest ? 'Más reciente' : `Hace ${idx + 1} grabaciones`}
                         </span>
                       </div>
 
@@ -825,6 +968,26 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                         <span>{formatTimestamp(bench.timestamp)}</span>
                         <span>•</span>
                         <span>Duró {fmtDuration(bench.duration_seconds)}</span>
+                        {bench.warmup_seconds != null && bench.warmup_seconds > 0 && (
+                          <>
+                            <span>•</span>
+                            <span
+                              className="flex items-center gap-1"
+                              title="Se descartaron los primeros segundos (carga y compilación inicial de shaders)"
+                            >
+                              <Clock className="w-3.5 h-3.5" />
+                              sin los primeros {Math.round(bench.warmup_seconds)} s
+                            </span>
+                          </>
+                        )}
+                        {bench.noise_percent != null && (
+                          <span
+                            className="font-semibold text-[var(--text-dim)]"
+                            title="Cuánto puede moverse el FPS promedio solo por variación natural dentro de esta grabación"
+                          >
+                            • ruido {marginLabel(bench.noise_percent)}
+                          </span>
+                        )}
                         {isShort && (
                           <span className="flex items-center gap-1 text-[var(--caution)] font-semibold" title="Con grabaciones cortas el resultado puede variar">
                             <AlertCircle className="w-3.5 h-3.5" />
@@ -875,7 +1038,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                     </div>
 
                     <button
-                      onClick={() => askDeleteBenchmark(bench.id, isBaseline)}
+                      onClick={() => askDeleteBenchmark(bench.id)}
                       className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 hover:scale-110 transition-all duration-200"
                       title="Eliminar benchmark"
                       aria-label="Eliminar benchmark"
@@ -895,9 +1058,9 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           {shown.length === 1 && (
             <div className="mt-4 p-3 rounded-lg bg-[#38bdf8]/10 border border-[#38bdf8]/30">
               <p className="text-xs text-[var(--text)]">
-                <strong className="text-[#38bdf8]">Lista la prueba inicial.</strong> Cambia una sola cosa en el juego, graba otra vez
-                y pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>: se guardará como prueba final y
-                se comparará solo.
+                <strong className="text-[#38bdf8]">Punto de partida guardado.</strong> Cambia una sola cosa en el juego, graba otra vez
+                y pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>: la nueva grabación se guardará
+                en el historial y se comparará sola con esta.
               </p>
             </div>
           )}
@@ -944,29 +1107,29 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           </div>
         </div>
 
-        {/* Explicación de prueba inicial y prueba final */}
+        {/* Explicación del historial */}
         <div className="mb-6 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-          <h4 className="text-sm font-bold text-[var(--text)] mb-1">¿Qué son la prueba inicial y la prueba final?</h4>
+          <h4 className="text-sm font-bold text-[var(--text)] mb-1">¿Cómo funciona el historial?</h4>
           <p className="text-xs text-[var(--text-muted)] mb-3">
-            No tienes que elegir nada: la app las asigna sola, por orden de grabación.
+            No tienes que elegir nada: cada grabación se guarda sola y se compara con la anterior.
           </p>
           <div className="grid grid-cols-2 gap-3">
             <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[#38bdf8]/30">
               <div className="flex items-center gap-2 mb-2">
                 <span className="w-5 h-5 rounded-full bg-[#38bdf8] text-[10px] font-bold text-white flex items-center justify-center">1</span>
-                <span className="text-sm font-bold text-[#38bdf8]">Prueba inicial</span>
+                <span className="text-sm font-bold text-[#38bdf8]">La más reciente</span>
               </div>
               <p className="text-xs text-[var(--text-muted)]">
-                Tu <strong className="text-[var(--text)]">primera</strong> grabación, sin cambios. Es el punto de partida.
+                La última que grabaste. Se compara sola con la de antes, así ves al momento si el cambio sirvió.
               </p>
             </div>
-            <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[var(--caution)]/30">
+            <div className="p-3 rounded-lg bg-[var(--surface)] border-2 border-[var(--border)]">
               <div className="flex items-center gap-2 mb-2">
-                <span className="w-5 h-5 rounded-full bg-[var(--caution)] text-[10px] font-bold text-white flex items-center justify-center">2</span>
-                <span className="text-sm font-bold text-[var(--caution)]">Prueba final</span>
+                <span className="w-5 h-5 rounded-full bg-[var(--text-muted)] text-[10px] font-bold text-white flex items-center justify-center">10</span>
+                <span className="text-sm font-bold text-[var(--text)]">Las 10 últimas</span>
               </div>
               <p className="text-xs text-[var(--text-muted)]">
-                Tu grabación <strong className="text-[var(--text)]">nueva</strong>, tras activar un parámetro. Se compara sola con la prueba inicial.
+                Guardamos las <strong className="text-[var(--text)]">10 últimas</strong> de cada juego. La número 11 borra la más antigua: no tienes que limpiar nada.
               </p>
             </div>
           </div>
@@ -983,7 +1146,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
                 Arriba, elige cuánto debe durar la grabación (lo ideal es 1 minuto). En el juego pulsa <kbd className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">Shift + F2</kbd> y
                 juega siempre por la misma zona. Cuando termine, pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>.
-                Esa grabación queda guardada sola como <strong className="text-[#38bdf8]">prueba inicial</strong>.
+                Esa grabación queda guardada sola como <strong className="text-[#38bdf8]">punto de partida</strong>.
               </p>
             </div>
           </div>
@@ -997,7 +1160,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
                 Activa un parámetro (por ejemplo <code className="px-1.5 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] font-mono text-[10px]">game-performance</code>)
                 y repite la grabación en el mismo sitio y con la misma duración. Pulsa <strong className="text-[var(--action)]">Analizar y guardar</strong>:
-                esta queda como <strong className="text-[var(--caution)]">prueba final</strong>.
+                queda guardada en el historial de este juego.
               </p>
             </div>
           </div>
@@ -1022,18 +1185,21 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
         {/* Qué pasa si grabo más veces */}
         <div className="mt-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-          <h4 className="text-sm font-bold text-[var(--text)] mb-2">¿Y si quiero probar otro cambio?</h4>
+          <h4 className="text-sm font-bold text-[var(--text)] mb-2">¿Y si grabo muchas veces?</h4>
           <ul className="space-y-1.5 text-xs text-[var(--text-muted)] leading-relaxed list-disc pl-4">
             <li>
-              Si grabas una tercera vez, la nueva <strong className="text-[var(--text)]">reemplaza a la prueba final</strong> y se
-              compara otra vez con la misma prueba inicial. Así puedes probar varios parámetros contra el mismo punto de partida.
+              Cada grabación se guarda sola. Se comparan siempre las <strong className="text-[var(--text)]">dos últimas</strong>, así que
+              no necesitas anotar nada a mano.
             </li>
             <li>
-              Si quieres un <strong className="text-[var(--text)]">nuevo punto de partida</strong>, elimina la prueba inicial: la prueba final
-              pasa a ser tu nueva prueba inicial. O pulsa <strong className="text-[var(--text)]">Empezar de nuevo</strong> para borrar ambas.
+              De cada juego se conservan las <strong className="text-[var(--text)]">10 grabaciones más recientes</strong>. Al grabar la
+              número 11 se borra la más antigua de ese juego, sin tocar los demás.
             </li>
             <li>
-              Si grabas <strong className="text-[var(--text)]">otro juego</strong>, empieza una prueba nueva automáticamente.
+              Si quieres empezar una serie limpia, pulsa <strong className="text-[var(--text)]">Borrar historial</strong>. Los otros juegos no se tocan.
+            </li>
+            <li>
+              También puedes comparar dos grabaciones cualesquiera de <strong className="text-[var(--text)]">Mis pruebas</strong>, con cualquier configuración y fecha.
             </li>
           </ul>
         </div>
@@ -1044,7 +1210,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           <div className="space-y-2 text-xs text-[var(--text-muted)]">
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Grabación 1: Palworld sin optimizar → 60 FPS → queda como <strong className="text-[#38bdf8]">prueba inicial</strong></span>
+              <span>Grabación 1: Palworld sin optimizar → 60 FPS → queda como <strong className="text-[#38bdf8]">punto de partida</strong></span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
@@ -1052,11 +1218,11 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>Grabación 2: Palworld con game-performance → 70 FPS → queda como <strong className="text-[var(--caution)]">prueba final</strong></span>
+              <span>Grabación 2: Palworld con game-performance → 70 FPS → se guarda en el historial</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, gana la prueba final 🎉</span>
+              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, gana la nueva grabación 🎉</span>
             </div>
           </div>
         </div>

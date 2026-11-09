@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import type { Benchmark } from '../lib/types';
 
-/** Nombre normalizado para comparar juegos sin distinguir extensión ni mayúsculas. */
-const normName = (n: string) => n.toLowerCase().replace(/\.(x86_64|x86|exe|bin)$/, '').trim();
+/** Grabaciones que se conservan de cada juego. Debe coincidir con el backend. */
+export const MAX_BENCHMARKS_PER_GAME = 10;
 
 interface UseBenchmarksOptions {
   currentAppid?: number;
@@ -15,8 +15,9 @@ interface UseBenchmarksOptions {
 /**
  * Las grabaciones de MangoHud: cargarlas, analizar un log nuevo y borrarlas.
  *
- * El backend guarda como máximo una prueba inicial y una final, así que aquí solo se
- * mantiene la lista tal cual llega de Rust.
+ * El backend conserva las últimas MAX_BENCHMARKS_PER_GAME grabaciones de cada juego, así
+ * que aquí solo se mantiene la lista tal cual llega de Rust (de la más antigua a la más
+ * reciente). El recorte no se replica aquí: si algún día cambia en Rust, cambia solo allí.
  */
 export function useBenchmarks({
   currentAppid,
@@ -44,11 +45,12 @@ export function useBenchmarks({
 
   /**
    * Analiza el log de MangoHud y lo guarda.
+   * `warmupSeconds` descarta los primeros segundos de la grabación (arranque y carga).
    * Devuelve `false` si había un duplicado o hubo error, para que la vista sepa
    * si limpiar el campo de notas.
    */
   const analyze = useCallback(
-    async (logPath: string, notes: string): Promise<boolean> => {
+    async (logPath: string, notes: string, warmupSeconds: number): Promise<boolean> => {
       if (!logPath.trim()) {
         onNotify?.('Ingresa la ruta del log de MangoHud');
         return false;
@@ -56,7 +58,7 @@ export function useBenchmarks({
 
       setAnalyzing(true);
       try {
-        const benchmark = await api.analyzeMangohudLog(logPath);
+        const benchmark = await api.analyzeMangohudLog(logPath, warmupSeconds);
 
         // Dos grabaciones con las mismas métricas y el mismo timestamp son el
         // mismo log analizado dos veces.
@@ -89,26 +91,15 @@ export function useBenchmarks({
           notes: notes || null,
         });
 
-        // Mismo criterio que el backend: la primera es la inicial y la siguiente la
-        // final (las nuevas reemplazan a la final). Otro juego = prueba nueva.
-        const first = benchmarks[0];
-        const newAppid = currentAppid || 0;
-        const sameGame = first
-          ? first.appid && newAppid
-            ? first.appid === newAppid
-            : normName(first.game_name) === normName(gameName)
-          : true;
-
-        if (!first || !sameGame) {
-          onNotify?.(
-            first
-              ? `✓ Juego distinto: empezamos una prueba nueva. Guardada como prueba inicial (${gameName})`
-              : `✓ Guardada como prueba inicial (${gameName}). Cambia algo y graba otra vez para comparar`
-          );
-        } else if (benchmarks.length >= 2) {
-          onNotify?.('✓ Guardada como nueva prueba final (reemplazó a la anterior)');
+        // El backend conserva las últimas MAX_BENCHMARKS_PER_GAME grabaciones de cada
+        // juego; el mensaje solo explica en qué punto de la serie queda esta.
+        const count = benchmarks.length;
+        if (count === 0) {
+          onNotify?.(`✓ Guardada como punto de partida (${gameName}). Cambia algo y graba otra vez para comparar`);
+        } else if (count >= MAX_BENCHMARKS_PER_GAME) {
+          onNotify?.(`✓ Guardada. Ya tenías ${MAX_BENCHMARKS_PER_GAME}: se borró la más antigua de ${gameName}`);
         } else {
-          onNotify?.(`✓ Guardada como prueba final (${gameName})`);
+          onNotify?.(`✓ Guardada (${count + 1} de ${MAX_BENCHMARKS_PER_GAME}). Se compara sola con la anterior`);
         }
 
         await load();
