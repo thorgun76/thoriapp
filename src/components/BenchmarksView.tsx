@@ -607,8 +607,13 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   // Los hooks notifican con un toast propio de esta vista.
   const notify = (message: string) => setToast(message);
 
-  const { installed: mangohudInstalled, duration: logDuration, changeDuration, detectLogPath } =
-    useMangoHud(notify);
+  const {
+    installed: mangohudInstalled,
+    duration: logDuration,
+    changeDuration,
+    detectLogPath,
+    restoreConfig,
+  } = useMangoHud(notify);
 
   const {
     benchmarks,
@@ -793,6 +798,17 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                 {durationHint} Más tiempo da resultados más fiables. Si cambias esto con el juego abierto y no se aplica, reinícialo.
               </span>
             </p>
+
+            {/* Deshacer: la copia .thoriapp.bak se crea antes de cada cambio, pero
+                hasta ahora no había forma de restaurarla desde aquí. */}
+            <button
+              type="button"
+              onClick={restoreConfig}
+              title="Vuelve al MangoHud.conf que había antes de que Thoriapp lo modificara"
+              className="mt-3 text-xs text-[var(--text-muted)] hover:text-[var(--action)] underline underline-offset-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] rounded"
+            >
+              Deshacer mis cambios en MangoHud.conf
+            </button>
           </div>
 
           {/* Calentamiento: se descarta el arranque de la grabación */}

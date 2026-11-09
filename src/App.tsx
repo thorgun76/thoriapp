@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Copy, Star } from 'lucide-react';
 import {
@@ -23,6 +23,7 @@ import { DashboardView } from './components/DashboardView';
 import { Sidebar } from './components/Sidebar';
 import { LibraryView } from './components/LibraryView';
 import { SaveProfileModal } from './components/SaveProfileModal';
+import { ImportPreviewDialog } from './components/ImportPreviewDialog';
 import { SortableProfile } from './components/SortableProfile';
 import { CommandBox } from './components/CommandBox';
 import { GameSidebar } from './components/GameSidebar';
@@ -46,19 +47,20 @@ import { useRuntimeEnv } from './hooks/useRuntimeEnv';
 import { useConfirm, useToast } from './hooks/useConfirm';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { missingReason, recommendationStatus } from './lib/recommendations';
-import { classifyParameter, joinCommand, type CommandParts } from './lib/command';
+import { checkManualCommand, classifyParameter, joinCommand, type CommandParts } from './lib/command';
 import { matchesSearch } from './lib/format';
 import { deniedReason, isDenied } from './lib/anticheat';
 
 // Abre el diálogo de archivo, lee el JSON y se lo pasa al backend.
 // (El navegador no expone la ruta real del archivo: hay que leer el contenido.)
-const pickProfileFile = (onContent: (content: string) => void) => {
+const pickProfileFile = (onContent: (content: string, fileName: string) => void) => {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
   input.onchange = async (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
-    if (file) onContent(await file.text());
+    // El nombre se pasa para poder enseñarlo en el cuadro de vista previa.
+    if (file) onContent(await file.text(), file.name);
   };
   input.click();
 };
@@ -135,6 +137,9 @@ function App() {
     remove: removeProfile,
     reorder: reorderProfiles,
     importFromText: importProfilesFromText,
+    confirmImport,
+    cancelImport,
+    pendingImport,
     exportAll: exportAllProfiles,
     exportOne: exportProfile,
   } = useProfiles({
@@ -149,6 +154,9 @@ function App() {
   // Fase 4: Editor manual del comando
   const [manualCommand, setManualCommand] = useState<string>('');
   const [useManualCommand, setUseManualCommand] = useState(false);
+
+  // Nombre del archivo que se está importando, solo para enseñarlo en la vista previa.
+  const [importFileName, setImportFileName] = useState<string>('perfiles.json');
 
   // Fase 5: Perfiles (estado y comandos los gestiona useProfiles)
   // Número de pruebas guardadas (se muestra junto a "Mis pruebas" en el menú)
@@ -376,6 +384,20 @@ function App() {
     ];
   };
 
+  /**
+   * Problema detectado en el comando manual, o `''` si está bien o no aplica.
+   *
+   * Se calcula aparte para no repetir la comprobación en `launchLine`, en la caja
+   * del comando y al guardar el perfil: las tres tienen que decir lo mismo.
+   */
+  const manualCommandProblem = useMemo(() => {
+    if (!useManualCommand) return '';
+    const text = manualCommand.trim();
+    if (!text) return '';
+    const check = checkManualCommand(text);
+    return check.safe ? '' : check.reason;
+  }, [useManualCommand, manualCommand]);
+
   const launchLine = (): string => {
     // Puerta dura del anti-cheat: si el juego está `Denied`, no hay comando. Antes
     // se avisaba en la pestaña Compatibilidad y aun así se generaba uno, que es
@@ -383,6 +405,8 @@ function App() {
     if (blockedByAnticheat) return blockedMessage;
 
     if (useManualCommand && manualCommand.trim()) {
+      // Se devuelve igual (lo ha escrito el usuario aquí mismo), pero la caja
+      // muestra el problema y bloquea copiar/guardar: ver `manualCommandCheck`.
       return manualCommand.trim();
     }
     if (!rules) return '%command%';
@@ -627,6 +651,7 @@ function App() {
                     expertMode={expertMode}
                     manualEditing={useManualCommand}
                     manualCommand={manualCommand}
+                    manualCommandError={manualCommandProblem}
                     info={info}
                     env={runtimeEnv}
                     launcher={current.launcher}
@@ -762,7 +787,12 @@ function App() {
                     </div>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => pickProfileFile(importProfilesFromText)}
+                        onClick={() =>
+                          pickProfileFile((content, fileName) => {
+                            setImportFileName(fileName);
+                            importProfilesFromText(content);
+                          })
+                        }
                         className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-colors flex items-center gap-2"
                       >
                         <Star className="w-4 h-4" />
@@ -910,6 +940,16 @@ function App() {
 
       {/* Diálogos propios: el nativo del sistema rompería el estilo de la app */}
       {confirmState && <ConfirmDialog state={confirmState} onClose={close} />}
+
+      {/* Vista previa de importación: el archivo no se escribe hasta que se confirma */}
+      {pendingImport && (
+        <ImportPreviewDialog
+          preview={pendingImport.preview}
+          fileName={importFileName}
+          onConfirm={confirmImport}
+          onCancel={cancelImport}
+        />
+      )}
 
       <SaveProfileModal
         open={showSaveProfileModal}

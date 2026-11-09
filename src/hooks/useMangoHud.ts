@@ -75,5 +75,25 @@ export function useMangoHud(onNotify?: (message: string) => void) {
     }
   }, [onNotify]);
 
-  return { installed, duration, changeDuration, detectLogPath };
+  /**
+   * Deshace el último cambio de `log_duration` desde la copia `.thoriapp.bak`.
+   *
+   * La copia de seguridad ya se creaba antes de cada modificación, pero no había
+   * forma de usarla: un respaldo que no se puede restaurar desde la app no
+   * protege de nada. Tras restaurar se relee la duración del archivo.
+   */
+  const restoreConfig = useCallback(async (): Promise<boolean> => {
+    try {
+      await api.restoreMangohudConf();
+      const seconds = await api.getMangohudLogDuration();
+      setDuration(seconds);
+      onNotify?.('✓ Configuración de MangoHud restaurada');
+      return true;
+    } catch (e) {
+      onNotify?.(`❌ ${e}`);
+      return false;
+    }
+  }, [onNotify]);
+
+  return { installed, duration, changeDuration, detectLogPath, restoreConfig };
 }

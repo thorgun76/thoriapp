@@ -32,6 +32,14 @@ interface CommandBoxProps {
   expertMode: boolean;
   manualEditing: boolean;
   manualCommand: string;
+  /**
+   * Problema detectado en el comando manual (vacío si está bien).
+   *
+   * Un comando manual puede llegar de un perfil importado, así que no se da por
+   * bueno: si lleva caracteres que encadenan órdenes o un ejecutable que no es un
+   * lanzador conocido, se muestra el motivo y se bloquea copiarlo.
+   */
+  manualCommandError?: string;
   info: GameInfo;
   /** Estado real de la máquina; `null` mientras carga (no se muestran avisos). */
   env: RuntimeEnv | null;
@@ -62,6 +70,7 @@ export function CommandBox({
   expertMode,
   manualEditing,
   manualCommand,
+  manualCommandError = '',
   info,
   env,
   launcher,
@@ -184,13 +193,21 @@ export function CommandBox({
       <div className="flex gap-3">
         <button
           onClick={onCopy}
+          disabled={!!manualCommandError}
+          title={manualCommandError || undefined}
           className={`flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold text-base transition-all ${
-            copied
-              ? 'bg-[var(--compatible)] text-[var(--bg)]'
-              : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)]'
+            manualCommandError
+              ? 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] cursor-not-allowed'
+              : copied
+                ? 'bg-[var(--compatible)] text-[var(--bg)]'
+                : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)]'
           }`}
         >
-          {copied ? (
+          {manualCommandError ? (
+            <>
+              <AlertCircle className="w-5 h-5" /> Revisa el comando
+            </>
+          ) : copied ? (
             <>
               <Check className="w-5 h-5" /> ¡Copiado!
             </>
@@ -241,13 +258,31 @@ export function CommandBox({
             </button>
           </div>
           {manualEditing && (
-            <textarea
-              value={manualCommand}
-              onChange={(e) => onManualCommandChange(e.target.value)}
-              className="w-full p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--compatible)] font-mono focus:outline-none focus:border-[var(--action)] resize-none"
-              rows={3}
-              placeholder="%command%"
-            />
+            <>
+              <textarea
+                value={manualCommand}
+                onChange={(e) => onManualCommandChange(e.target.value)}
+                aria-invalid={!!manualCommandError}
+                aria-describedby={manualCommandError ? 'manual-command-error' : undefined}
+                className={`w-full p-3 rounded-lg bg-[var(--bg)] border text-sm text-[var(--compatible)] font-mono focus:outline-none resize-none ${
+                  manualCommandError
+                    ? 'border-[var(--error)]'
+                    : 'border-[var(--border)] focus:border-[var(--action)]'
+                }`}
+                rows={3}
+                placeholder="%command%"
+              />
+              {manualCommandError && (
+                <p
+                  id="manual-command-error"
+                  role="alert"
+                  className="mt-2 text-xs text-[var(--error)] flex items-start gap-1.5"
+                >
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{manualCommandError}</span>
+                </p>
+              )}
+            </>
           )}
         </div>
       )}

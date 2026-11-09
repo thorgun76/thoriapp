@@ -121,9 +121,43 @@ export interface Profile {
   created_at: string;
   updated_at: string;
   order?: number;
+  /**
+   * Versión del formato de perfil (la 1 es la actual). Ausente = archivo antiguo,
+   * que se trata como 1. Si llega mayor que `PROFILE_SCHEMA_VERSION` (Rust) el
+   * backend rechaza la importación en vez de interpretarla a medias.
+   */
+  version?: number;
 }
 
 export type View = 'recommendations' | 'tests' | 'compatibility' | 'benchmarks';
+
+/** Un perfil del archivo, tal como se ve en la vista previa de importación. */
+export interface ImportedProfilePreview {
+  id: string;
+  name: string;
+  game_name: string;
+  appid: number;
+  /** Nombres de las opciones activadas (no índices). */
+  enabled_params: string[];
+  manual_command?: string;
+  /** `false` si Thoriapp le va a quitar el comando al importarlo. */
+  keeps_manual_command: boolean;
+  /** Motivo del rechazo del comando (vacío si se conserva). */
+  manual_command_reason: string;
+  duplicate: boolean;
+}
+
+/**
+ * Resultado de analizar un archivo de perfiles sin escribir nada.
+ *
+ * Espeja `ImportPreview` en `profiles.rs`. La pantalla lo enseña antes de
+ * importar para que el usuario vea qué entra y qué se descarta.
+ */
+export interface ImportPreview {
+  profiles: ImportedProfilePreview[];
+  duplicates: number;
+  stripped_commands: number;
+}
 export type SidebarView = 'library' | 'tests' | 'profiles' | 'benchmarks';
 export type LauncherFilter = 'all' | 'steam' | 'lutris' | 'heroic' | 'heronite';
 

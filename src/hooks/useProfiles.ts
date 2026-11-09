@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import { buildProfileCommand } from '../lib/command';
+import { buildProfileCommand, checkManualCommand } from '../lib/command';
 import { deniedCommand, deniedReason, isDenied, isDeniedCommand } from '../lib/anticheat';
-import type { GameEngine, Profile } from '../lib/types';
+import type { GameEngine, ImportPreview, Profile } from '../lib/types';
 
 interface UseProfilesOptions {
   /** Tags de hardware para filtrar recomendaciones. Getter para no recrear callbacks. */
@@ -24,6 +24,11 @@ interface UseProfilesOptions {
 export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOptions) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profileCommands, setProfileCommands] = useState<Record<string, string>>({});
+  /** Importación a la espera de que el usuario confirme en el cuadro de vista previa. */
+  const [pendingImport, setPendingImport] = useState<{
+    content: string;
+    preview: ImportPreview;
+  } | null>(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -52,7 +57,14 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
       deniedCache?: Map<number, string | null>
     ): Promise<string> => {
       if (profile.use_manual_command && profile.manual_command) {
-        return profile.manual_command;
+        // Mismo criterio que `buildProfileCommand`: un comando manual que no pasa la
+        // comprobación se ignora y el perfil se reconstruye normal. Si no se hiciera
+        // aquí, un perfil importado antes de este cambio seguiría devolviendo su
+        // comando tal cual por esta puerta.
+        const manual = profile.manual_command.trim();
+        if (checkManualCommand(manual).safe) {
+          return manual;
+        }
       }
       try {
         // appid 0 = juego de otro launcher: no hay ficha de anti-cheat que consultar.
@@ -193,15 +205,40 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
   const importFromText = useCallback(
     async (content: string) => {
       try {
-        const imported = await api.importProfileFromText(content);
-        onNotify?.(`${imported.length} perfil(es) importado(s) correctamente`);
-        await loadAll();
+        // Primero se mira qué hay, sin escribir nada. Si el archivo está mal, esto
+        // falla y no se toca disco; si está bien, el llamante decide si confirma.
+        const preview = await api.previewImportProfile(content);
+        if (preview.profiles.length === 0) {
+          onNotify?.(
+            preview.duplicates > 0
+              ? 'Esos perfiles ya están guardados, no hay nada que importar.'
+              : 'El archivo no contiene perfiles que importar.'
+          );
+          return;
+        }
+        setPendingImport({ content, preview });
       } catch (err) {
         onNotify?.(`Error al importar: ${String(err)}`);
       }
     },
-    [loadAll, onNotify]
+    [onNotify]
   );
+
+  /** El usuario confirmó en el cuadro: ahora sí se escribe. */
+  const confirmImport = useCallback(async () => {
+    const pending = pendingImport;
+    if (!pending) return;
+    setPendingImport(null);
+    try {
+      const imported = await api.importProfileFromText(pending.content);
+      onNotify?.(`${imported.length} perfil(es) importado(s) correctamente`);
+      await loadAll();
+    } catch (err) {
+      onNotify?.(`Error al importar: ${String(err)}`);
+    }
+  }, [pendingImport, loadAll, onNotify]);
+
+  const cancelImport = useCallback(() => setPendingImport(null), []);
 
   const exportAll = useCallback(
     async (path: string) => {
@@ -236,6 +273,9 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
     remove,
     reorder,
     importFromText,
+    confirmImport,
+    cancelImport,
+    pendingImport,
     exportAll,
     exportOne,
   };
