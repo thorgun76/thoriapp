@@ -64,7 +64,7 @@ export function ConfirmDialog({
               onKeyDown={(e) => {
                 if (e.key === 'Enter') confirm();
               }}
-              className="w-full px-3 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] font-mono focus:outline-none focus:border-[var(--action)]/60 focus:ring-2 focus:ring-[var(--action)]/20"
+              className="w-full px-3 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] font-mono focus:outline-none focus:border-action/60 focus:ring-2 focus:ring-action/20"
             />
           </label>
         )}
@@ -74,7 +74,7 @@ export function ConfirmDialog({
             type="button"
             autoFocus={!state.input}
             onClick={onClose}
-            className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-action/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
           >
             Cancelar
           </button>
@@ -99,7 +99,7 @@ export function Toast({ message }: { message: string }) {
   return (
     <div
       role="status"
-      className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/20 text-sm font-semibold text-white"
+      className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-action/20 text-sm font-semibold text-white"
     >
       {message}
     </div>

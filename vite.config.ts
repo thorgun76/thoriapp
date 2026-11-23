@@ -24,5 +24,22 @@ export default defineConfig({
     target: process.env.TAURI_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      output: {
+        // Las dependencias cambian mucho menos que el código de la app: en trozos
+        // aparte, una actualización de Thoriapp no invalida todo el caché. Además
+        // separa los paquetes grandes (framer-motion, dnd-kit) del trozo principal.
+        // Con objeto, Rollup mete React dentro del primer paquete que lo importe
+        // (quedaba en `dnd`, de 184 kB). La función decide por módulo, con React
+        // comprobado primero.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "react";
+          if (id.includes("framer-motion")) return "motion";
+          if (id.includes("@dnd-kit")) return "dnd";
+          return "vendor";
+        },
+      },
+    },
   },
 });

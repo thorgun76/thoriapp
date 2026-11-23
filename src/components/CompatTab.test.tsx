@@ -31,7 +31,9 @@ describe('CompatTab: anti-cheat', () => {
       reference: 'https://example.com/bf',
     });
 
-    expect(screen.getByText('Anti-cheat')).toBeTruthy();
+    // «Anti-cheat» sale dos veces: el título de la tarjeta y el índice de secciones.
+    expect(screen.getAllByText('Anti-cheat').length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { name: 'Anti-cheat' })).toBeTruthy();
     expect(screen.getByText('Bloqueado por el anti-cheat')).toBeTruthy();
     expect(screen.getByText(/Usa: EA anticheat/)).toBeTruthy();
     // Y deja claro que ningún ajuste lo arregla.
@@ -56,5 +58,15 @@ describe('CompatTab: anti-cheat', () => {
     renderTab(null);
 
     expect(screen.getByText('No funciona')).toBeTruthy();
+  });
+
+  it('un juego sin reportes se enseña como «Pendiente» y en gris, no como roto', () => {
+    const pending = { ...info, tier: 'pending' };
+    render(<CompatTab current={game} rules={rules} info={pending} engine={null} antiCheat={null} />);
+
+    const valor = screen.getByText('Pendiente');
+    expect(valor).toBeTruthy();
+    // Rojo está reservado a «no funciona»: falta de datos no es un fallo.
+    expect(valor.style.color).toBe('var(--text-muted)');
   });
 });

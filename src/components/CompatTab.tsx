@@ -1,8 +1,9 @@
 import { AlertTriangle, ExternalLink, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react';
 import { openExternal } from '../lib/links';
-import { tierDescription, tierLabel } from '../lib/format';
+import { tierDescription, tierLabel, tierTextColor } from '../lib/format';
 import { antiCheatsLabel, antiCheatVerdict, type AcSeverity } from '../lib/anticheat';
 import { RequirementsCard } from './RequirementsCard';
+import { SectionNav } from './SectionNav';
 import { ProtonPulseCard } from './ProtonPulseCard';
 import type {
   AntiCheatInfo,
@@ -34,17 +35,17 @@ interface CompatTabProps {
 
 const AC_STYLES: Record<AcSeverity, { box: string; text: string; Icon: typeof ShieldCheck }> = {
   ok: {
-    box: 'bg-[var(--compatible-bg)] border-[var(--compatible)]/30',
+    box: 'bg-[var(--compatible-bg)] border-compatible/30',
     text: 'text-[var(--compatible)]',
     Icon: ShieldCheck,
   },
   caution: {
-    box: 'bg-[var(--caution-bg)] border-[var(--caution)]/40',
+    box: 'bg-[var(--caution-bg)] border-caution/40',
     text: 'text-[var(--caution)]',
     Icon: AlertTriangle,
   },
   blocked: {
-    box: 'bg-[var(--error-bg)] border-[var(--error)]/40',
+    box: 'bg-[var(--error-bg)] border-error/40',
     text: 'text-[var(--error)]',
     Icon: ShieldAlert,
   },
@@ -106,29 +107,48 @@ export function CompatTab({
   requirementsLoading = false,
   requirementsError = null,
 }: CompatTabProps) {
+  // Índice de la pestaña: se arma con los bloques que realmente se pintan, para
+  // no ofrecer saltos a secciones que no existen en este juego.
+  const sections = [
+    { id: 'sec-requisitos', label: 'Requisitos' },
+    { id: 'sec-anticheat', label: 'Anti-cheat' },
+    ...(protonPulse ? [{ id: 'sec-protonpulse', label: 'Reportes de tu GPU' }] : []),
+    { id: 'sec-info', label: 'Información' },
+  ];
+
   return (
     <div className="space-y-4">
+                        <SectionNav sections={sections} />
+
                         {/* Antes que anti-cheat y antes que ProtonDB: si el equipo no
                             llega al mínimo, lo demás es secundario. */}
-                        <RequirementsCard
-                          report={requirements}
-                          loading={requirementsLoading}
-                          error={requirementsError}
-                        />
+                        <section id="sec-requisitos" className="scroll-mt-4">
+                          <RequirementsCard
+                            report={requirements}
+                            loading={requirementsLoading}
+                            error={requirementsError}
+                          />
+                        </section>
 
                         {/* Va antes de los ajustes: si el anti-cheat bloquea, no sirven de nada. */}
-                        <AntiCheatCard info={antiCheat} />
+                        <section id="sec-anticheat" className="scroll-mt-4">
+                          <AntiCheatCard info={antiCheat} />
+                        </section>
 
                         {/* Después del anti-cheat (si bloquea, estos reportes no
                             importan) pero antes del bloque de información: aquí sí
                             hay hardware concreto del que hablar. */}
-                        <ProtonPulseCard
-                          summary={protonPulse}
-                          loading={protonPulseLoading}
-                          onCopyOptions={(o) => onCopyLaunchOptions?.(o)}
-                        />
+                        {protonPulse && (
+                          <section id="sec-protonpulse" className="scroll-mt-4">
+                            <ProtonPulseCard
+                              summary={protonPulse}
+                              loading={protonPulseLoading}
+                              onCopyOptions={(o) => onCopyLaunchOptions?.(o)}
+                            />
+                          </section>
+                        )}
 
-                        <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+                        <article id="sec-info" className="scroll-mt-4 p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
                           <h3 className="text-base font-bold mb-3 text-[var(--text)]">Información del juego</h3>
                           <div className="space-y-3">
                             <div className="flex justify-between text-sm">
@@ -160,13 +180,10 @@ export function CompatTab({
                             <div className="space-y-3">
                               <div className="flex justify-between text-sm">
                                 <span className="text-[var(--text-muted)]">Tier</span>
-                                <strong className={`font-bold ${
-                                  info.tier.toLowerCase() === 'platinum' ? 'text-[var(--compatible)]' :
-                                  info.tier.toLowerCase() === 'gold' ? 'text-[var(--caution)]' :
-                                  info.tier.toLowerCase() === 'silver' ? 'text-[var(--text)]' :
-                                  info.tier.toLowerCase() === 'bronze' ? 'text-[var(--caution)]' :
-                                  'text-[var(--error)]'
-                                }`}>
+                                <strong
+                                  className="font-bold"
+                                  style={{ color: tierTextColor(info.tier) }}
+                                >
                                   {tierLabel(info.tier)}
                                 </strong>
                               </div>

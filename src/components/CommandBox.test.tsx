@@ -118,8 +118,9 @@ describe('CommandBox: tier de ProtonDB', () => {
       />
     );
 
-    expect(screen.getByText(/ProtonDB: No funciona/)).toBeTruthy();
-    expect(screen.queryByText(/ProtonDB: borked/)).toBeNull();
+    // «ProtonDB · No funciona»: el nivel se traduce, no se deja el valor crudo.
+    expect(screen.getByText(/ProtonDB · No funciona/)).toBeTruthy();
+    expect(screen.queryByText(/borked/)).toBeNull();
   });
 });
 

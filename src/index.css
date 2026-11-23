@@ -20,6 +20,31 @@
   --caution-bg: rgba(245, 185, 100, 0.1);
   --error: #F87171;
   --error-bg: rgba(248, 113, 113, 0.1);
+  /* Metales de los niveles de ProtonDB. Platino es el más alto y su color no es
+     verde: se lee como metal, así que es un gris casi blanco. Plata va un paso
+     por debajo en luminosidad para que no compitan. */
+  --platinum: #EDF0F7;
+  --silver: #A9B1C6;
+  /* Bronce va por debajo de plata y no comparte el ámbar de oro: un cobre
+     apagado, para que oro y bronce no se confundan de un vistazo. */
+  --bronze: #CB9068;
+
+  /* Los mismos colores en tripletes RGB, para Tailwind.
+     `bg-[var(--action)]/10` NO funciona: Tailwind no puede aplicar el
+     modificador de opacidad a un `var()` (lo descarta sin avisar). Con un
+     triplete sí: los colores del tema se declaran como
+     `rgb(var(--x-rgb) / <alpha-value>)` y entonces `bg-action/10` compila a
+     `rgb(167 139 250 / 0.1)`. Si se cambia un color de arriba hay que cambiarlo
+     también aquí. */
+  --action-rgb: 167 139 250;
+  --compatible-rgb: 65 214 176;
+  --caution-rgb: 245 185 100;
+  --error-rgb: 248 113 113;
+  --border-rgb: 42 51 71;
+  --text-muted-rgb: 139 144 168;
+  --platinum-rgb: 237 240 247;
+  --silver-rgb: 169 177 198;
+  --bronze-rgb: 203 144 104;
 }
 
 * {

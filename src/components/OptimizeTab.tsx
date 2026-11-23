@@ -1,5 +1,9 @@
-import { AlertTriangle, Check, Cpu, ExternalLink, Settings, Terminal, Users, Zap } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, Check, Cpu, ExternalLink, Search, Terminal, Users, X, Zap } from 'lucide-react';
 import { openExternal } from '../lib/links';
+import { normalizeForSearch } from '../lib/format';
+import { filterParams, impactsPresent } from '../lib/gameView';
+import { SectionNav } from './SectionNav';
 import type { CommunityRecommendation, GameEngine, GameInfo, GameRules, Param } from '../lib/types';
 
 interface OptimizeTabProps {
@@ -12,6 +16,8 @@ interface OptimizeTabProps {
   selectedCommunityRecs: Set<number>;
   selectedEngineRecs: Set<number>;
   expertMode: boolean;
+  /** Cambia entre modo guiado y experto. Vive en App: el sidebar usa el mismo estado. */
+  onToggleExpertMode: () => void;
   forceProton: boolean;
   showUnavailable: boolean;
   onToggleRule: (index: number) => void;
@@ -35,6 +41,7 @@ export function OptimizeTab({
   selectedCommunityRecs,
   selectedEngineRecs,
   expertMode,
+  onToggleExpertMode,
   forceProton,
   showUnavailable,
   onToggleRule,
@@ -46,36 +53,230 @@ export function OptimizeTab({
   impactColor,
   evidenceLabel,
 }: OptimizeTabProps) {
+  // Filtro local de la pestaña: en modo experto la lista crece hasta decenas de
+  // ajustes y buscar «FSR» a mano es tedioso.
+  const [query, setQuery] = useState('');
+  const [impact, setImpact] = useState<string | null>(null);
+
+  const filtering = query.trim().length > 0 || impact !== null;
+
+  /** Impacto de un valor, si ese valor es un parámetro del juego. */
+  const impactOf = (value: string): string | null =>
+    rules.params.find((p) => p.value === value)?.impact ?? null;
+
+  /**
+   * Ajustes que la pestaña puede llegar a enseñar con el modo actual.
+   *
+   * Es el MISMO criterio que aplican las listas (`showUnavailable`, `essential`
+   * en modo guiado, `evitar` fuera, `config` incluido). Sin esto, la etiqueta
+   * «bajo» existía siempre (sus 7 parámetros son `essential: false`) pero al
+   * pulsarla no quedaba nada: un chip que promete algo que no puede dar.
+   */
+  const reachableParams = rules.params
+    .filter((p) => showUnavailable || !missing(p))
+    .filter((p) => p.impact !== 'evitar')
+    .filter((p) => expertMode || p.essential === true);
+
+  // Los niveles salen de lo que de verdad se puede ver, más los deducibles de las
+  // recomendaciones de motor/hardware (si no, esas filas quedarían inalcanzables).
+  const impactOptions = impactsPresent(reachableParams, [
+    ...engineRecommendations.map(impactOf),
+    ...communityRecommendations.filter((r) => expertMode || r.recommended === true).map((r) => impactOf(r.parameter)),
+  ]);
+
+  const matches = (p: Param) => filterParams([p], query, impact, normalizeForSearch).length > 0;
+
+  /** Parámetros que pasan el filtro de la barra (sin los filtros propios de cada lista). */
+  const visibleParams = filterParams(rules.params, query, impact, normalizeForSearch);
+
+  /**
+   * Texto que se busca contra filas que no son parámetros (proton, diagnóstico,
+   * motor, hardware). El filtro de impacto no aplica: esas filas no tienen uno.
+   */
+  const textQuery = normalizeForSearch(query.trim());
+  const textMatches = (...fields: (string | null | undefined)[]) =>
+    textQuery.length === 0 ||
+    fields.some((field) => field && normalizeForSearch(field).includes(textQuery));
+
+  /**
+   * Qué se ve con el filtro puesto.
+   *
+   * Con una búsqueda activa desaparece todo lo que no coincide, no solo las
+   * listas largas: si solo se filtraran los parámetros, el usuario escribía y la
+   * pantalla seguía igual (había que bajar a mirar si algo había cambiado).
+   */
+  /**
+   * Filas que no son parámetros de `rules.params` y que, por tanto, no tienen
+   * `impact` propio: Probar con Proton y las recomendaciones de motor/hardware.
+   * Con una etiqueta de impacto puesta no pueden coincidir, así que se ocultan
+   * (antes solo miraban el texto y se quedaban siempre).
+   *
+   * MangoHud NO está en este grupo: es un parámetro más de `rules.params` con su
+   * propio impacto (`medicion` en games.json), así que se compara como los demás.
+   */
+  const impactFilterOn = impact !== null;
+  const nonParamRowsVisible = !impactFilterOn;
+
+  const showProton =
+    info.native === true && nonParamRowsVisible && textMatches('probar con proton', 'proton');
+
+  const impactAllows = (value: string) => (impactFilterOn ? impactOf(value) === impact : true);
+
+  // MangoHud se busca por texto («mangohud», «fps»…) y por su impacto real. Si el
+  // juego no lo trae entre sus parámetros, `impactOf` es `null` y con una etiqueta
+  // puesta queda oculto: no se puede afirmar que coincida.
+  const mangoHudParam = rules.params.find((p) => p.value === 'mangohud');
+  const showMangoHud =
+    !!mangoHudParam &&
+    !missing(mangoHudParam) &&
+    textMatches('mangohud', 'diagnóstico', 'herramientas de diagnóstico', 'fps') &&
+    impactAllows('mangohud');
+
+  const showEngineRecs = engineRecommendations
+    .map((rec, i) => ({ rec, i }))
+    .filter(({ rec }) => textMatches(rec, 'motor', engine?.name))
+    .filter(({ rec }) => impactAllows(rec));
+  const showCommunityRecs = communityRecommendations
+    .map((rec, i) => ({ rec, i }))
+    // Mismo criterio que la lista: fuera mangohud/gamemoderun (ya salen arriba) y,
+    // en modo guiado, solo las marcadas como recomendadas.
+    .filter(({ rec }) => rec.parameter !== 'mangohud' && rec.parameter !== 'gamemoderun')
+    .filter(({ rec }) => expertMode || rec.recommended === true)
+    .filter(({ rec }) => textMatches(rec.parameter, rec.description, 'hardware'))
+    .filter(({ rec }) => impactAllows(rec.parameter));
+  const showSystemAdjustments = rules.params.filter(
+    (p) => (p.value === 'game-performance' || p.value === 'gamemoderun') && matches(p)
+  );
+  const showGameParams = visibleParams
+    .filter((p) => p.impact !== 'evitar')
+    .filter((p) => p.value !== 'mangohud' && p.value !== 'gamemoderun' && p.value !== 'game-performance')
+    .filter((p) => !p.requires?.includes('game-performance'))
+    .filter((p) => expertMode || p.essential === true);
+
+  /** Nada que enseñar con el filtro puesto: se dice en vez de dejar la pestaña vacía. */
+  const nothingMatches =
+    filtering &&
+    showSystemAdjustments.length === 0 &&
+    showGameParams.length === 0 &&
+    showEngineRecs.length === 0 &&
+    showCommunityRecs.length === 0 &&
+    !showMangoHud &&
+    !showProton;
+
+  const sections = [
+    ...(info.native === true ? [{ id: 'sec-proton', label: 'Proton' }] : []),
+    { id: 'sec-diagnostico', label: 'Diagnóstico' },
+    { id: 'sec-ajustes', label: 'Ajustes' },
+  ];
+
   return (
     <div className="space-y-4">
-                        <div className={`p-3 rounded-lg border ${
+      {/* Con un filtro activo las secciones se ocultan, así que el índice sobra. */}
+      {!filtering && <SectionNav sections={sections} />}
+
+      {/* FILTRO DE AJUSTES */}
+      <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-dim)]" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar un ajuste (FSR, mangohud, sincronización…)"
+            aria-label="Buscar ajuste"
+            className="w-full pl-9 pr-9 py-2 rounded-lg bg-[var(--bg)] border border-[var(--border)] focus:border-action/50 focus:outline-none text-sm"
+          />
+          {query && (
+            <button
+              onClick={() => setQuery('')}
+              aria-label="Limpiar la búsqueda"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-[var(--text-dim)] hover:text-[var(--text)]"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Filtro por impacto: solo los niveles que existen en este juego. */}
+        <div className="flex flex-wrap items-center gap-1.5 mt-2">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mr-1">
+            Impacto
+          </span>
+          {impactOptions.map((level) => (
+            <button
+              key={level}
+              onClick={() => setImpact(impact === level ? null : level)}
+              aria-pressed={impact === level}
+              className={`text-[10px] px-2 py-0.5 rounded border font-semibold uppercase transition-colors ${
+                impact === level
+                  ? impactColor(level)
+                  : 'bg-[var(--bg)] text-[var(--text-dim)] border-[var(--border)] hover:text-[var(--text)]'
+              }`}
+            >
+              {level}
+            </button>
+          ))}
+          {filtering && (
+            <button
+              onClick={() => { setQuery(''); setImpact(null); }}
+              className="ml-auto text-[10px] text-[var(--action)] hover:underline font-semibold"
+            >
+              Quitar filtros
+            </button>
+          )}
+        </div>
+        {/* Con el filtro puesto solo queda lo que coincide; si no queda nada, se
+            dice aquí en vez de enseñar una pestaña vacía. */}
+        {nothingMatches && (
+          <p className="text-xs text-[var(--text-muted)] mt-2">
+            Ningún ajuste coincide con «{query.trim()}». Quita los filtros para ver todos.
+          </p>
+        )}
+      </div>
+
+                        {!filtering && (
+                        <div className={`p-4 rounded-xl border ${
                           expertMode
-                            ? 'bg-[var(--action)]/5 border-[var(--action)]/20'
-                            : 'bg-[var(--compatible-bg)] border-[var(--compatible)]/20'
+                            ? 'bg-action/5 border-action/20'
+                            : 'bg-[var(--compatible-bg)] border-compatible/20'
                         }`}>
-                          <div className="flex items-center gap-2">
-                            {expertMode ? (
-                              <>
-                                <Settings className="w-4 h-4 text-[var(--action)]" />
-                                <p className="text-xs text-[var(--action)] font-semibold">Modo experto activado</p>
-                              </>
-                            ) : (
-                              <>
-                                <Check className="w-4 h-4 text-[var(--compatible)]" />
-                                <p className="text-xs text-[var(--compatible)] font-semibold">Modo guiado: solo ajustes esenciales</p>
-                              </>
-                            )}
+                          <div className="flex items-center justify-between gap-4">
+                            <div className="min-w-0">
+                              <p className={`text-sm font-semibold ${
+                                expertMode ? 'text-[var(--action)]' : 'text-[var(--compatible)]'
+                              }`}>
+                                {expertMode ? 'Modo experto' : 'Modo guiado'}
+                              </p>
+                              <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                                {expertMode
+                                  ? 'Ves todos los parámetros con su detalle técnico.'
+                                  : 'Ves solo los ajustes que de verdad importan.'}
+                              </p>
+                            </div>
+                            <button
+                              onClick={onToggleExpertMode}
+                              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${
+                                expertMode ? 'bg-[var(--action)]' : 'bg-[var(--border)]'
+                              }`}
+                              role="switch"
+                              aria-checked={expertMode}
+                              aria-label="Activar modo experto"
+                            >
+                              <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-lg transition-transform duration-200 ease-in-out ${
+                                  expertMode ? 'translate-x-6' : 'translate-x-1'
+                                }`}
+                              />
+                            </button>
                           </div>
-                          <p className="text-[10px] text-[var(--text-muted)] mt-1">
-                            {expertMode
-                              ? 'Mostrando todos los parámetros con detalles técnicos completos'
-                              : 'Mostrando solo los parámetros más importantes. Activa el modo experto en el sidebar para ver todo.'}
+                          <p className="text-[10px] text-[var(--text-dim)] mt-2">
+                            También puedes cambiarlo desde el menú lateral.
                           </p>
                         </div>
+                        )}
 
                         {/* Fase 3: Toggle Proton estilo Discord */}
-                        {info.native === true && (
-                          <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+                        {showProton && (
+                          <article id="sec-proton" className="scroll-mt-4 p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
                             <div className="flex items-center justify-between">
                               <div className="flex-1">
                                 <h3 className="text-base font-bold text-[var(--text)]">Probar con Proton</h3>
@@ -102,7 +303,8 @@ export function OptimizeTab({
                         )}
 
                         {/* Herramientas de diagnóstico */}
-                        <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+                        {showMangoHud && (
+                        <article id="sec-diagnostico" className="scroll-mt-4 p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
                           <div className="flex items-start justify-between mb-4">
                             <div>
                               <h3 className="text-base font-bold text-[var(--text)]">Herramientas de diagnóstico</h3>
@@ -121,8 +323,8 @@ export function OptimizeTab({
                               }}
                               className={`text-left p-3 rounded-lg border transition-all ${
                                 enabled[rules.params.findIndex(p => p.value === 'mangohud')]
-                                  ? 'bg-[var(--compatible-bg)] border-[var(--compatible)]/50'
-                                  : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--compatible)]/40'
+                                  ? 'bg-[var(--compatible-bg)] border-compatible/50'
+                                  : 'bg-[var(--bg)] border-[var(--border)] hover:border-compatible/40'
                               }`}
                             >
                               <div className="flex items-center gap-2 mb-1">
@@ -133,9 +335,10 @@ export function OptimizeTab({
                             </button>
                           </div>
                         </article>
+                        )}
 
                         {/* Ajustes para probar */}
-                        <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
+                        <article id="sec-ajustes" className="scroll-mt-4 p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
                           <div className="flex items-start justify-between mb-4">
                             <div>
                               <h3 className="text-base font-bold text-[var(--text)]">Ajustes para probar</h3>
@@ -147,8 +350,7 @@ export function OptimizeTab({
 
                           {/* Ajustes del sistema */}
                           {(() => {
-                            const systemAdjustments = rules.params
-                              .filter(p => p.value === 'game-performance' || p.value === 'gamemoderun')
+                            const systemAdjustments = showSystemAdjustments
                               .filter(p => showUnavailable || !missing(p));
 
                             if (systemAdjustments.length === 0) return null;
@@ -172,8 +374,8 @@ export function OptimizeTab({
                                           isMissing
                                             ? 'opacity-50 bg-[var(--bg)] border-[var(--border)] cursor-not-allowed'
                                             : enabled[idx]
-                                              ? 'bg-[var(--caution-bg)] border-[var(--caution)]/50'
-                                              : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--caution)]/40'
+                                              ? 'bg-[var(--caution-bg)] border-caution/50'
+                                              : 'bg-[var(--bg)] border-[var(--border)] hover:border-caution/40'
                                         }`}
                                       >
                                         <div className="flex items-center gap-2 mb-1">
@@ -184,10 +386,15 @@ export function OptimizeTab({
                                           </span>
                                         </div>
                                         <p className="text-xs text-[var(--text-muted)]">{p.why}</p>
-                                        {p.requires && p.requires.length > 0 && (
-                                          <p className="text-[10px] text-[var(--text-dim)] mt-1">
-                                            Requisito: {p.requires.join(', ')}
-                                          </p>
+                                        {isMissing ? (
+                                          <p className="text-[10px] text-[var(--error)] mt-1">🚫 {isMissing}</p>
+                                        ) : (
+                                          p.requires &&
+                                          p.requires.length > 0 && (
+                                            <p className="text-[10px] text-[var(--text-dim)] mt-1">
+                                              Requisito: {p.requires.join(', ')}
+                                            </p>
+                                          )
                                         )}
                                       </button>
                                     );
@@ -205,14 +412,14 @@ export function OptimizeTab({
                                 Parámetros del motor ({engine?.name})
                               </h4>
                               <div className={`grid gap-2 ${engineRecommendations.length === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-                                {engineRecommendations.map((rec, i) => (
+                                {showEngineRecs.map(({ rec, i }) => (
                                   <button
                                     key={i}
                                     onClick={() => onToggleEngineRec(i)}
                                     className={`text-left p-3 rounded-lg border transition-all ${
                                       selectedEngineRecs.has(i)
-                                        ? 'bg-[var(--action)]/20 border-[var(--action)]/50'
-                                        : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--action)]/40'
+                                        ? 'bg-action/20 border-action/50'
+                                        : 'bg-[var(--bg)] border-[var(--border)] hover:border-action/40'
                                     }`}
                                   >
                                     <div className="flex items-center gap-2 mb-1">
@@ -232,11 +439,7 @@ export function OptimizeTab({
 
                           {/* Hardware Recommendations */}
                           {(() => {
-                            const filteredRecs = communityRecommendations
-                              .filter(rec => rec.parameter !== 'mangohud' && rec.parameter !== 'gamemoderun')
-                              .filter(rec => expertMode || rec.recommended === true);
-
-                            if (filteredRecs.length === 0) return null;
+                            if (showCommunityRecs.length === 0) return null;
 
                             return (
                               <div className="mb-6">
@@ -244,15 +447,15 @@ export function OptimizeTab({
                                   <Users className="w-4 h-4" />
                                   Recomendaciones por hardware
                                 </h4>
-                                <div className={`grid gap-2 ${filteredRecs.length === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-                                  {filteredRecs.map((rec, i) => (
+                                <div className={`grid gap-2 ${showCommunityRecs.length === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
+                                  {showCommunityRecs.map(({ rec, i }) => (
                                     <button
                                       key={i}
                                       onClick={() => onToggleCommunityRec(i)}
                                       className={`text-left p-3 rounded-lg border transition-all ${
                                         selectedCommunityRecs.has(i)
-                                          ? 'bg-[var(--compatible-bg)] border-[var(--compatible)]/50'
-                                          : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--compatible)]/40'
+                                          ? 'bg-[var(--compatible-bg)] border-compatible/50'
+                                          : 'bg-[var(--bg)] border-[var(--border)] hover:border-compatible/40'
                                       }`}
                                     >
                                       <div className="flex items-center gap-2 mb-1">
@@ -276,18 +479,16 @@ export function OptimizeTab({
                                   Parámetros específicos del juego
                                 </h4>
                                 {expertMode && (
-                                  <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/30">
+                                  <span className="text-[10px] px-2 py-0.5 rounded bg-action/10 text-[var(--action)] border border-action/30">
                                     Modo experto
                                   </span>
                                 )}
                               </div>
                               <div className="space-y-2">
-                                {rules.params
-                                  .filter(p => p.impact !== 'evitar')
-                                  .filter(p => p.value !== 'mangohud' && p.value !== 'gamemoderun' && p.value !== 'game-performance')
-                                  .filter(p => !p.requires?.includes('game-performance'))
+                                {/* Con filtro activo y ningún resultado se dice, en vez
+                                    de dejar un hueco que parece un fallo. */}
+                                {showGameParams
                                   .filter(p => showUnavailable || !missing(p))
-                                  .filter(p => expertMode || p.essential === true)
                                   .map((p, i) => {
                                     const idx = rules.params.indexOf(p);
                                     const isMissing = missing(p);
@@ -319,8 +520,8 @@ export function OptimizeTab({
                                             : isMissing
                                               ? 'opacity-50 bg-[var(--bg)] border-[var(--border)] cursor-not-allowed'
                                               : enabled[idx]
-                                                ? 'bg-[var(--caution-bg)] border-[var(--caution)]/50'
-                                                : 'bg-[var(--bg)] border-[var(--border)] hover:border-[var(--caution)]/40'
+                                                ? 'bg-[var(--caution-bg)] border-caution/50'
+                                                : 'bg-[var(--bg)] border-[var(--border)] hover:border-caution/40'
                                         }`}
                                       >
                                         <div className="flex items-start justify-between gap-3">
@@ -347,14 +548,14 @@ export function OptimizeTab({
                                                 const status = getRecommendationStatus(p);
                                                 if (status === 'recommended') {
                                                   return (
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--compatible-bg)] text-[var(--compatible)] border border-[var(--compatible)]/30 font-semibold">
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--compatible-bg)] text-[var(--compatible)] border border-compatible/30 font-semibold">
                                                       ⭐ Recomendado
                                                     </span>
                                                   );
                                                 }
                                                 if (status === 'not_applicable') {
                                                   return (
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--error-bg)] text-[var(--error)] border border-[var(--error)]/30">
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--error-bg)] text-[var(--error)] border border-error/30">
                                                       ℹ️ No aplica
                                                     </span>
                                                   );
@@ -368,13 +569,21 @@ export function OptimizeTab({
                                                 }
                                                 if (p.experimental) {
                                                   return (
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--caution-bg)] text-[var(--caution)] border border-[var(--caution)]/30">
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--caution-bg)] text-[var(--caution)] border border-caution/30">
                                                       ⚠️ Experimental
                                                     </span>
                                                   );
                                                 }
                                                 return null;
                                               })()}
+
+                                              {/* `missing()` deshabilitaba la tarjeta sin decir por qué: el
+                                                  usuario veía un gris inerte. El motivo ya estaba calculado. */}
+                                              {isMissing && (
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card)] text-[var(--text-muted)] border border-[var(--border)]">
+                                                  🚫 {isMissing}
+                                                </span>
+                                              )}
 
                                               {enabled[idx] && <Check className="w-4 h-4 text-[var(--caution)]" />}
                                             </div>

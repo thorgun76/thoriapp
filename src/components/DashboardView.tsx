@@ -50,7 +50,7 @@ function CommandBox({
   return (
     <div
       className={`p-3 rounded-lg bg-[var(--bg)] border-2 ${
-        isWinner ? 'border-[var(--compatible)]/60' : 'border-[var(--border)]'
+        isWinner ? 'border-compatible/60' : 'border-[var(--border)]'
       }`}
     >
       <div className="flex items-center justify-between gap-2 mb-2">
@@ -72,7 +72,7 @@ function CommandBox({
           <button
             type="button"
             onClick={() => onCopy(command)}
-            className="mt-2 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold text-[var(--text-muted)] bg-[var(--surface)] border border-[var(--border)] hover:text-[var(--text)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+            className="mt-2 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold text-[var(--text-muted)] bg-[var(--surface)] border border-[var(--border)] hover:text-[var(--text)] hover:border-action/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
           >
             <Copy className="w-3 h-3" />
             Copiar
@@ -100,12 +100,12 @@ function ArgumentCard({
 
   const badge =
     summary.winner === 'despues'
-      ? { text: 'Ganó la grabación nueva', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      ? { text: 'Ganó la grabación nueva', cls: 'bg-compatible/10 text-[var(--compatible)] border-compatible/40' }
       : summary.winner === 'antes'
-      ? { text: 'Ganó la grabación anterior', cls: 'bg-[var(--compatible)]/10 text-[var(--compatible)] border-[var(--compatible)]/40' }
+      ? { text: 'Ganó la grabación anterior', cls: 'bg-compatible/10 text-[var(--compatible)] border-compatible/40' }
       : summary.winner === 'empate'
       ? { text: 'Sin ganador claro', cls: 'bg-[var(--bg)] text-[var(--text-muted)] border-[var(--border)]' }
-      : { text: 'Depende de lo que prefieras', cls: 'bg-[var(--caution)]/10 text-[var(--caution)] border-[var(--caution)]/40' };
+      : { text: 'Depende de lo que prefieras', cls: 'bg-caution/10 text-[var(--caution)] border-caution/40' };
 
   return (
     <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
@@ -122,7 +122,7 @@ function ArgumentCard({
             {added.map((t) => (
               <span
                 key={`add-${t}`}
-                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-[var(--compatible)]/10 text-[var(--compatible)] border border-[var(--compatible)]/30 select-text"
+                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-compatible/10 text-[var(--compatible)] border border-compatible/30 select-text"
               >
                 + {t}
               </span>
@@ -130,7 +130,7 @@ function ArgumentCard({
             {removed.map((t) => (
               <span
                 key={`rem-${t}`}
-                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 select-text"
+                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-error/10 text-[var(--error)] border border-error/30 select-text"
               >
                 − {t}
               </span>
@@ -260,7 +260,7 @@ export function DashboardView() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-[var(--action)]/30 border-t-[var(--action)] rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-12 h-12 border-4 border-action/30 border-t-[var(--action)] rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-[var(--text-muted)]">Cargando estadísticas...</p>
         </div>
       </div>
@@ -294,7 +294,7 @@ export function DashboardView() {
           <button
             type="button"
             onClick={() => askDeleteOne(selected)}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 transition-all duration-200 flex items-center gap-1.5 shrink-0"
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 transition-all duration-200 flex items-center gap-1.5 shrink-0"
           >
             <Trash2 className="w-3.5 h-3.5" />
             Eliminar prueba
@@ -350,7 +350,7 @@ export function DashboardView() {
         <button
           type="button"
           onClick={askDeleteAll}
-          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 transition-all duration-200 flex items-center gap-1.5 group"
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 transition-all duration-200 flex items-center gap-1.5 group"
           title="Eliminar todas las pruebas guardadas"
         >
           <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
@@ -367,7 +367,7 @@ export function DashboardView() {
           className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
         >
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-[var(--action)]/10 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-action/10 flex items-center justify-center">
               <Target className="w-5 h-5 text-[var(--action)]" />
             </div>
             <div>
@@ -384,7 +384,7 @@ export function DashboardView() {
           className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
         >
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-[var(--compatible)]/10 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-compatible/10 flex items-center justify-center">
               <Gamepad2 className="w-5 h-5 text-[var(--compatible)]" />
             </div>
             <div>
@@ -401,7 +401,7 @@ export function DashboardView() {
           className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
         >
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-[var(--caution)]/10 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-caution/10 flex items-center justify-center">
               <Calendar className="w-5 h-5 text-[var(--caution)]" />
             </div>
             <div>
@@ -441,7 +441,7 @@ export function DashboardView() {
                   setSelectedId(test.id);
                 }
               }}
-              className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+              className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-action/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
             >
               <div className="flex items-center gap-3 min-w-0">
                 <Gamepad2 className="w-5 h-5 text-[var(--text-muted)] shrink-0" />
@@ -468,7 +468,7 @@ export function DashboardView() {
                     askDeleteOne(test);
                   }}
                   onKeyDown={(e) => e.stopPropagation()}
-                  className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 hover:scale-110 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+                  className="p-2 rounded-lg text-[var(--error)] hover:bg-error/10 hover:scale-110 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
                   title="Eliminar esta prueba"
                   aria-label={`Eliminar la prueba de ${test.game_name || 'este juego'}`}
                 >

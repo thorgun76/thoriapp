@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Copy, Star } from 'lucide-react';
 import {
@@ -18,14 +18,23 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { BenchmarksView } from './components/BenchmarksView';
-import { DashboardView } from './components/DashboardView';
+// Vistas pesadas que solo se montan al cambiar de sección: se cargan bajo
+// demanda para que el arranque no pague por ellas (BenchmarksView sola pesa
+// ~58 KB de código fuente).
+const BenchmarksView = lazy(() =>
+  import('./components/BenchmarksView').then((m) => ({ default: m.BenchmarksView }))
+);
+const DashboardView = lazy(() =>
+  import('./components/DashboardView').then((m) => ({ default: m.DashboardView }))
+);
 import { Sidebar } from './components/Sidebar';
 import { LibraryView } from './components/LibraryView';
 import { SaveProfileModal } from './components/SaveProfileModal';
 import { ImportPreviewDialog } from './components/ImportPreviewDialog';
 import { SortableProfile } from './components/SortableProfile';
 import { CommandBox } from './components/CommandBox';
+import { GameTabs } from './components/GameTabs';
+import { OptimizationSummary } from './components/OptimizationSummary';
 import { GameSidebar } from './components/GameSidebar';
 import { Topbar } from './components/Topbar';
 import { CompatTab } from './components/CompatTab';
@@ -49,7 +58,33 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { missingReason, recommendationStatus } from './lib/recommendations';
 import { checkManualCommand, classifyParameter, joinCommand, type CommandParts } from './lib/command';
 import { matchesSearch } from './lib/format';
+import { viewForOpenedGame } from './lib/navigation';
+import {
+  isDirty,
+  quickCommandFor,
+  recallTab,
+  rememberTab,
+  snapshotOf,
+  summarizeImpacts,
+} from './lib/gameView';
 import { deniedReason, isDenied } from './lib/anticheat';
+
+/**
+ * Hueco mientras se descarga una vista cargada bajo demanda (`lazy`).
+ *
+ * Sin esto, el primer cambio a «Mis pruebas» o «Benchmarks» enseñaría un salto en
+ * blanco mientras llega el trozo de código.
+ */
+function ViewLoading({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-center h-64">
+      <div className="text-center">
+        <div className="w-10 h-10 border-4 border-action/30 border-t-[var(--action)] rounded-full animate-spin mx-auto mb-3"></div>
+        <p className="text-sm text-[var(--text-muted)]">{label}</p>
+      </div>
+    </div>
+  );
+}
 
 // Abre el diálogo de archivo, lee el JSON y se lo pasa al backend.
 // (El navegador no expone la ruta real del archivo: hay que leer el contenido.)
@@ -64,6 +99,10 @@ const pickProfileFile = (onContent: (content: string, fileName: string) => void)
   };
   input.click();
 };
+
+// Nombre apto para un archivo: el nombre del juego puede traer `/`, `:` o `.`
+// ("Elden Ring: Nightreign"), y una barra convertiría el nombre en una carpeta.
+const fileSafeName = (s: string) => s.replace(/[/\\:*?"<>|]/g, '-').trim();
 
 // ==================== COMPONENTE PRINCIPAL ====================
 function App() {
@@ -94,6 +133,7 @@ function App() {
     error: gameError,
     openGame: loadGameDetails,
     closeGame,
+    linkAppid,
   } = useGameDetails({ getHwTags: () => hw?.tags || [], getGpuName: () => hw?.gpu || null });
 
   // Estados de selección
@@ -157,6 +197,10 @@ function App() {
 
   // Nombre del archivo que se está importando, solo para enseñarlo en la vista previa.
   const [importFileName, setImportFileName] = useState<string>('perfiles.json');
+
+  // Instantánea del último estado guardado como perfil: sirve para avisar de que
+  // hay cambios sin guardar cuando el usuario cierra la vista del juego.
+  const [savedSnapshot, setSavedSnapshot] = useState<ReturnType<typeof snapshotOf> | null>(null);
 
   // Fase 5: Perfiles (estado y comandos los gestiona useProfiles)
   // Número de pruebas guardadas (se muestra junto a "Mis pruebas" en el menú)
@@ -286,7 +330,20 @@ function App() {
     setSelectedCommunityRecs(new Set());
     setSelectedEngineRecs(new Set());
     setForceProton(false);
+    // Sin perfil guardado todavía: no hay cambios que perder.
+    setSavedSnapshot(null);
+    // Reabrir un juego en la pestaña donde se quedó, en vez de siempre en
+    // «Optimización» (quien revisa el anti-cheat lo agradece).
+    setView(recallTab(g.appid ?? 0));
     await loadGameDetails(g);
+  };
+
+  /** Cambia de pestaña y la recuerda para este juego. */
+  const selectView = (next: View) => {
+    setView(next);
+    if (next === 'compatibility' || next === 'recommendations') {
+      rememberTab(current?.appid ?? 0, next);
+    }
   };
 
   const getStatusOptions = () => ({ hwTags: hw?.tags || [], forceProton });
@@ -522,11 +579,64 @@ function App() {
       newProfileName
     );
     if (ok) {
+      // Lo guardado pasa a ser la referencia: lo que venga después es "sin guardar".
+      setSavedSnapshot(
+        snapshotOf({
+          enabled,
+          selectedCommunityRecs,
+          selectedEngineRecs,
+          forceProton,
+          manualCommand,
+          useManualCommand,
+        })
+      );
       setShowSaveProfileModal(false);
       setNewProfileName('');
       setNewProfileNotes('');
     }
   };
+
+  /**
+   * Comando copiable de cada juego de la biblioteca, tomado de sus perfiles
+   * guardados: permite copiar desde la tarjeta sin abrir la vista.
+   */
+  const quickCommands = useMemo(() => {
+    const map: Record<number, string> = {};
+    for (const profile of profiles) {
+      if (map[profile.appid]) continue;
+      const command = quickCommandFor(profile.appid, profiles, profileCommands);
+      if (command) map[profile.appid] = command;
+    }
+    return map;
+  }, [profiles, profileCommands]);
+
+  const copyQuickCommand = async (command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setToast('Comando copiado: ' + command);
+    } catch (e) {
+      console.error(e);
+      setToast('No se pudo copiar el comando');
+    }
+  };
+
+  /** Cambios sin guardar respecto al último perfil guardado de este juego. */
+  const hasUnsavedChanges = isDirty(
+    snapshotOf({
+      enabled,
+      selectedCommunityRecs,
+      selectedEngineRecs,
+      forceProton,
+      manualCommand,
+      useManualCommand,
+    }),
+    savedSnapshot
+  );
+
+  /** Resumen de impactos para el encabezado de la vista de juego. */
+  const impacts = rules
+    ? summarizeImpacts(rules.params, enabled)
+    : { count: 0, worst: null, label: 'Sin ajustes activos', tone: 'none' as const };
 
   const loadProfile = (profile: Profile) => copyProfileCommand(profile);
 
@@ -559,7 +669,9 @@ function App() {
           onQueryChange={handleQueryChange}
           onFocus={() => suggestions.length > 0 && setShowSug(true)}
           onBlur={() => setTimeout(() => setShowSug(false), 200)}
-          onPickSuggestion={(g) => { openGame(g); clearSearch(); }}
+          // La vista de juego solo se pinta dentro de la biblioteca: si se busca desde
+          // pruebas, perfiles o benchmarks hay que volver a ella o el clic no hace nada.
+          onPickSuggestion={(g) => { setSidebarView(viewForOpenedGame(sidebarView)); openGame(g); clearSearch(); }}
         />
 
         {/* Content */}
@@ -581,6 +693,8 @@ function App() {
                   onToggleExternal={() => setShowExternalGames(!showExternalGames)}
                   onRescan={rescanExternal}
                   onOpenGame={openGame}
+                  quickCommands={quickCommands}
+                  onCopyCommand={copyQuickCommand}
                 />
               </motion.div>
             )}
@@ -594,7 +708,7 @@ function App() {
                 className="p-8 flex items-center justify-center h-64"
               >
                 <div className="text-center">
-                  <div className="w-12 h-12 border-4 border-[var(--action)]/30 border-t-[var(--action)] rounded-full animate-spin mx-auto mb-4"></div>
+                  <div className="w-12 h-12 border-4 border-action/30 border-t-[var(--action)] rounded-full animate-spin mx-auto mb-4"></div>
                   <p className="text-[var(--text-muted)]">Cargando {current.name}…</p>
                 </div>
               </motion.div>
@@ -608,7 +722,7 @@ function App() {
                 animate={{ opacity: 1 }}
                 className="p-8"
               >
-                <div className="max-w-lg mx-auto p-6 rounded-xl bg-[var(--error)]/10 border-2 border-[var(--error)]/40">
+                <div className="max-w-lg mx-auto p-6 rounded-xl bg-error/10 border-2 border-error/40">
                   <h3 className="text-base font-bold text-[var(--error)] mb-2">
                     No se pudo abrir {current.name}
                   </h3>
@@ -627,10 +741,29 @@ function App() {
             {sidebarView === 'library' && current && !gameLoading && !gameError && rules && info && (
               <motion.div key="game" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <div className="max-w-6xl mx-auto">
-                  {/* Breadcrumb */}
-                  <p className="text-xs text-[var(--text-muted)] mb-4">
-                    Biblioteca <span className="mx-2">/</span> <strong className="text-white">{current.name}</strong>
-                  </p>
+                  {/* Breadcrumb navegable: antes era texto plano que parecía un
+                      enlace. Volver a la biblioteca es la salida natural de la vista. */}
+                  <div className="flex items-center justify-between gap-3 mb-4">
+                    <p className="text-xs text-[var(--text-muted)]">
+                      <button
+                        onClick={closeGame}
+                        className="hover:text-[var(--action)] hover:underline transition-colors"
+                      >
+                        ← Biblioteca
+                      </button>
+                      <span className="mx-2">/</span>
+                      <strong className="text-white">{current.name}</strong>
+                    </p>
+                    {hasUnsavedChanges && (
+                      <span
+                        className="flex items-center gap-1.5 text-xs font-semibold text-[var(--caution)]"
+                        title="Has cambiado ajustes desde el último perfil guardado"
+                      >
+                        <span className="w-2 h-2 rounded-full bg-[var(--caution)]" />
+                        Cambios sin guardar
+                      </span>
+                    )}
+                  </div>
 
                   <CommandBox
                     gameName={current.name}
@@ -653,6 +786,19 @@ function App() {
                     manualCommand={manualCommand}
                     manualCommandError={manualCommandProblem}
                     info={info}
+                    // Un juego de Lutris puede tener el AppID resuelto por
+                    // nombre: la etiqueta de ProtonDB enlaza con esa ficha.
+                    appid={info.appid ?? current.appid}
+                    // Elegir el juego a mano solo tiene sentido sin AppID: con él
+                    // lo que falta es el nivel, no la identidad.
+                    onLinkAppid={
+                      current.appid === 0
+                        ? (id) => {
+                            void linkAppid(current, id);
+                            setToast('Juego vinculado con su ficha de Steam');
+                          }
+                        : undefined
+                    }
                     env={runtimeEnv}
                     launcher={current.launcher}
                     onCopy={copyCmd}
@@ -671,45 +817,18 @@ function App() {
                   />
 
                   {/* TABS: Compatibilidad, Optimización */}
-                  <div className="mb-6 border-b border-[var(--border)]">
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => setView('compatibility')}
-                        className={`px-5 py-3 text-sm font-semibold transition-colors border-b-2 ${
-                          view === 'compatibility'
-                            ? 'text-[var(--action)] border-[var(--action)]'
-                            : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                        }`}
-                      >
-                        Compatibilidad
-                      </button>
-                      <button
-                        onClick={() => setView('recommendations')}
-                        className={`px-5 py-3 text-sm font-semibold transition-colors border-b-2 ${
-                          view === 'recommendations'
-                            ? 'text-[var(--action)] border-[var(--action)]'
-                            : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                        }`}
-                      >
-                        Optimización
-                      </button>
-                    </div>
-                  </div>
+                  <GameTabs view={view} onSelect={selectView} />
 
-                  {/* Hero info (compacta) */}
-                  <section className="mb-6 p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">Perfil de optimización · Linux</p>
-                        <p className="text-sm text-[var(--text)] mb-2">{rules.summary}</p>
-                        <div className="flex flex-wrap gap-2">
-                          {engine && <span className="text-xs px-2 py-1 rounded bg-[var(--card)] text-[var(--text-muted)] border border-[var(--border)]">{engine.name}</span>}
-                          <span className="text-xs px-2 py-1 rounded bg-[var(--card)] text-[var(--text-muted)] border border-[var(--border)]">Steam AppID {current.appid}</span>
-                          {info.total && <span className="text-xs px-2 py-1 rounded bg-[var(--card)] text-[var(--text-muted)] border border-[var(--border)]">{info.total} reportes</span>}
-                        </div>
-                      </div>
-                    </div>
-                  </section>
+                  {/* Resumen del perfil: qué se está tocando y con qué respaldo.
+                      Va a todo el ancho y después de las pestañas, para que la
+                      columna estrecha de la derecha no lo aplaste. */}
+                  <OptimizationSummary
+                    summary={rules.summary}
+                    impacts={impacts}
+                    engine={engine?.name}
+                    appid={current.appid}
+                    reports={info.total}
+                  />
 
                   {/* Content según tab seleccionado */}
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -744,6 +863,7 @@ function App() {
                           selectedCommunityRecs={selectedCommunityRecs}
                           selectedEngineRecs={selectedEngineRecs}
                           expertMode={expertMode}
+                          onToggleExpertMode={() => setExpertMode(!expertMode)}
                           forceProton={forceProton}
                           showUnavailable={showUnavailable}
                           onToggleRule={toggleRule}
@@ -762,10 +882,6 @@ function App() {
                     {/* Sidebar Column */}
                     <GameSidebar
                       hardware={hw}
-                      onAdjustOptimization={() => {
-                        setView('recommendations');
-                        setToast('Selecciona ajustes en la pestaña Optimización');
-                      }}
                       onMeasurePerformance={() => {
                         setSidebarView('benchmarks');
                         setToast('Graba con MangoHud y analiza aquí el resultado');
@@ -802,12 +918,14 @@ function App() {
                         onClick={() =>
                           ask({
                             title: 'Exportar todos los perfiles',
-                            message: 'Escribe la ruta del archivo .json donde se guardarán.',
+                            message:
+                              'Escribe la ruta del archivo .json donde se guardarán. ' +
+                              'Se permite cualquier carpeta dentro de tu carpeta personal (menos las de configuración, como ~/.config).',
                             confirmLabel: 'Exportar',
                             tone: 'primary',
                             input: {
                               label: 'Ruta del archivo',
-                              defaultValue: '~/thoriapp_perfiles_backup.json',
+                              defaultValue: '~/Descargas/thoriapp_perfiles_backup.json',
                               onSubmit: exportAllProfiles,
                             },
                           })
@@ -849,12 +967,12 @@ function App() {
                               onExport={() =>
                                 ask({
                                   title: 'Exportar perfil',
-                                  message: `Se guardará «${profile.name}» en un archivo .json.`,
+                                  message: `Se guardará «${profile.name}» en un archivo .json dentro de tu carpeta personal.`,
                                   confirmLabel: 'Exportar',
                                   tone: 'primary',
                                   input: {
                                     label: 'Ruta del archivo',
-                                    defaultValue: `~/${profile.game_name}_${profile.name}.json`,
+                                    defaultValue: `~/Descargas/${fileSafeName(profile.game_name)}_${fileSafeName(profile.name)}.json`,
                                     onSubmit: (path) => exportProfile(profile.id, path),
                                   },
                                 })
@@ -874,14 +992,14 @@ function App() {
                       </SortableContext>
                       <DragOverlay>
                         {activeProfile ? (
-                          <div className="rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-2xl shadow-[var(--action)]/20 p-4 cursor-grabbing">
+                          <div className="rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-2xl shadow-action/20 p-4 cursor-grabbing">
                             <div className="grid grid-cols-2 gap-4">
                               <div className="flex items-center gap-2">
                                 <h3 className="text-base font-bold text-[var(--text)] truncate">
                                   {activeProfile.name}
                                 </h3>
                                 {activeProfile.expert_mode && (
-                                  <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/30 shrink-0">
+                                  <span className="text-[10px] px-2 py-0.5 rounded bg-action/10 text-[var(--action)] border border-action/30 shrink-0">
                                     Experto
                                   </span>
                                 )}
@@ -903,13 +1021,15 @@ function App() {
             {sidebarView === 'benchmarks' && (
               <motion.div key="benchmarks" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
                 <div className="max-w-4xl mx-auto">
-                  <BenchmarksView
-                    currentAppid={current?.appid}
-                    currentGameName={current?.name}
-                    currentLaunchCommand={launchLine()}
-                    mangohudLogPath={mangohudLogPath}
-                    onLogPathChange={setMangohudLogPath}
-                  />
+                  <Suspense fallback={<ViewLoading label="Cargando benchmarks…" />}>
+                    <BenchmarksView
+                      currentAppid={current?.appid}
+                      currentGameName={current?.name}
+                      currentLaunchCommand={launchLine()}
+                      mangohudLogPath={mangohudLogPath}
+                      onLogPathChange={setMangohudLogPath}
+                    />
+                  </Suspense>
                 </div>
               </motion.div>
             )}
@@ -917,7 +1037,9 @@ function App() {
             {/* DASHBOARD VIEW - MIS PRUEBAS */}
             {sidebarView === 'tests' && (
               <motion.div key="dashboard" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="p-8">
-                <DashboardView />
+                <Suspense fallback={<ViewLoading label="Cargando tus pruebas…" />}>
+                  <DashboardView />
+                </Suspense>
               </motion.div>
             )}
           </AnimatePresence>
@@ -931,7 +1053,7 @@ function App() {
             initial={{ opacity: 0, y: 50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 50 }}
-            className="fixed bottom-6 right-6 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/20 text-sm font-semibold text-white"
+            className="fixed bottom-6 right-6 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-action/20 text-sm font-semibold text-white"
           >
             {toast}
           </motion.div>

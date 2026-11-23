@@ -16,10 +16,11 @@ import type { ProtonPulseSummary } from '../lib/types';
  */
 
 const RATING_STYLE: Record<string, string> = {
-  platinum: 'text-[var(--compatible)]',
-  gold: 'text-[var(--compatible)]',
-  silver: 'text-[var(--text)]',
-  bronze: 'text-[var(--caution)]',
+  // Mismos metales que la etiqueta de la cabecera (GameBadges.tierColor).
+  platinum: 'text-platinum',
+  gold: 'text-[var(--caution)]',
+  silver: 'text-silver',
+  bronze: 'text-bronze',
   borked: 'text-[var(--error)]',
 };
 

@@ -1,14 +1,15 @@
 /** Utilidades de formato compartidas por las vistas de pruebas. */
 
-/** Tiers de ProtonDB, de mejor a peor. */
-export const PROTONDB_TIERS = ['platinum', 'gold', 'silver', 'bronze', 'borked'] as const;
+/** Tiers de ProtonDB, de mejor a peor. `pending` = aún sin reportes suficientes. */
+export const PROTONDB_TIERS = ['platinum', 'gold', 'silver', 'bronze', 'borked', 'pending'] as const;
 export type ProtonTier = (typeof PROTONDB_TIERS)[number];
 
 /**
- * `platinum` → "Platino", `borked` → "No funciona".
+ * `platinum` → "Platino", `borked` → "No funciona", `pending` → "Pendiente".
  *
  * Antes esta traducción estaba copiada dentro de CompatTab y la tarjeta del comando
- * se dejaba el valor crudo en inglés ("ProtonDB: borked").
+ * se dejaba el valor crudo en inglés ("ProtonDB: borked"). Con `pending` pasaba lo
+ * mismo: se enseñaba "Pending" tal cual, que no está traducido en ninguna parte.
  */
 export function tierLabel(tier: string | null | undefined): string {
   switch ((tier ?? '').toLowerCase()) {
@@ -22,9 +23,38 @@ export function tierLabel(tier: string | null | undefined): string {
       return 'Bronce';
     case 'borked':
       return 'No funciona';
+    case 'pending':
+      return 'Pendiente';
     default:
       // Un tier desconocido (ProtonDB añade valores nuevos) se enseña tal cual.
       return tier ?? '';
+  }
+}
+
+/**
+ * Color del texto del tier, como valor CSS.
+ *
+ * Vive aquí y no en cada componente porque la misma escalera estaba copiada en
+ * CompatTab (un ternario) y en Proton Pulse (un mapa), y al añadir `pending` una
+ * de las dos copias lo pintaba de rojo («no funciona») cuando solo significa
+ * «aún no hay reportes». Platino es metal claro, no verde: verde ya lo usa el
+ * distintivo de «Linux nativo».
+ */
+export function tierTextColor(tier: string | null | undefined): string {
+  switch ((tier ?? '').toLowerCase()) {
+    case 'platinum':
+      return 'var(--platinum)';
+    case 'gold':
+      return 'var(--caution)';
+    case 'bronze':
+      return 'var(--bronze)';
+    case 'silver':
+      return 'var(--silver)';
+    case 'pending':
+      return 'var(--text-muted)';
+    default:
+      // Desconocido o borked: el aviso más conservador.
+      return 'var(--error)';
   }
 }
 
@@ -44,6 +74,8 @@ export function tierDescription(tier: string | null | undefined): string | null 
       return 'Arranca, con fallos graves (cuelgues, gráficos rotos).';
     case 'borked':
       return 'No arranca o no se puede jugar con los componentes actuales de Proton.';
+    case 'pending':
+      return 'Todavía no hay reportes suficientes para valorarlo.';
     default:
       return null;
   }

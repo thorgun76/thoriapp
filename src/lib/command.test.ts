@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
+  KNOWN_WRAPPERS,
   MAX_MANUAL_COMMAND_LENGTH,
   buildProfileCommand,
   checkManualCommand,
+  classifyParameter,
 } from './command';
 import type { GameRules, Profile } from './types';
 // Catálogo real de la app. Se importa tal cual para que el test no pueda
 // desincronizarse de lo que el backend carga con `include_str!`.
 import catalogoJuegos from '../../src-tauri/games.json';
+// Igual que games.json: se importa el archivo real. Vite lo inlinea como texto
+// (?raw), así que el test no depende de `fs` (jsdom lo stubea).
+import preflightRs from '../../src-tauri/src/preflight.rs?raw';
+import engineRs from '../../src-tauri/src/engine.rs?raw';
 
 describe('checkManualCommand: comandos normales', () => {
   it('acepta un comando que solo son variables y %command%', () => {
@@ -353,5 +359,99 @@ describe('catálogo games.json ↔ validador de comandos', () => {
         `juego=«${juego.name}» con todo activo generado=«${generado}» motivo=${check.reason}`
       ).toBe(true);
     }
+  });
+});
+
+describe('classifyParameter: un envoltorio nunca acaba detrás de %command%', () => {
+  // Antes esto fallaba: `prime-run`, `vkbasalt`, `obs-gamecapture`,
+  // `game-performance` y `scx_lavd` se clasificaban como `arg`, así que el
+  // comando salía como `%command% prime-run`, es decir, el envoltorio pasado
+  // como ARGUMENTO del juego en vez de envolverlo. El juego arrancaba sin
+  // prime-run y el usuario no entendía por qué.
+
+  it('todos los envoltorios conocidos se clasifican como wrapper', () => {
+    // Si esta lista se queda corta, volvemos al mismo bug.
+    expect(KNOWN_WRAPPERS.length).toBeGreaterThanOrEqual(8);
+    for (const w of KNOWN_WRAPPERS) {
+      expect(classifyParameter(w), `«${w}» debería ser wrapper`).toBe('wrapper');
+    }
+  });
+
+  it('las variables de entorno se clasifican como env', () => {
+    for (const v of ['MANGOHUD=1', 'DXVK_HUD=fps', 'PROTON_USE_NTSYNC=1', '__NV_PRIME_RENDER_OFFLOAD=1']) {
+      expect(classifyParameter(v), `«${v}» debería ser env`).toBe('env');
+    }
+  });
+
+  it('una bandera del juego se sigue clasificando como argumento', () => {
+    // Esto sí va detrás de %command%: son argumentos para el juego.
+    for (const a of ['-novid', '-dx11', 'dxlevel 81']) {
+      expect(classifyParameter(a), `«${a}» debería ser arg`).toBe('arg');
+    }
+  });
+
+  it('una recomendación con envoltorio acaba ANTES de %command%, no después', () => {
+    // El caso completo, tal como lo arma `buildProfileCommand`: una
+    // recomendación de la comunidad cuyo parámetro es un envoltorio.
+    for (const wrapper of KNOWN_WRAPPERS) {
+      const cmd = buildProfileCommand(
+        perfil({ selected_community_recs: [0] }),
+        reglas([]),
+        [{ parameter: wrapper, description: '', optimized_for: [], notes: undefined, recommended: true }],
+        null,
+        [],
+      );
+      expect(cmd, `«${wrapper}» debería ir delante`).toContain(`${wrapper} %command%`);
+      expect(cmd, `«${wrapper}» no debería acabar detrás`).not.toMatch(
+        new RegExp(`%command%[^]*\\b${wrapper}\\b`),
+      );
+    }
+  });
+});
+
+describe('las recomendaciones de la app se arman bien', () => {
+  it('cada envoltorio de las recomendaciones reales acaba delante de %command%', async () => {
+    // Las recomendaciones de la comunidad vienen de `engine.rs`
+    // (`get_hardware_recommendations`), no de la red. Este test recorre los
+    // parámetros REALES de esa lista para que un envoltorio añadido allí sin
+    // estar en KNOWN_WRAPPERS rompa aquí en vez de en la máquina del usuario.
+    const fuente = engineRs;
+    const parametros = [...fuente.matchAll(/parameter:\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(parametros.length).toBeGreaterThan(0);
+
+    for (const parametro of parametros) {
+      const kind = classifyParameter(parametro);
+      const cmd = buildProfileCommand(
+        perfil({ selected_community_recs: [0] }),
+        reglas([]),
+        [{ parameter: parametro, description: '', optimized_for: [], notes: undefined, recommended: true }],
+        null,
+        [],
+      );
+      if (kind === 'wrapper') {
+        expect(cmd, `«${parametro}» debería ir delante`).toContain(`${parametro} %command%`);
+      }
+      // En cualquier caso el comando generado tiene que pasar el validador.
+      const r = checkManualCommand(cmd);
+      expect(r.safe, `«${cmd}» debería ser seguro: ${r.reason}`).toBe(true);
+    }
+  });
+});
+
+describe('la lista de envoltorios coincide con la de preflight.rs', () => {
+  it('KNOWN_WRAPPERS (TS) y KNOWN_WRAPPERS (Rust) son la misma lista', () => {
+    // Hay dos copias porque el frontend clasifica y el backend comprueba qué
+    // envoltorios están instalados. Si se separan, uno de los dos miente: el
+    // frontend mete un envoltorio que el backend no revisa, o al contrario.
+    // Este test lee el archivo Rust para que no puedan desincronizarse en silencio.
+    const fuente = preflightRs;
+
+    // Se busca el array `KNOWN_WRAPPERS` y se extraen sus cadenas.
+    const m = fuente.match(/pub const KNOWN_WRAPPERS[^=]*=\s*\[([^\]]*)\]/);
+    expect(m, 'no se encontró KNOWN_WRAPPERS en preflight.rs').not.toBeNull();
+    const enRust = [...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]).sort();
+    const enTs = [...KNOWN_WRAPPERS].sort();
+
+    expect(enTs).toEqual(enRust);
   });
 });

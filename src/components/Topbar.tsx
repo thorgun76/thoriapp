@@ -114,7 +114,7 @@ export function Topbar({
           onFocus={onFocus}
           onBlur={onBlur}
           placeholder="Buscar juegos para optimizar..."
-          className="w-full pl-10 pr-4 py-2 rounded-lg bg-[var(--card)] border border-[var(--border)] focus:border-[var(--action)]/50 focus:outline-none text-sm"
+          className="w-full pl-10 pr-4 py-2 rounded-lg bg-[var(--card)] border border-[var(--border)] focus:border-action/50 focus:outline-none text-sm"
         />
         {showSuggestions && suggestions.length > 0 && (
           <div
@@ -146,12 +146,12 @@ export function Topbar({
       </div>
 
       <div className="flex items-center gap-3">
-        <span className="text-xs px-2 py-1 rounded bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/30">
+        <span className="text-xs px-2 py-1 rounded bg-action/10 text-[var(--action)] border border-action/30">
           {searching ? `${matchedCount} de ${gameCount}` : `${gameCount}`} juegos
         </span>
         {scanningLaunchers && (
-          <span className="text-xs px-2 py-1 rounded bg-[var(--caution-bg)] text-[var(--caution)] border border-[var(--caution)]/30 flex items-center gap-1">
-            <div className="w-3 h-3 border-2 border-[var(--caution)]/30 border-t-[var(--caution)] rounded-full animate-spin"></div>
+          <span className="text-xs px-2 py-1 rounded bg-[var(--caution-bg)] text-[var(--caution)] border border-caution/30 flex items-center gap-1">
+            <div className="w-3 h-3 border-2 border-caution/30 border-t-[var(--caution)] rounded-full animate-spin"></div>
             Escaneando launchers...
           </span>
         )}

@@ -5,7 +5,7 @@ import type { ShaderVerdictKind } from '../lib/shaders';
 
 const STYLES: Record<ShaderVerdictKind, { box: string; text: string; Icon: typeof Check }> = {
   clean: {
-    box: 'bg-[var(--compatible-bg)] border-[var(--compatible)]/30',
+    box: 'bg-[var(--compatible-bg)] border-compatible/30',
     text: 'text-[var(--compatible)]',
     Icon: Check,
   },
@@ -15,7 +15,7 @@ const STYLES: Record<ShaderVerdictKind, { box: string; text: string; Icon: typeo
     Icon: AlertCircle,
   },
   shaders: {
-    box: 'bg-[var(--caution-bg)] border-[var(--caution)]/40',
+    box: 'bg-[var(--caution-bg)] border-caution/40',
     text: 'text-[var(--caution)]',
     Icon: AlertCircle,
   },

@@ -88,6 +88,11 @@ export interface GameInfo {
   score?: number;
   total?: number;
   confidence?: string;
+  /**
+   * AppID de Steam resuelto por nombre, solo cuando el juego no venía de Steam
+   * (Lutris, Heroic…). Es el que enlaza la etiqueta de ProtonDB con su análisis.
+   */
+  appid?: number;
   errors: string[];
 }
 

@@ -1,7 +1,30 @@
 import type { CommunityRecommendation, GameEngine, GameRules, Profile } from './types';
 
-/** Envoltorios que van ANTES del `%command%`. */
-const KNOWN_WRAPPERS = new Set(['gamemoderun', 'mangohud', 'gamescope']);
+/**
+ * Envoltorios que van ANTES del `%command%`.
+ *
+ * Esta es la ÚNICA lista de envoltorios del proyecto. Antes había tres y se
+ * desincronizaron: `preflight.rs` conocía 8, aquí había 3 (`KNOWN_WRAPPERS`) y 5
+ * más en `CATALOG_WRAPPERS`. El resultado era que `prime-run`, `vkbasalt`,
+ * `obs-gamecapture`, `game-performance` y `scx_lavd` se clasificaban como
+ * argumento y acababan DETRÁS de `%command%`, o sea, como argumento del juego:
+ * `%command% game-performance` no envuelve nada.
+ *
+ * Tiene que coincidir con `KNOWN_WRAPPERS` de `src-tauri/src/preflight.rs`. Un
+ * test (`la lista de envoltorios coincide con la de preflight`) lo comprueba.
+ */
+export const KNOWN_WRAPPERS: readonly string[] = [
+  'gamemoderun',
+  'mangohud',
+  'gamescope',
+  'prime-run',
+  'vkbasalt',
+  'obs-gamecapture',
+  'game-performance',
+  'scx_lavd',
+];
+
+const KNOWN_WRAPPERS_SET = new Set(KNOWN_WRAPPERS);
 
 /**
  * ¿Este parámetro de la comunidad es una variable de entorno o un argumento?
@@ -23,7 +46,7 @@ export function isEnvParameter(parameter: string): boolean {
 /** Clasifica un parámetro suelto en env / wrapper / argumento. */
 export function classifyParameter(parameter: string): 'env' | 'wrapper' | 'arg' {
   if (isEnvParameter(parameter)) return 'env';
-  if (KNOWN_WRAPPERS.has(parameter)) return 'wrapper';
+  if (KNOWN_WRAPPERS_SET.has(parameter)) return 'wrapper';
   return 'arg';
 }
 
@@ -39,16 +62,6 @@ export function joinCommand({ envVars, wrappers, args }: CommandParts): string {
 }
 
 /**
- * Envoltorios que el propio catálogo de juegos (`games.json`) puede poner en un
- * comando, además de los de `KNOWN_WRAPPERS`.
- *
- * Tienen que estar aquí o el editor manual rechaza el comando que acaba de
- * generar la app: `games.json` declara `game-performance` como `kind: "wrapper"`
- * y `preflight.ts` ya lo conoce, así que el validador se había quedado corto.
- */
-const CATALOG_WRAPPERS = ['prime-run', 'vkbasalt', 'obs-gamecapture', 'game-performance', 'scx_lavd'];
-
-/**
  * Ejecutables que Thoriapp acepta como PRIMERA palabra de un comando manual.
  *
  * `manual_command` no lo escribe la app: llega de un perfil importado, que es un
@@ -57,15 +70,12 @@ const CATALOG_WRAPPERS = ['prime-run', 'vkbasalt', 'obs-gamecapture', 'game-perf
  * cerrar. Se acepta un conjunto cerrado de lanzadores y envoltorios de juegos.
  *
  * Todo lo que pueda encabezar un comando generado por la app debe estar en esta
- * lista; si no, "Editar manualmente" nace mostrando un error. Un test comprueba
- * que `CHECKED_WRAPPERS` (preflight) queda cubierta.
+ * lista; si no, "Editar manualmente" nace mostrando un error. Ver
+ * `command.test.ts`, que comprueba que cubre `KNOWN_WRAPPERS` y `games.json`.
  */
 const ALLOWED_COMMANDS = new Set([
-  // Envoltorios y capturadores
-  'gamemoderun',
-  'mangohud',
-  'gamescope',
-  ...CATALOG_WRAPPERS,
+  // Envoltorios y capturadores (misma lista que arriba, sin duplicar el origen)
+  ...KNOWN_WRAPPERS,
   'WINEDLLOVERRIDES',
   // Lanzadores de Steam
   'steam',

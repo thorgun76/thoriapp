@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { fmtDuration, formatTimestamp, matchesSearch, tierDescription, tierLabel } from './format';
+import {
+  fmtDuration,
+  formatTimestamp,
+  matchesSearch,
+  tierDescription,
+  tierLabel,
+  tierTextColor,
+} from './format';
 
 describe('fmtDuration', () => {
   it('menos de un minuto en segundos', () => {
@@ -51,9 +58,22 @@ describe('tierLabel', () => {
   });
 
   it('deja pasar un tier desconocido y los vacíos', () => {
-    expect(tierLabel('pending')).toBe('pending');
+    expect(tierLabel('legendario')).toBe('legendario');
     expect(tierLabel(null)).toBe('');
     expect(tierLabel(undefined)).toBe('');
+  });
+});
+
+describe('tier pendiente', () => {
+  // ProtonDB devuelve  mientras no junta reportes suficientes. Se
+  // enseñaba en inglés ("ProtonDB · Pending") porque nadie lo había traducido.
+  it('se traduce a «Pendiente»', () => {
+    expect(tierLabel('pending')).toBe('Pendiente');
+    expect(tierLabel('PENDING')).toBe('Pendiente');
+  });
+
+  it('explica el tier en lenguaje llano', () => {
+    expect(tierDescription('pending')).toMatch(/reportes suficientes/i);
   });
 });
 
@@ -64,8 +84,27 @@ describe('tierDescription', () => {
   });
 
   it('sin tier conocido no inventa texto', () => {
-    expect(tierDescription('pending')).toBeNull();
+    expect(tierDescription('legendario')).toBeNull();
     expect(tierDescription(undefined)).toBeNull();
+  });
+});
+
+describe('tierTextColor', () => {
+  it('cada metal tiene su tono: oro y bronce no comparten color', () => {
+    expect(tierTextColor('gold')).toBe('var(--caution)');
+    expect(tierTextColor('bronze')).toBe('var(--bronze)');
+    expect(tierTextColor('bronze')).not.toBe(tierTextColor('gold'));
+  });
+
+  it('platino es metal claro, no verde', () => {
+    expect(tierTextColor('platinum')).toBe('var(--platinum)');
+    expect(tierTextColor('silver')).toBe('var(--silver)');
+  });
+
+  it('pendiente es gris, no rojo: falta de datos no es un fallo', () => {
+    expect(tierTextColor('pending')).toBe('var(--text-muted)');
+    expect(tierTextColor('pending')).not.toContain('error');
+    expect(tierTextColor('borked')).toBe('var(--error)');
   });
 });
 

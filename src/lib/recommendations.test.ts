@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { missingReason, recommendationStatus } from './recommendations';
+import { describeTag, missingReason, recommendationStatus } from './recommendations';
 import type { Param } from './types';
 
 const param = (over: Partial<Param> = {}): Param => ({
@@ -47,7 +47,7 @@ describe('missingReason', () => {
       hwTags: ['mesa_ge'],
       forceProton: false,
     });
-    expect(reason).toBe('Necesita ntsync');
+    expect(reason).toBe('Necesita soporte NTSync');
   });
 
   it('con todos los requisitos presentes no hay motivo', () => {
@@ -116,5 +116,47 @@ describe('recommendationStatus', () => {
 
   it('sin ninguna pista de compatibilidad es neutral', () => {
     expect(recommendationStatus(param(), { hwTags: ['nvidia'], forceProton: false })).toBe('neutral');
+  });
+});
+
+describe('describeTag: los motivos se leen en castellano', () => {
+  it('traduce los tags de hardware a algo que se entiende', () => {
+    // Antes salía el tag crudo en la tarjeta: «Necesita amd», «Necesita vram-bajo».
+    expect(describeTag('amd')).toBe('una GPU AMD');
+    expect(describeTag('nvidia')).toBe('una GPU NVIDIA');
+    expect(describeTag('rt')).toBe('una GPU con ray tracing');
+  });
+
+  it('un tag desconocido se deja tal cual en vez de inventarse un nombre', () => {
+    expect(describeTag('algo-nuevo')).toBe('algo-nuevo');
+  });
+
+  it('el motivo de missingReason usa el nombre legible', () => {
+    const reason = missingReason(param({ requires: ['nvidia'] }), {
+      isNative: false,
+      hwTags: ['amd'],
+      forceProton: false,
+    });
+    expect(reason).toBe('Necesita una GPU NVIDIA');
+  });
+
+  it('todas las etiquetas que emite hw.rs tienen nombre legible', () => {
+    // Si hw.rs añade un tag nuevo sin traducción, saldría el identificador crudo.
+    const emitidos = [
+      'amd',
+      'nvidia',
+      'intel',
+      'ntsync',
+      'wayland',
+      'game-performance',
+      'vram-bajo',
+      'vram-medio',
+      'vram-alto',
+      'cpu-sin-avx2',
+      'rt',
+    ];
+    for (const tag of emitidos) {
+      expect(describeTag(tag)).not.toBe(tag);
+    }
   });
 });

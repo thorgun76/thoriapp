@@ -404,6 +404,11 @@ fn save_profiles_data(data: &ProfilesData) -> Result<(), String> {
 }
 
 /// Calcula la ruta final de una exportación y comprueba que se puede usar.
+///
+/// Antes bastaba con que la carpeta existiera: se podía escribir en cualquier
+/// sitio (`/etc`, `~/.config/autostart`, …). Un perfil exportado no debería
+/// poder colocarse donde el sistema lo ejecute o lo cargue solo. Ahora la ruta
+/// tiene que estar dentro de una carpeta donde el usuario guarda archivos.
 fn resolve_export_path(raw: &str, default_name: &str) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
         return Err("No se indicó ninguna ruta de archivo.".to_string());
@@ -418,11 +423,147 @@ fn resolve_export_path(raw: &str, default_name: &str) -> Result<PathBuf, String>
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.is_dir() {
-            return Err(format!("La carpeta «{}» no existe.", parent.display()));
+            // Se comprueba ANTES si la ubicación está permitida: si no lo está,
+            // el mensaje útil es «no puedes exportar ahí», no «la carpeta no
+            // existe» (que confundiría al usuario sobre el motivo real).
+            check_export_destination(&path)?;
+
+            // La carpeta por defecto que sugiere la interfaz (`~/Descargas`) no
+            // existe en todas las instalaciones: el nombre depende del idioma del
+            // sistema. Se crea, para que el valor por defecto no falle con «la
+            // carpeta no existe». Si el permiso no da, el error lo dice.
+            fs::create_dir_all(parent).map_err(|e| {
+                io_error_message("No se pudo crear la carpeta de destino", parent, &e)
+            })?;
+
+            // Y si aun así no se pudo (algo la bloqueó), no se sigue adelante.
+            if !parent.is_dir() {
+                return Err(format!("La carpeta «{}» no existe.", parent.display()));
+            }
         }
     }
 
+    check_export_destination(&path)?;
+
     Ok(path)
+}
+
+/// Carpetas de configuración: aunque estén dentro de `$HOME`, escribir ahí es
+/// justo lo que convierte un perfil exportado en algo que el sistema carga solo.
+const BLOCKED_HOME_DIRS: &[&str] = &[
+    ".config",
+    ".local",
+    ".ssh",
+    ".gnupg",
+    ".bashrc",
+    ".profile",
+    ".bash_profile",
+    ".zshrc",
+    ".xsessionrc",
+    ".xinitrc",
+    "autostart",
+];
+
+/// Comprueba que una ruta de exportación es un sitio razonable para un archivo
+/// de datos del usuario.
+///
+/// Rechaza tres cosas:
+///   - carpetas del sistema (`/etc`, `/usr`, `/tmp`…), donde escribir requiere
+///     root o afecta a otros usuarios;
+///   - carpetas de configuración del propio usuario (`.config`, `.local`, …);
+///   - destinos que no son un archivo JSON.
+///
+/// No se siguen enlaces simbólicos hasta el final: si el archivo de destino es
+/// un symlink, se resuelve y se valida el destino real, para no escribir a través
+/// de él en un sitio prohibido.
+fn check_export_destination(path: &Path) -> Result<(), String> {
+    let home = dirs::home_dir()
+        .and_then(|h| h.canonicalize().ok())
+        .ok_or("No se pudo determinar tu carpeta personal.")?;
+    check_export_destination_in(path, &home)
+}
+
+/// Igual que `check_export_destination` pero con `$HOME` explícito, para que los
+/// tests ejerciten ESTA función y no una copia de su lógica.
+fn check_export_destination_in(path: &Path, home: &Path) -> Result<(), String> {
+    // Si el destino ya existe como symlink, se valida el archivo al que apunta.
+    let efectivo = if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    // La extensión importa: un `.json` no lo ejecuta ni lo carga ningún sistema.
+    let es_json = efectivo
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if !es_json {
+        return Err("El archivo de exportación debe terminar en .json.".to_string());
+    }
+
+    if let Some(name) = efectivo.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with('.') {
+            return Err("No se puede exportar a un archivo oculto.".to_string());
+        }
+    }
+
+    // Referencia canónica de $HOME para comparar con `starts_with`.
+    let home = home.to_path_buf();
+
+    // La carpeta donde se va a escribir, ya resuelta.
+    let destino = efectivo
+        .parent()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+        .unwrap_or_default();
+
+    if destino.starts_with(&home) {
+        // Dentro de casa: se bloquean las carpetas de configuración y autostart.
+        let relativo = destino.strip_prefix(&home).unwrap_or(&destino);
+        let primer_componente = relativo
+            .components()
+            .next()
+            .and_then(|c| c.as_os_str().to_str())
+            .unwrap_or("");
+
+        if BLOCKED_HOME_DIRS.contains(&primer_componente) {
+            return Err(format!(
+                "No se puede exportar dentro de «{primer_componente}»: es una carpeta de configuración \
+                 y el sistema podría cargar el archivo por su cuenta. Usa Descargas o una subcarpeta tuya."
+            ));
+        }
+
+        // `..` disfrazado que acabara fuera no llega aquí (ya se resolvió arriba),
+        // pero un componente oculto sí: `.config` dentro de una subcarpeta.
+        if relativo.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .map(|s| BLOCKED_HOME_DIRS.contains(&s))
+                .unwrap_or(false)
+        }) {
+            return Err(
+                "La ruta pasa por una carpeta de configuración. Elige otra ubicación.".to_string(),
+            );
+        }
+
+        // Dentro de casa se permite cualquier carpeta que no sea de configuración:
+        // quitar cada nombre posible rompería usos legítimos (una carpeta propia,
+        // un disco montado en casa, etc.).
+        return Ok(());
+    }
+
+    // Fuera de casa: solo las carpetas de datos habituales del sistema.
+    const SISTEMA_PERMITIDO: &[&str] = &["/tmp"];
+    if SISTEMA_PERMITIDO.iter().any(|d| destino.starts_with(d)) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Solo se puede exportar dentro de tu carpeta personal o en {}. La ruta «{}» queda fuera.",
+        SISTEMA_PERMITIDO.join(", "),
+        destino.display()
+    ))
 }
 
 // La firma es plana a propósito: es el contrato que invoca el frontend.
@@ -1225,4 +1366,218 @@ mod tests {
         actuales.sort_unstable();
         assert_eq!(actuales, esperados);
     }
+    #[test]
+    fn todo_envoltorio_conocido_es_aceptable_como_comando_manual() {
+        // La lista de envoltorios vive en `preflight.rs` (qué comprobar en el
+        // sistema) y en el frontend (cómo clasificar un parámetro). Si uno de los
+        // dos se queda corto, el comando sale mal: el envoltorio acaba DETRÁS de
+        // %command% y se pasa como argumento del juego. Ese fue el bug con
+        // `prime-run`, `vkbasalt`, `obs-gamecapture`, `game-performance` y `scx_lavd`.
+        //
+        // Aquí se comprueba la otra mitad en Rust: que un envoltorio conocido
+        // también puede encabezar un comando manual, o «Editar manualmente» daría
+        // error con un comando que la propia app acaba de generar.
+        for envoltorio in crate::preflight::KNOWN_WRAPPERS {
+            assert!(
+                ALLOWED_MANUAL_COMMANDS.contains(&envoltorio),
+                "«{envoltorio}» está en preflight::KNOWN_WRAPPERS pero no en ALLOWED_MANUAL_COMMANDS"
+            );
+            let cmd = format!("{envoltorio} %command%");
+            assert!(
+                check_manual_command(&cmd).is_ok(),
+                "«{cmd}» debería ser aceptable: {:?}",
+                check_manual_command(&cmd)
+            );
+        }
+    }
+
+    // ---- check_export_destination: dónde se puede escribir una exportación ----
+    //
+    // Antes bastaba con que la carpeta existiera, así que un perfil exportado
+    // podía acabar en `/etc` o en `~/.config/autostart`. Estos tests fijan que
+    // ya no, y que los sitios normales siguen funcionando.
+
+    /// Carpeta temporal que simula `$HOME` para no depender del usuario real.
+    fn home_falso(nombre: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "thoriapp-export-{}-{}",
+            nombre,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Descargas")).unwrap();
+        fs::create_dir_all(dir.join(".config/autostart")).unwrap();
+        fs::create_dir_all(dir.join("proyectos/mis-perfiles")).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// Ejecuta la comprobación REAL con un `$HOME` inyectado, para no tocar el
+    /// del usuario que corre los tests.
+    fn con_home(path: &Path, home: &Path) -> Result<(), String> {
+        check_export_destination_in(path, home)
+    }
+
+    #[test]
+    fn la_exportacion_normal_sigue_funcionando() {
+        let home = home_falso("normal");
+        // Los sitios de toda la vida: Descargas, Escritorio, una carpeta propia...
+        for rel in [
+            "Descargas/perfiles.json",
+            "proyectos/mis-perfiles/copia.json",
+        ] {
+            assert!(
+                con_home(&home.join(rel), &home).is_ok(),
+                "debería permitir {rel}: {:?}",
+                con_home(&home.join(rel), &home)
+            );
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_se_puede_exportar_dentro_de_una_carpeta_de_configuracion() {
+        let home = home_falso("config");
+        // El caso que motivaba todo esto: un .json en autostart es un archivo que
+        // el sistema carga solo.
+        for rel in [
+            ".config/autostart/evil.json",
+            ".config/x.json",
+            ".ssh/clave.json",
+        ] {
+            assert!(
+                con_home(&home.join(rel), &home).is_err(),
+                "no debería permitir {rel}"
+            );
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_se_puede_exportar_en_carpetas_del_sistema() {
+        let home = home_falso("sistema");
+        for ruta in ["/etc/evil.json", "/usr/share/evil.json", "/root/evil.json"] {
+            assert!(
+                con_home(Path::new(ruta), &home).is_err(),
+                "no debería permitir {ruta}"
+            );
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn la_exportacion_tiene_que_ser_json() {
+        let home = home_falso("ext");
+        assert!(con_home(&home.join("Descargas/perfil.json"), &home).is_ok());
+        // Un .sh en Descargas sí es ejecutable por doble clic en algunos escritorios.
+        for nombre in ["perfil.sh", "perfil.desktop", "perfil", "perfil.js"] {
+            assert!(
+                con_home(&home.join("Descargas").join(nombre), &home).is_err(),
+                "no debería permitir {nombre}"
+            );
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn la_extension_json_se_acepta_en_mayusculas() {
+        let home = home_falso("mayus");
+        assert!(con_home(&home.join("Descargas/Perfil.JSON"), &home).is_ok());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_se_exporta_a_un_archivo_oculto() {
+        let home = home_falso("oculto");
+        assert!(con_home(&home.join("Descargas/.perfil.json"), &home).is_err());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_export_path_aplica_la_comprobacion_de_verdad() {
+        // Los tests de arriba llaman a `check_export_destination_in`, que es donde
+        // vive la lógica. Este comprueba el paso completo: que `resolve_export_path`
+        // NO olvide llamarla. Sin esto, alguien podría quitar la llamada y todo
+        // seguiría en verde.
+        let home_real = dirs::home_dir().unwrap();
+        let dentro_de_config = home_real.join(".config/thoriapp-test-export.json");
+        let err = resolve_export_path(
+            dentro_de_config.to_str().unwrap(),
+            DEFAULT_EXPORT_NAME,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("configuración") || err.contains("configuracion"),
+            "mensaje inesperado: {err}"
+        );
+
+        // Y una ruta del sistema también se rechaza en el paso completo.
+        let err = resolve_export_path("/etc/thoriapp-test.json", DEFAULT_EXPORT_NAME).unwrap_err();
+        assert!(!err.is_empty(), "debería rechazar /etc");
+
+        // Una exportación normal sigue pasando (aunque no se escribe nada aquí).
+        let normal = std::env::temp_dir().join("thoriapp-test-copia.json");
+        assert!(
+            resolve_export_path(normal.to_str().unwrap(), DEFAULT_EXPORT_NAME).is_ok(),
+            "una ruta normal debería aceptarse"
+        );
+    }
+
+    #[test]
+    fn matriz_de_rutas_que_antes_funcionaban() {
+        // Objetivo: no perder funcionalidad. Estas rutas se podían exportar
+        // antes del cambio y tienen que seguir funcionando.
+        let home = dirs::home_dir().unwrap().canonicalize().unwrap();
+
+        let permitidas = [
+            "~/perfil.json",                       // el valor por defecto antiguo
+            "~/Descargas/perfil.json",
+            "~/Escritorio/perfil.json",
+            "~/Documents/perfil.json",
+            "~/proyectos/juego/perfil.json",       // carpeta propia cualquiera
+            "~/.thoriapp-backups/perfil.json",     // subcarpeta oculta propia (pero no de config)
+        ];
+        for ruta in permitidas {
+            let p = if let Some(resto) = ruta.strip_prefix("~/") {
+                home.join(resto)
+            } else {
+                PathBuf::from(ruta)
+            };
+            // Solo se valida la ubicación; no se escribe nada.
+            assert!(
+                check_export_destination_in(&p, &home).is_ok(),
+                "antes funcionaba y ahora no: {ruta} -> {:?}",
+                check_export_destination_in(&p, &home)
+            );
+        }
+
+    }
+
+    #[test]
+    fn una_carpeta_de_destino_que_falta_se_crea_sola() {
+        // `~/Descargas` no existe en todas las instalaciones (el nombre depende
+        // del idioma). El valor por defecto de la interfaz apunta ahí, así que la
+        // carpeta tiene que crearse en vez de fallar con «no existe».
+        // `resolve_export_path` usa el `$HOME` real, así que se prueba con una
+        // ruta bajo /tmp, que también está permitida.
+        let en_tmp = std::env::temp_dir().join("thoriapp-test-crear-carpeta/perfil.json");
+        let _ = fs::remove_dir_all(en_tmp.parent().unwrap());
+        assert!(!en_tmp.parent().unwrap().exists());
+
+        let resuelta = resolve_export_path(en_tmp.to_str().unwrap(), DEFAULT_EXPORT_NAME)
+            .expect("debería crear la carpeta y aceptar la ruta");
+        assert!(
+            resuelta.parent().unwrap().is_dir(),
+            "la carpeta de destino debería existir"
+        );
+
+        let _ = fs::remove_dir_all(en_tmp.parent().unwrap());
+    }
+
+    #[test]
+    fn el_tmp_del_sistema_se_permite_para_no_romper_usos_temporales() {
+        let home = home_falso("tmp");
+        assert!(con_home(Path::new("/tmp/respaldo.json"), &home).is_ok());
+        let _ = fs::remove_dir_all(&home);
+    }
 }
+

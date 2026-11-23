@@ -1,5 +1,26 @@
 import type { Param } from './types';
 
+/**
+ * Nombre legible de una etiqueta de hardware. El tag interno («amd», «rt») no
+ * dice nada a quien lee la tarjeta; antes salía literal: «Necesita vram-bajo».
+ */
+export function describeTag(tag: string): string {
+  const labels: Record<string, string> = {
+    amd: 'una GPU AMD',
+    nvidia: 'una GPU NVIDIA',
+    intel: 'una GPU Intel',
+    ntsync: 'soporte NTSync',
+    wayland: 'una sesión Wayland',
+    'game-performance': 'game-performance disponible',
+    'vram-bajo': 'menos de 4 GB de VRAM',
+    'vram-medio': 'menos de 8 GB de VRAM',
+    'vram-alto': '8 GB o más de VRAM',
+    'cpu-sin-avx2': 'una CPU sin AVX2',
+    rt: 'una GPU con ray tracing',
+  };
+  return labels[tag] ?? tag;
+}
+
 export type RecommendationStatus = 'recommended' | 'neutral' | 'not_applicable' | 'not_available' | 'not_recommended';
 
 /**
@@ -14,7 +35,7 @@ export function missingReason(
     return 'Solo aplica con Proton; este juego es nativo de Linux';
   }
   const required = p.requires.find((t) => !opts.hwTags.includes(t));
-  if (required) return `Necesita ${required}`;
+  if (required) return `Necesita ${describeTag(required)}`;
   return null;
 }
 

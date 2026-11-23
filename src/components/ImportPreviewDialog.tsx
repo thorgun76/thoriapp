@@ -73,7 +73,7 @@ export function ImportPreviewDialog({
           )}
 
           {preview.stripped_commands > 0 && (
-            <p className="text-xs text-[var(--caution)] bg-[var(--caution-bg)] border border-[var(--caution)]/40 rounded-lg p-3 flex items-start gap-2">
+            <p className="text-xs text-[var(--caution)] bg-[var(--caution-bg)] border border-caution/40 rounded-lg p-3 flex items-start gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
               <span>
                 {preview.stripped_commands === 1
@@ -147,7 +147,7 @@ export function ImportPreviewDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-action/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
           >
             Cancelar
           </button>

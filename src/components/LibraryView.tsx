@@ -69,6 +69,9 @@ interface LibraryViewProps {
   onToggleExternal: () => void;
   onRescan: () => void;
   onOpenGame: (game: Game) => void;
+  /** Comando del perfil guardado de cada juego (por appid); los demás no lo tienen. */
+  quickCommands?: Record<number, string>;
+  onCopyCommand?: (command: string) => void;
 }
 
 /** Rejilla de juegos instalados con filtros por plataforma. */
@@ -85,6 +88,8 @@ export function LibraryView({
   onToggleExternal,
   onRescan,
   onOpenGame,
+  quickCommands = {},
+  onCopyCommand,
 }: LibraryViewProps) {
   // Diagnóstico de carátulas: muestra en un modal qué archivos hay realmente en
   // cada launcher, para depurar sin adivinar nombres.
@@ -104,7 +109,7 @@ export function LibraryView({
     {
       key: 'all',
       label: `Todos (${counts.steam + counts.lutris + counts.heroic + counts.heronite})`,
-      activeClass: 'bg-[var(--action)] text-white shadow-lg shadow-[var(--action)]/20',
+      activeClass: 'bg-[var(--action)] text-white shadow-lg shadow-action/20',
     },
     {
       key: 'steam',
@@ -160,7 +165,7 @@ export function LibraryView({
               onClick={onToggleExternal}
               className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 ${
                 showExternalGames
-                  ? 'bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/30'
+                  ? 'bg-action/10 text-[var(--action)] border border-action/30'
                   : 'bg-[var(--surface)] text-[var(--text-muted)] border border-[var(--border)]'
               }`}
             >
@@ -175,7 +180,7 @@ export function LibraryView({
           >
             {scanningLaunchers ? (
               <>
-                <div className="w-4 h-4 border-2 border-[var(--text-muted)]/30 border-t-[var(--text-muted)] rounded-full animate-spin"></div>
+                <div className="w-4 h-4 border-2 border-text-muted/30 border-t-[var(--text-muted)] rounded-full animate-spin"></div>
                 Escaneando...
               </>
             ) : (
@@ -209,7 +214,7 @@ export function LibraryView({
               className={`px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
                 launcherFilter === f.key
                   ? f.activeClass
-                  : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-[var(--action)]/50'
+                  : 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:border-action/50'
               }`}
             >
               {f.label}
@@ -234,7 +239,7 @@ export function LibraryView({
                 aria-pressed={sortOrder === key}
                 className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold transition-colors ${
                   sortOrder === key
-                    ? 'bg-[var(--action)]/15 text-[var(--action)]'
+                    ? 'bg-action/15 text-[var(--action)]'
                     : 'bg-[var(--surface)] text-[var(--text-muted)] hover:bg-[var(--card-hover)]'
                 }`}
               >
@@ -257,7 +262,13 @@ export function LibraryView({
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
           {shown.map((g) => (
-            <GameCard key={`${g.launcher || 'steam'}-${g.appid || g.name}`} game={g} onOpen={onOpenGame} />
+            <GameCard
+              key={`${g.launcher || 'steam'}-${g.appid || g.name}`}
+              game={g}
+              onOpen={onOpenGame}
+              quickCommand={quickCommands[g.appid] ?? null}
+              onCopyCommand={onCopyCommand}
+            />
           ))}
         </div>
       )}

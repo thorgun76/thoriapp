@@ -126,18 +126,6 @@
       },
       {
         "kind": "env",
-        "value": "DXVK_ASYNC=1",
-        "impact": "medio",
-        "default_on": false,
-        "title": "Compilación de shaders en segundo plano",
-        "why": "En un mundo abierto con miles de shaders distintos, la compilación se nota como tirones la primera vez que entras a una zona. DXVK_ASYNC los compila sin bloquear el hilo de render. Con DXVK 2.x es un no-op (ya es asíncrono por defecto), pero no rompe nada.",
-        "evidence": "documentado",
-        "source": "https://github.com/doitsujin/dxvk",
-        "essential": false,
-        "simple_why": "Quita los tirones la primera vez que entras a una zona"
-      },
-      {
-        "kind": "env",
         "value": "RADV_PERFTEST=gpl",
         "impact": "bajo",
         "requires": [
@@ -173,7 +161,7 @@
         "default_on": false,
         "title": "Usa reescalado dentro del juego",
         "why": "En este juego el ajuste que más FPS da está en el menú, no en una variable: DLSS (NVIDIA) o FSR (AMD/Intel) en modo Calidad dan más que cualquier combinación de envs. Antes de tocar variables, baja el reescalado.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "DLSS o FSR en Calidad da más FPS que cualquier truco de la app"
       },
@@ -188,10 +176,8 @@
         "why": "Activa el trazado de rayos. En GPUs sin unidades de RT, o con las de primera generación, los FPS se desploman. La app solo lo ofrece si tu tarjeta lo mueve con soltura; si lo activas a mano, mide antes y después.",
         "warn": "Solo tiene sentido en GPUs con RT de última generación. En el resto es pérdida de FPS.",
         "evidence": "documentado",
-        "not_recommended_for": [
-          "gpu_sin_rt"
-        ],
-        "simple_why": "Solo si tu tarjeta mueve ray tracing con soltura"
+        "simple_why": "Solo si tu tarjeta mueve ray tracing con soltura",
+        "source": "https://github.com/HansKristian-Work/vkd3d-proton"
       },
       {
         "kind": "env",
@@ -264,7 +250,8 @@
         "why": "Para ver el stuttering real hace falta el gráfico de frametimes, no solo los FPS. MangoHud da 1% lows; el HUD de DXVK muestra el pico exacto.",
         "evidence": "documentado",
         "essential": false,
-        "simple_why": "Muestra en pantalla cuándo hay tirones reales"
+        "simple_why": "Muestra en pantalla cuándo hay tirones reales",
+        "source": "https://github.com/doitsujin/dxvk"
       },
       {
         "kind": "env",
@@ -285,7 +272,7 @@
         "default_on": false,
         "title": "Limitador de FPS dentro del juego",
         "why": "Sin límite, la GPU trabaja en vacío subiendo la temperatura y el consumo sin ganar nada. Activa «Limitar a 60 FPS» en el menú de vídeo y elige Calidad de imagen media; subirla solo sube la carga.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "El juego no pasa de 60 FPS: limitarlo enfría la GPU y no pierdes nada"
       },
@@ -297,10 +284,7 @@
         "title": "No toques el anti-cheat para el online",
         "why": "Elden Ring usa Easy Anti-Cheat en el modo online. Cualquier intento de desactivarlo, aunque sea para ganar rendimiento en el modo offline, se trata como manipulación por el sistema: no hay segundo aviso.",
         "warn": "Desactivar el anti-cheat es motivo de bloqueo en el modo online.",
-        "evidence": "documentado",
-        "not_recommended_for": [
-          "online"
-        ],
+        "evidence": "heuristica",
         "simple_why": "Tocar el anti-cheat te puede banear; no lo hagas"
       }
     ],
@@ -362,7 +346,10 @@
         "why": "Forzar a mano un ICD concreto salta la selección automática y puede cargar el driver equivocado (o ninguno). Si hay varios GPU, deja que Vulkan elija.",
         "warn": "Forzar un ICD puede impedir que el juego arranque.",
         "evidence": "heuristica",
-        "simple_why": "Puede romper el arranque: casi nunca hace falta"
+        "simple_why": "Puede romper el arranque: casi nunca hace falta",
+        "requires": [
+          "amd"
+        ]
       },
       {
         "kind": "config",
@@ -371,7 +358,7 @@
         "default_on": false,
         "title": "Reescalado FSR del juego",
         "why": "En el acto 3 la GPU deja de sostenerse a 1440p. El juego trae FSR: ponlo en Calidad antes de bajar la distancia de dibujado, que en un CRPG se nota más.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "FSR en Calidad da más FPS que bajar calidad a mano"
       },
@@ -382,7 +369,7 @@
         "default_on": false,
         "title": "Dos ajustes concretos que dan FPS",
         "why": "En el acto 3, la ciudad tiene cientos de NPCs con sombras en tiempo real: bajar «Sombra de multitud» y desactivar «Sombra dinámica» sube los 1% lows más que ninguna variable de entorno.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "Quita las sombras de las multitudes: es lo que más pesa al llegar a la ciudad"
       }
@@ -437,24 +424,13 @@
         "simple_why": "Mantiene la CPU a máxima frecuencia para evitar tirones"
       },
       {
-        "kind": "env",
-        "value": "DXVK_ASYNC=1",
-        "impact": "medio",
-        "default_on": false,
-        "title": "Compilación asíncrona de shaders",
-        "why": "Con mapas distintos cada partida, la caché sirve menos y la compilación en primer plano se nota en cada zona nueva. Dejar la compilación en segundo plano cambia los tirones por shaders que aparecen un instante después.",
-        "evidence": "documentado",
-        "essential": false,
-        "simple_why": "Reduce los tirones al entrar a zonas que no habías visto"
-      },
-      {
         "kind": "config",
         "value": "No elijas \"Calidad máxima\" de distancia",
         "impact": "alto",
         "default_on": false,
         "title": "Distancia de dibujado media",
         "why": "La distancia de dibujado es el ajuste que más carga la CPU en un mundo abierto. En modo Calidad la partida se llena de tirones cuando aparecen varios enemigos a la vez.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "La distancia de dibujado es lo que más tira de CPU en las oleadas"
       }
@@ -503,7 +479,7 @@
         "default_on": false,
         "title": "Reescalado interno en el menú",
         "why": "RDR2 trae reescalado propio. Bajarlo a 0.75x a 1080p sube los FPS mucho más que tocar «Calidad de texturas», que apenas cuesta rendimiento.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "Baja el reescalado interno antes que la calidad de texturas"
       },
@@ -526,7 +502,8 @@
         "title": "HUD de DXVK",
         "why": "RDR2 no usa DXVK: el HUD no aparecerá. Usa MangoHud.",
         "evidence": "documentado",
-        "simple_why": "No hace nada en este juego: usa MangoHud"
+        "simple_why": "No hace nada en este juego: usa MangoHud",
+        "source": "https://github.com/doitsujin/dxvk"
       }
     ],
     "tips": [
@@ -575,7 +552,8 @@
         "why": "El overlay consume tiempo de GPU. En un juego competitivo, muestra solo FPS y 1% lows: cada elemento extra del overlay cuesta un poco de rendimiento.",
         "evidence": "documentado",
         "essential": false,
-        "simple_why": "Cuanto menos overlay, más FPS estables"
+        "simple_why": "Cuanto menos overlay, más FPS estables",
+        "source": "https://github.com/flightlessmango/MangoHud"
       },
       {
         "kind": "env",
@@ -586,7 +564,8 @@
         "why": "Reducir el búfer de audio baja la latencia del sonido, útil cuando se juega por sonido con auriculares. No sube los FPS.",
         "evidence": "documentado",
         "essential": false,
-        "simple_why": "Baja la latencia del sonido, útil con auriculares"
+        "simple_why": "Baja la latencia del sonido, útil con auriculares",
+        "source": "https://www.freedesktop.org/wiki/Software/PulseAudio/Documentation/User/EnvironmentVariables/"
       },
       {
         "kind": "config",
@@ -595,7 +574,7 @@
         "default_on": false,
         "title": "V-Sync desactivado en el juego",
         "why": "En un competitivo, V-Sync añade un frame de latencia. Con FreeSync/GSync activo en el monitor no necesitas V-Sync.",
-        "evidence": "documentado",
+        "evidence": "heuristica",
         "essential": true,
         "simple_why": "Quita V-Sync: añade retraso a cada frame"
       }

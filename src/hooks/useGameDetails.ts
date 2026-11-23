@@ -10,6 +10,8 @@ import type {
   ProtonPulseSummary,
   RequirementsReport,
 } from '../lib/types';
+import { resolveAppId } from '../lib/appid';
+import { getOverride, setOverride } from '../lib/appidOverride';
 
 interface UseGameDetailsOptions {
   /** Tags de hardware (getter, para no recrear callbacks). */
@@ -28,6 +30,48 @@ interface UseGameDetailsOptions {
  * que consultar, ni requisitos, ni motor. Se centraliza para no repetir `=== 0`. */
 function appidDe(g: Game): number {
   return g.appid === 0 ? 0 : g.appid;
+}
+
+/**
+ * Info de Steam/ProtonDB de un juego que no trae AppID (Lutris, Heroic, HeroNite).
+ *
+ * Se busca el AppID por nombre en la tienda y solo se acepta una coincidencia
+ * exacta (ver `lib/appid`). Antes esta rama daba el juego por nativo de Linux
+ * (`launcher === 'lutris'`) sin consultar nada: Lutris también mueve juegos de
+ * Windows con Wine, así que la etiqueta «Linux nativo» era una suposición, y el
+ * nivel de ProtonDB no se pedía nunca aunque el juego estuviera en Platino.
+ *
+ * Sin coincidencia, `native` queda desconocido (no `true`) y `appid` sin definir.
+ */
+async function externalGameInfo(g: Game): Promise<GameInfo> {
+  const plain: GameInfo = { name: g.name, errors: [] };
+  // Vínculo manual (el usuario ya dijo qué juego es): manda sobre la búsqueda.
+  const manual = getOverride(g);
+  if (manual !== null) {
+    try {
+      return { ...(await api.gameInfo(manual)), appid: manual };
+    } catch (e) {
+      console.warn('No se pudo consultar el AppID vinculado a mano:', e);
+      return { ...plain, appid: manual };
+    }
+  }
+  try {
+    const { appid, tried, found } = await resolveAppId(g.name, api.searchStore);
+    // Rastro para poder diagnosticar desde la consola: qué nombre buscó la app
+    // y qué devolvió la tienda. Sin esto solo se veía «sin datos» sin motivo.
+    console.info(
+      '[ProtonDB] AppID de «%s» → %s (búsquedas: %s; tienda: %s)',
+      g.name,
+      appid ?? 'sin coincidencia',
+      tried.join(' / '),
+      found.join(' | ') || 'nada'
+    );
+    if (appid === null) return plain;
+    return { ...(await api.gameInfo(appid)), appid };
+  } catch (e) {
+    console.warn('No se pudo resolver el AppID de Steam:', e);
+    return plain;
+  }
 }
 
 /**
@@ -98,11 +142,7 @@ export function useGameDetails({ getHwTags, getGpuName }: UseGameDetailsOptions)
           // vista del juego no se pintaba nunca. Es lo que pasaba al abrir un
           // juego del buscador que no está en la biblioteca.
           g.appid === 0
-            ? Promise.resolve({
-                name: g.name,
-                native: g.launcher === 'lutris' || g.launcher === 'heronite',
-                errors: [],
-              } as GameInfo)
+            ? externalGameInfo(g)
             : api.gameInfo(g.appid).catch((e) => {
                 console.warn('No se pudo consultar Steam/ProtonDB:', e);
                 // `native` queda sin definir (= desconocido), no null.
@@ -211,6 +251,28 @@ export function useGameDetails({ getHwTags, getGpuName }: UseGameDetailsOptions)
     setCommunityRecommendations([]);
   }, []);
 
+  /**
+   * Vincula a mano el juego abierto con un AppID de Steam.
+   *
+   * Es la red de seguridad de la detección automática: cuando la biblioteca
+   * guarda un nombre que no se puede emparejar con la tienda ("NoManSky_v5.0"),
+   * el usuario elige el juego una vez y se recuerda. No recarga reglas ni motor:
+   * el comando no cambia, solo la ficha de ProtonDB/requisitos.
+   */
+  const linkAppid = useCallback(async (g: Game, appid: number) => {
+    const token = ++openTokenRef.current;
+    setOverride(g, appid);
+    try {
+      const fresh = await api.gameInfo(appid);
+      if (!mountedRef.current || token !== openTokenRef.current) return;
+      setInfo({ ...fresh, appid });
+    } catch (e) {
+      console.warn('No se pudo consultar el AppID vinculado:', e);
+      if (!mountedRef.current || token !== openTokenRef.current) return;
+      setInfo({ name: g.name, appid, errors: [String(e)] });
+    }
+  }, []);
+
   return {
     current,
     rules,
@@ -228,5 +290,7 @@ export function useGameDetails({ getHwTags, getGpuName }: UseGameDetailsOptions)
     error,
     openGame,
     closeGame,
+    /** Vincula a mano este juego con un AppID de Steam y recarga sus datos. */
+    linkAppid,
   };
 }

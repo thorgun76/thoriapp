@@ -14,6 +14,7 @@
 // CSP. Así el frontend recibe un `src` que funciona sin permisos extra.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Tamaño máximo de una carátula. Evita cargar en memoria un archivo enorme si
@@ -100,12 +101,18 @@ fn remote_image(url: &str) -> Option<String> {
         .timeout(std::time::Duration::from_secs(8))
         .build();
     let resp = agent.get(url).call().ok()?;
+    // Tope aplicado DURANTE la lectura. Antes se leía la respuesta entera y se
+    // comprobaba el tamaño después: una URL que sirviera un archivo enorme
+    // (o infinito) se cargaba entera en memoria antes de descartarla.
+    let max = MAX_COVER_BYTES.min(usize::MAX as u64) as usize;
     let bytes = {
         let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf).ok()?;
+        std::io::Read::take(resp.into_reader(), (max + 1) as u64)
+            .read_to_end(&mut buf)
+            .ok()?;
         buf
     };
-    if bytes.is_empty() || bytes.len() as u64 > MAX_COVER_BYTES {
+    if bytes.is_empty() || bytes.len() > max {
         return None;
     }
 

@@ -1,22 +1,19 @@
-import { AlertCircle, AlertTriangle, Check, Copy, Info, Star } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  Check,
+  Copy,
+  Info,
+  Pencil,
+  RotateCcw,
+  Star,
+  Terminal,
+} from 'lucide-react';
+import { useState } from 'react';
 import type { GameInfo, RuntimeEnv } from '../lib/types';
 import { preflight, type PreflightCheck } from '../lib/preflight';
-import { tierDescription, tierLabel } from '../lib/format';
-
-/** Clases del badge de ProtonDB según el tier (verde → naranja → rojo). */
-export function tierColor(tier: string): string {
-  switch (tier.toLowerCase()) {
-    case 'platinum':
-      return 'bg-[var(--compatible-bg)] text-[var(--compatible)] border-[var(--compatible)]/30';
-    case 'gold':
-    case 'bronze':
-      return 'bg-[var(--caution-bg)] text-[var(--caution)] border-[var(--caution)]/30';
-    case 'silver':
-      return 'bg-[var(--surface)] text-[var(--text)] border-[var(--border)]';
-    default:
-      return 'bg-[var(--error-bg)] text-[var(--error)] border-[var(--error)]/30';
-  }
-}
+import { AppidPicker } from './AppidPicker';
+import { GameBadges } from './GameBadges';
 
 interface CommandBoxProps {
   gameName: string;
@@ -41,6 +38,18 @@ interface CommandBoxProps {
    */
   manualCommandError?: string;
   info: GameInfo;
+  /**
+   * AppID de Steam, solo para enlazar la etiqueta de ProtonDB con el análisis del
+   * juego. Sin él la etiqueta se pinta igual, pero sin acción.
+   */
+  appid?: number;
+  /**
+   * Vincula el juego con un AppID de Steam elegido a mano.
+   *
+   * Sin esta función la etiqueta «sin datos» no se puede pulsar; con ella, la
+   * app ofrece buscar el juego cuando no lo reconoce por su nombre.
+   */
+  onLinkAppid?: (appid: number) => void;
   /** Estado real de la máquina; `null` mientras carga (no se muestran avisos). */
   env: RuntimeEnv | null;
   /** Launcher del juego (`steam`, `lutris`…) para avisos de sandbox. */
@@ -72,6 +81,8 @@ export function CommandBox({
   manualCommand,
   manualCommandError = '',
   info,
+  appid,
+  onLinkAppid,
   env,
   launcher,
   blocked = false,
@@ -82,6 +93,10 @@ export function CommandBox({
   onToggleManualEditing,
   onManualCommandChange,
 }: CommandBoxProps) {
+  // Diálogo para vincular el juego a mano con su ficha de Steam. Solo aplica a
+  // juegos sin AppID cuya detección por nombre ha fallado.
+  const [picking, setPicking] = useState(false);
+
   // Revisión previa: los problemas que se pagan con un "el juego no arranca",
   // detectados antes de copiar el comando al lanzador. Con el juego bloqueado no
   // se revisa nada: no hay comando que revisar y los avisos serían ruido.
@@ -95,7 +110,7 @@ export function CommandBox({
 
   if (blocked) {
     return (
-      <section className="mb-8 p-6 rounded-2xl bg-[var(--error-bg)] border-2 border-[var(--error)]/50">
+      <section className="mb-8 p-6 rounded-2xl bg-[var(--error-bg)] border border-error/50 shadow-[0_0_44px_-24px_var(--error)]">
         <div className="flex items-start gap-3">
           <AlertCircle className="w-6 h-6 mt-0.5 shrink-0 text-[var(--error)]" />
           <div className="min-w-0">
@@ -115,41 +130,47 @@ export function CommandBox({
   }
 
   return (
-    <section className="mb-8 p-6 rounded-2xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-lg shadow-[var(--action)]/10">
-      <div className="flex items-start justify-between mb-4">
-        <div>
-          <p className="text-xs text-[var(--action)] font-bold uppercase tracking-wider mb-2">
+    <section className="mb-8 p-6 rounded-2xl bg-[var(--surface)] border border-action/40 shadow-[0_0_56px_-26px_var(--action)]">
+      {/* Encabezado: qué juego y en qué estado. El título manda (era el mismo
+          tamaño que el de una tarjeta de la biblioteca) y los avisos de
+          compatibilidad se agrupan a la derecha, fuera del flujo del texto. */}
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-[11px] text-[var(--action)] font-bold uppercase tracking-[0.14em] mb-2">
+            <Terminal className="w-4 h-4" />
             Comando de lanzamiento
           </p>
-          <h2 className="text-2xl font-bold mb-1">{gameName}</h2>
-          <p className="text-sm text-[var(--text-muted)]">
+          <h2 className="text-3xl font-bold tracking-tight mb-2">{gameName}</h2>
+          <p className="text-sm text-[var(--text-muted)] leading-relaxed max-w-2xl">
             {launchCommand === '%command%'
               ? 'Punto de partida sin modificaciones. Activa los ajustes opcionales para realizar pruebas.'
               : `${activeCount} ajuste(s) activo(s). Prueba cada cambio por separado.`}
           </p>
         </div>
-        <div className="flex flex-col gap-2">
-          {info.native === true && (
-            <span className="text-xs px-3 py-1 rounded-full bg-[var(--compatible-bg)] text-[var(--compatible)] border border-[var(--compatible)]/30 font-semibold">
-              ● Linux nativo
-            </span>
-          )}
-          {info.tier && (
-            <span
-              className={`text-xs px-3 py-1 rounded-full border font-semibold ${
-                tierColor(info.tier)
-              }`}
-              title={tierDescription(info.tier) ?? undefined}
-            >
-              ProtonDB: {tierLabel(info.tier)}
-            </span>
-          )}
-        </div>
+        <GameBadges
+          native={info.native}
+          tier={info.tier}
+          appid={appid}
+          name={info.name}
+          onLink={onLinkAppid ? () => setPicking(true) : undefined}
+        />
       </div>
 
+      {/* Vincular el juego con su ficha de Steam cuando no se reconoce por nombre */}
+      {picking && onLinkAppid && (
+        <AppidPicker
+          initialQuery={gameName}
+          onClose={() => setPicking(false)}
+          onPick={(id) => {
+            setPicking(false);
+            onLinkAppid(id);
+          }}
+        />
+      )}
+
       {/* Codebox grande y prominente */}
-      <div className="p-5 rounded-xl bg-[var(--bg)] border-2 border-[var(--border)] mb-4">
-        <code className="text-base text-[var(--compatible)] font-mono break-all leading-relaxed">
+      <div className="p-4 rounded-xl bg-[var(--bg)] border border-[var(--border-hover)] mb-4">
+        <code className="text-[15px] text-[var(--compatible)] font-mono break-all leading-relaxed">
           {launchCommand}
         </code>
       </div>
@@ -190,17 +211,17 @@ export function CommandBox({
         </p>
       )}
 
-      <div className="flex gap-3">
+      <div className="flex flex-col sm:flex-row gap-3">
         <button
           onClick={onCopy}
           disabled={!!manualCommandError}
           title={manualCommandError || undefined}
-          className={`flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold text-base transition-all ${
+          className={`flex-1 flex items-center justify-center gap-2.5 px-6 py-4 rounded-xl font-bold text-base transition-all ${
             manualCommandError
               ? 'bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] cursor-not-allowed'
               : copied
                 ? 'bg-[var(--compatible)] text-[var(--bg)]'
-                : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)]'
+                : 'bg-gradient-to-b from-[var(--action-hover)] to-[var(--action)] text-[var(--bg)] shadow-lg shadow-action/30 hover:to-[var(--action-hover)]'
           }`}
         >
           {manualCommandError ? (
@@ -219,15 +240,16 @@ export function CommandBox({
         </button>
         <button
           onClick={onSaveProfile}
-          className="px-4 py-3 rounded-xl text-sm font-semibold bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/30 hover:bg-[var(--action)]/20 transition-colors flex items-center gap-2"
+          className="px-5 py-4 rounded-xl text-sm font-semibold bg-action/10 text-[var(--action)] border border-action/30 hover:bg-action/20 transition-colors flex items-center justify-center gap-2"
         >
           <Star className="w-4 h-4" />
           Guardar perfil
         </button>
         <button
           onClick={onReset}
-          className="px-4 py-3 rounded-xl text-sm font-semibold bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--card-hover)] transition-colors"
+          className="px-5 py-4 rounded-xl text-sm font-semibold bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--card-hover)] hover:text-[var(--text)] transition-colors flex items-center justify-center gap-2"
         >
+          <RotateCcw className="w-4 h-4" />
           Restablecer
         </button>
       </div>
@@ -235,20 +257,26 @@ export function CommandBox({
       {/* Fase 4: Editor manual del comando (solo en modo experto) */}
       {expertMode && (
         <div className="mt-4 p-4 rounded-xl bg-[var(--card)] border border-[var(--border)]">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <p className="text-sm font-semibold text-[var(--text)]">Editar comando manualmente</p>
+          <div className="flex items-start justify-between gap-4 mb-3">
+            <div className="min-w-0">
+              <p className="flex items-center gap-2 text-sm font-semibold text-[var(--text)]">
+                <Pencil className="w-4 h-4 text-[var(--text-muted)]" />
+                Editar comando manualmente
+              </p>
               <p className="text-xs text-[var(--text-muted)] mt-1">
                 Modifica el comando directamente. Los cambios manuales sobrescriben las selecciones automáticas.
               </p>
             </div>
             <button
               onClick={onToggleManualEditing}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${
                 manualEditing ? 'bg-[var(--action)]' : 'bg-[var(--border)]'
               }`}
               role="switch"
               aria-checked={manualEditing}
+              // El interruptor no lleva texto: sin nombre accesible sería un botón
+              // anónimo en el orden de tabulación.
+              aria-label="Editar comando manualmente"
             >
               <span
                 className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ease-in-out ${
@@ -292,9 +320,9 @@ export function CommandBox({
 
 /** Color de los chips del resumen, por tipo de pieza del comando. */
 const PART_STYLES: Record<'env' | 'wrapper' | 'arg', string> = {
-  env: 'bg-[var(--action)]/10 text-[var(--action)] border-[var(--action)]/25',
-  wrapper: 'bg-[var(--caution-bg)] text-[var(--caution)] border-[var(--caution)]/25',
-  arg: 'bg-[var(--compatible-bg)] text-[var(--compatible)] border-[var(--compatible)]/25',
+  env: 'bg-action/10 text-[var(--action)] border-action/25',
+  wrapper: 'bg-[var(--caution-bg)] text-[var(--caution)] border-caution/25',
+  arg: 'bg-[var(--compatible-bg)] text-[var(--compatible)] border-compatible/25',
 };
 
 const PART_TITLES: Record<'env' | 'wrapper' | 'arg', string> = {
@@ -306,12 +334,12 @@ const PART_TITLES: Record<'env' | 'wrapper' | 'arg', string> = {
 /** Colores e icono de cada nivel de aviso. */
 const SEVERITY_STYLES = {  error: {
     Icon: AlertCircle,
-    box: 'bg-[var(--error-bg)] border-[var(--error)]/40',
+    box: 'bg-[var(--error-bg)] border-error/40',
     text: 'text-[var(--error)]',
   },
   warn: {
     Icon: AlertTriangle,
-    box: 'bg-[var(--caution-bg)] border-[var(--caution)]/40',
+    box: 'bg-[var(--caution-bg)] border-caution/40',
     text: 'text-[var(--caution)]',
   },
   info: {

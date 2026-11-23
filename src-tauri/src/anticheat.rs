@@ -178,13 +178,13 @@ fn read_cache() -> Option<String> {
 
 /// Descarga la lista y la guarda. Devuelve el texto tal cual llegó.
 fn download() -> Result<String, String> {
-    let body = ureq::get(SOURCE_URL)
-        .set("User-Agent", "thoriapp/1.0")
-        .timeout(std::time::Duration::from_secs(20))
-        .call()
-        .map_err(|e| format!("no se pudo descargar la lista: {e}"))?
-        .into_string()
-        .map_err(|e| format!("respuesta ilegible: {e}"))?;
+    // Límite propio: es el archivo más grande que pide la app.
+    let body = crate::net::fetch_text_with_limit(
+        SOURCE_URL,
+        std::time::Duration::from_secs(20),
+        crate::net::MAX_CATALOG_BYTES,
+    )
+    .map_err(|e| format!("no se pudo descargar la lista: {e}"))?;
 
     if catalog_size(&body) < MIN_ENTRIES {
         return Err("la lista descargada vino vacía o incompleta".to_string());

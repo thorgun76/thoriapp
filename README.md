@@ -99,9 +99,11 @@ tauri-app/
 │   │   ├── engine.rs            # Detección de motor
 │   │   ├── profiles.rs          # Sistema de perfiles
 │   │   ├── benchmarks.rs        # Análisis de benchmarks
+│   │   ├── net.rs               # Descargas con límite de tamaño
 │   │   └── log.rs               # Análisis de logs
 │   ├── games.json               # Reglas por juego
 │   ├── Cargo.toml               # Dependencias Rust
+│   ├── SEGURIDAD-DEPENDENCIAS.md # Avisos de seguridad y por qué aplican
 │   ├── tauri.conf.json          # Configuración Tauri
 │   └── capabilities/
 │       └── default.json         # Permisos
@@ -113,6 +115,20 @@ tauri-app/
 ├── install.sh                   # Script de instalación
 └── generate-icons.py            # Generador de iconos
 ```
+
+## 🧪 Comprobar el proyecto
+
+```bash
+npm run check        # tipos + tests del frontend + tests de Rust
+npm run lint:rust    # clippy con los avisos como errores
+npm run audit        # vulnerabilidades de JS (producción) y de Rust
+```
+
+`npm run audit` usa `cargo audit` (instálalo con `cargo install cargo-audit`).
+Los avisos que no se pueden arreglar desde aquí están explicados uno a uno en
+`src-tauri/SEGURIDAD-DEPENDENCIAS.md`.
+
+El mismo conjunto corre en CI (`.github/workflows/verify.yml`) en cada push.
 
 ## 🐛 Solución de Problemas
 

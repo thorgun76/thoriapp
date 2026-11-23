@@ -1,5 +1,6 @@
 import { Home, Settings, Star, TrendingUp } from 'lucide-react';
 import type { SidebarView } from '../lib/types';
+import logo from '../assets/thoriapp-logo.png';
 
 interface SidebarProps {
   sidebarView: SidebarView;
@@ -43,12 +44,15 @@ export function Sidebar({
       {/* Brand */}
       <div className="p-5 border-b border-[var(--border)]">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[var(--action)] to-purple-600 flex items-center justify-center text-white font-bold text-lg">
-            ✦
-          </div>
+          <img
+            src={logo}
+            alt="Thoriapp"
+            className="w-10 h-10 rounded-xl object-contain"
+            draggable={false}
+          />
           <div>
             <h1 className="text-base font-bold text-white">Thoriapp</h1>
-            <p className="text-xs text-[var(--text-muted)]">Optimización Linux</p>
+            <p className="text-xs text-[var(--text-muted)]">Mide · Compara · Optimiza</p>
           </div>
         </div>
       </div>
@@ -72,14 +76,14 @@ export function Sidebar({
                   onClick={() => onNavigate(view)}
                   className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
                     active
-                      ? 'bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/20'
+                      ? 'bg-action/10 text-[var(--action)] border border-action/20'
                       : 'text-[var(--text-muted)] hover:bg-[var(--card)] hover:text-white'
                   }`}
                 >
                   <Icon className="w-4 h-4" />
                   <span>{label}</span>
                   {badge !== undefined && badge > 0 && (
-                    <span className="ml-auto text-xs bg-[var(--action)]/20 text-[var(--action)] px-2 py-0.5 rounded-full">
+                    <span className="ml-auto text-xs bg-action/20 text-[var(--action)] px-2 py-0.5 rounded-full">
                       {badge}
                     </span>
                   )}
@@ -127,7 +131,7 @@ export function Sidebar({
 
       {/* Footer */}
       <div className="p-4 border-t border-[var(--border)]">
-        <div className="flex items-center gap-3 mb-2">
+        <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--action)] to-purple-600 flex items-center justify-center text-white text-sm font-bold">
             L
           </div>
@@ -136,7 +140,6 @@ export function Sidebar({
             <p className="text-xs text-[var(--text-muted)]">{distro || 'Cargando...'}</p>
           </div>
         </div>
-        <p className="text-[10px] text-[var(--text-dim)]">Optimizador honesto para Linux</p>
       </div>
     </aside>
   );

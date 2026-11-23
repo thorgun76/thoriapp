@@ -7,6 +7,7 @@ mod gpu_rank;
 mod hw;
 mod launchers;
 mod log;
+mod net;
 mod preflight;
 mod profiles;
 mod proton_pulse;

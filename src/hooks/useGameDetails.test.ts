@@ -5,6 +5,7 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 const mocks = vi.hoisted(() => ({
   getRules: vi.fn(),
   gameInfo: vi.fn(),
+  searchStore: vi.fn(),
   detectEngine: vi.fn(),
   getEngineRecommendations: vi.fn(),
   getCommunityRecommendations: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../lib/api', () => ({ api: mocks }));
 
+import { getOverride, setOverride } from '../lib/appidOverride';
 import { useGameDetails } from './useGameDetails';
 
 /** Juego de la Steam Store: no instalado y con appid real. */
@@ -30,6 +32,7 @@ describe('useGameDetails', () => {
     mocks.getCommunityRecommendations.mockResolvedValue([]);
     mocks.getAnticheatInfo.mockResolvedValue({ info: null, catalog_size: 0, source: 'cache' });
     mocks.getProtonPulseReports.mockResolvedValue(null);
+    mocks.searchStore.mockResolvedValue([]);
   });
 
   it('abre un juego de la Store aunque ProtonDB falle', async () => {
@@ -225,5 +228,138 @@ describe('useGameDetails: Proton Pulse filtrado por GPU', () => {
 
     expect(mocks.getProtonPulseReports).not.toHaveBeenCalled();
     expect(result.current.protonPulse).toBeNull();
+  });
+});
+
+// ==================== JUEGOS DE OTRO LAUNCHER (appid 0) ====================
+// Un juego instalado con Lutris no trae AppID, pero puede estar en Steam. Antes
+// esta rama lo daba por «nativo de Linux» sin consultar nada (Lutris también
+// ejecuta juegos de Windows con Wine) y no pedía el nivel de ProtonDB nunca.
+
+describe('useGameDetails: juegos sin AppID (Lutris/Heroic)', () => {
+  const lutrisGame = { appid: 0, name: 'Probably Stolen - Cyberpunk Shopkeeper Sim', launcher: 'lutris' };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getRules.mockResolvedValue({ ...rules, appid: 0 });
+    mocks.detectEngine.mockResolvedValue(null);
+    mocks.getEngineRecommendations.mockResolvedValue([]);
+    mocks.getCommunityRecommendations.mockResolvedValue([]);
+    mocks.getAnticheatInfo.mockResolvedValue({ info: null, catalog_size: 0, source: 'cache' });
+    mocks.getProtonPulseReports.mockResolvedValue(null);
+  });
+
+  it('resuelve el AppID por nombre y trae el nivel de ProtonDB', async () => {
+    mocks.searchStore.mockResolvedValue([
+      { appid: 4348910, name: 'Probably Stolen - Cyberpunk Shopkeeper Sim' },
+    ]);
+    mocks.gameInfo.mockResolvedValue({ name: lutrisGame.name, native: false, tier: 'platinum', errors: [] });
+
+    const { result } = renderHook(() => useGameDetails({ getHwTags: () => [] }));
+    await act(async () => {
+      await result.current.openGame(lutrisGame);
+    });
+
+    // Se busca sin puntuación: la tienda indexa palabras, no guiones.
+    expect(mocks.searchStore).toHaveBeenCalledWith('Probably Stolen Cyberpunk Shopkeeper Sim');
+    expect(mocks.gameInfo).toHaveBeenCalledWith(4348910);
+    expect(result.current.info?.tier).toBe('platinum');
+    // El AppID resuelto viaja en `info` para que la etiqueta enlace con ProtonDB.
+    expect(result.current.info?.appid).toBe(4348910);
+  });
+
+  it('si el nombre no coincide exactamente, no da el juego por nativo', async () => {
+    // La búsqueda devuelve un juego parecido: aceptarlo enseñaría el nivel de otro.
+    mocks.searchStore.mockResolvedValue([{ appid: 111, name: 'Probably Stolen 2' }]);
+
+    const { result } = renderHook(() => useGameDetails({ getHwTags: () => [] }));
+    await act(async () => {
+      await result.current.openGame(lutrisGame);
+    });
+
+    expect(mocks.gameInfo).not.toHaveBeenCalled();
+    expect(result.current.info?.tier).toBeUndefined();
+    // Y sobre todo: `native` desconocido, no `true`.
+    expect(result.current.info?.native).toBeUndefined();
+  });
+
+  it('si la búsqueda falla, el juego se abre igual', async () => {
+    mocks.searchStore.mockRejectedValue('sin red');
+
+    const { result } = renderHook(() => useGameDetails({ getHwTags: () => [] }));
+    await act(async () => {
+      await result.current.openGame(lutrisGame);
+    });
+
+    expect(result.current.info).not.toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+});
+
+// ==================== VÍNCULO MANUAL (red de seguridad) ====================
+// Cuando la biblioteca guarda un nombre que Steam no reconoce, el usuario elige
+// el juego a mano una vez y se recuerda.
+describe('useGameDetails: vínculo manual de AppID', () => {
+  const game = { appid: 0, name: 'NoManSky_v5.0_fitgirl', launcher: 'lutris' };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    mocks.getRules.mockResolvedValue({ ...rules, appid: 0 });
+    mocks.detectEngine.mockResolvedValue(null);
+    mocks.getEngineRecommendations.mockResolvedValue([]);
+    mocks.getCommunityRecommendations.mockResolvedValue([]);
+    mocks.getAnticheatInfo.mockResolvedValue({ info: null, catalog_size: 0, source: 'cache' });
+    mocks.getProtonPulseReports.mockResolvedValue(null);
+    mocks.searchStore.mockResolvedValue([]);
+  });
+
+  it('linkAppid guarda el vínculo y recarga la info del juego', async () => {
+    mocks.gameInfo.mockResolvedValue({ name: "No Man's Sky", native: false, tier: 'gold', errors: [] });
+
+    const { result } = renderHook(() => useGameDetails({ getHwTags: () => [] }));
+    await act(async () => {
+      await result.current.openGame(game);
+    });
+    expect(result.current.info?.tier).toBeUndefined();
+
+    await act(async () => {
+      await result.current.linkAppid(game, 275850);
+    });
+
+    expect(mocks.gameInfo).toHaveBeenCalledWith(275850);
+    expect(result.current.info?.tier).toBe('gold');
+    expect(result.current.info?.appid).toBe(275850);
+    // Queda guardado: al reabrir el juego no se vuelve a buscar por nombre.
+    expect(getOverride(game)).toBe(275850);
+  });
+
+  it('al reabrir un juego ya vinculado no se busca por nombre', async () => {
+    setOverride(game, 275850);
+    mocks.gameInfo.mockResolvedValue({ name: "No Man's Sky", tier: 'gold', errors: [] });
+
+    const { result } = renderHook(() => useGameDetails({ getHwTags: () => [] }));
+    await act(async () => {
+      await result.current.openGame(game);
+    });
+
+    expect(mocks.searchStore).not.toHaveBeenCalled();
+    expect(mocks.gameInfo).toHaveBeenCalledWith(275850);
+    expect(result.current.info?.tier).toBe('gold');
+  });
+
+  it('si ProtonDB falla para el AppID vinculado, no se pierde el juego', async () => {
+    setOverride(game, 275850);
+    mocks.gameInfo.mockRejectedValue('sin red');
+
+    const { result } = renderHook(() => useGameDetails({ getHwTags: () => [] }));
+    await act(async () => {
+      await result.current.openGame(game);
+    });
+
+    expect(result.current.info).not.toBeNull();
+    // El AppID sigue ahí: la etiqueta puede ofrecer abrir ProtonDB igualmente.
+    expect(result.current.info?.appid).toBe(275850);
+    expect(result.current.loading).toBe(false);
   });
 });

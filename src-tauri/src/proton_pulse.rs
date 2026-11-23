@@ -310,13 +310,8 @@ fn cache_age_seconds(appid: u32) -> Option<i64> {
 
 fn download(appid: u32) -> Result<String, String> {
     let url = format!("{BASE_URL}/{appid}/latest.json");
-    let body = ureq::get(&url)
-        .set("User-Agent", "thoriapp/1.0")
-        .timeout(std::time::Duration::from_secs(20))
-        .call()
-        .map_err(|e| format!("no se pudieron leer los reportes de Proton Pulse: {e}"))?
-        .into_string()
-        .map_err(|e| format!("respuesta ilegible de Proton Pulse: {e}"))?;
+    let body = crate::net::fetch_text(&url, std::time::Duration::from_secs(20))
+        .map_err(|e| format!("no se pudieron leer los reportes de Proton Pulse: {e}"))?;
 
     // El feed de un juego sin reportes es `[]`, que es válido: se guarda para no
     // repedirlo en cada apertura. Lo que no se guarda es algo que no parsea.

@@ -313,17 +313,17 @@ function buildWarnings(c: BenchmarkComparison): string[] {
 }
 
 const VERDICT_STYLE: Record<VerdictKind, { box: string; iconBox: string; text: string; Icon: typeof ThumbsUp }> = {
-  test:   { box: 'border-[var(--compatible)]/60 bg-[var(--compatible)]/10', iconBox: 'bg-[var(--compatible)]/20', text: 'text-[var(--compatible)]', Icon: ThumbsUp },
-  base:   { box: 'border-[var(--error)]/60 bg-[var(--error)]/10',           iconBox: 'bg-[var(--error)]/20',      text: 'text-[var(--error)]',      Icon: ThumbsDown },
-  trade:  { box: 'border-[var(--action)]/60 bg-[var(--action)]/10',         iconBox: 'bg-[var(--action)]/20',     text: 'text-[var(--action)]',     Icon: AlertCircle },
-  smooth: { box: 'border-[var(--action)]/60 bg-[var(--action)]/10',         iconBox: 'bg-[var(--action)]/20',     text: 'text-[var(--action)]',     Icon: Scale },
-  tie:    { box: 'border-[var(--border)] bg-[var(--bg)]',                   iconBox: 'bg-[var(--border)]/40',     text: 'text-[var(--text-muted)]', Icon: Scale },
+  test:   { box: 'border-compatible/60 bg-compatible/10', iconBox: 'bg-compatible/20', text: 'text-[var(--compatible)]', Icon: ThumbsUp },
+  base:   { box: 'border-error/60 bg-error/10',           iconBox: 'bg-error/20',      text: 'text-[var(--error)]',      Icon: ThumbsDown },
+  trade:  { box: 'border-action/60 bg-action/10',         iconBox: 'bg-action/20',     text: 'text-[var(--action)]',     Icon: AlertCircle },
+  smooth: { box: 'border-action/60 bg-action/10',         iconBox: 'bg-action/20',     text: 'text-[var(--action)]',     Icon: Scale },
+  tie:    { box: 'border-[var(--border)] bg-[var(--bg)]',                   iconBox: 'bg-border/40',     text: 'text-[var(--text-muted)]', Icon: Scale },
 };
 
 const LEVEL_STYLE: Record<Level, { chip: string; word: string }> = {
-  better: { chip: 'bg-[var(--compatible)]/15 text-[var(--compatible)]', word: 'Antes → ahora: mejor' },
-  same:   { chip: 'bg-[var(--border)]/40 text-[var(--text-muted)]',     word: 'Igual' },
-  worse:  { chip: 'bg-[var(--error)]/15 text-[var(--error)]',           word: 'Antes → ahora: peor' },
+  better: { chip: 'bg-compatible/15 text-[var(--compatible)]', word: 'Antes → ahora: mejor' },
+  same:   { chip: 'bg-border/40 text-[var(--text-muted)]',     word: 'Igual' },
+  worse:  { chip: 'bg-error/15 text-[var(--error)]',           word: 'Antes → ahora: peor' },
 };
 
 /* ─────────────────────────── Componentes pequeños ─────────────────────────── */
@@ -415,10 +415,10 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
             {rows.filter((r) => r.group === g.id).map((r) => {
               const chip =
                 r.winner === 'tie'
-                  ? 'bg-[var(--border)]/40 text-[var(--text-muted)]'
+                  ? 'bg-border/40 text-[var(--text-muted)]'
                   : r.gain > 0
-                  ? 'bg-[var(--compatible)]/15 text-[var(--compatible)]'
-                  : 'bg-[var(--error)]/15 text-[var(--error)]';
+                  ? 'bg-compatible/15 text-[var(--compatible)]'
+                  : 'bg-error/15 text-[var(--error)]';
               const word = r.winner === 'tie' ? 'Igual' : r.gain > 0 ? 'Mejor' : 'Peor';
 
               return (
@@ -502,12 +502,12 @@ export function ComparisonResultCard({
 
   return (
     <article
-      className="p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/10"
+      className="p-5 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-action/10"
     >
       <h3 className="text-base font-bold text-[var(--text)] mb-4">{title}</h3>
 
       {warnings.length > 0 && (
-        <div className="mb-4 p-3 rounded-lg bg-[var(--caution-bg)] border border-[var(--caution)]/50 space-y-1.5">
+        <div className="mb-4 p-3 rounded-lg bg-[var(--caution-bg)] border border-caution/50 space-y-1.5">
           {warnings.map((w) => (
             <p key={w} className="text-xs text-[var(--caution)] font-semibold flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
@@ -569,7 +569,7 @@ export function ComparisonResultCard({
         type="button"
         onClick={() => setShowDetails((s) => !s)}
         aria-expanded={showDetails}
-        className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm font-semibold text-[var(--text-muted)] bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 hover:text-[var(--text)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
+        className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm font-semibold text-[var(--text-muted)] bg-[var(--bg)] border border-[var(--border)] hover:border-action/50 hover:text-[var(--text)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
       >
         Ver detalles técnicos
         <ChevronDown className={`w-4 h-4 transition-transform duration-200 ${showDetails ? 'rotate-180' : ''}`} />
@@ -582,7 +582,7 @@ export function ComparisonResultCard({
         <button
           type="button"
           onClick={onClose}
-          className="w-full mt-4 px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] hover:border-[var(--action)]/50 transition-all duration-200"
+          className="w-full mt-4 px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] hover:border-action/50 transition-all duration-200"
         >
           {closeLabel}
         </button>
@@ -694,7 +694,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
       {toast && (
         <div
           role="status"
-          className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-[var(--action)]/20 text-sm font-semibold text-white"
+          className="fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl bg-[var(--surface)] border-2 border-[var(--action)] shadow-xl shadow-action/20 text-sm font-semibold text-white"
         >
           {toast}
         </div>
@@ -777,8 +777,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                     onClick={() => changeDuration(opt.seconds)}
                     className={`px-3 py-2.5 rounded-lg border-2 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] ${
                       active
-                        ? 'border-[var(--action)] bg-[var(--action)]/15'
-                        : 'border-[var(--border)] hover:border-[var(--action)]/50'
+                        ? 'border-[var(--action)] bg-action/15'
+                        : 'border-[var(--border)] hover:border-action/50'
                     }`}
                   >
                     <span className={`block text-sm font-bold ${active ? 'text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
@@ -830,8 +830,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                     onClick={() => changeWarmup(opt.seconds)}
                     className={`px-3 py-2.5 rounded-lg border-2 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] ${
                       active
-                        ? 'border-[var(--action)] bg-[var(--action)]/15'
-                        : 'border-[var(--border)] hover:border-[var(--action)]/50'
+                        ? 'border-[var(--action)] bg-action/15'
+                        : 'border-[var(--border)] hover:border-action/50'
                     }`}
                   >
                     <span className={`block text-sm font-bold ${active ? 'text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
@@ -899,7 +899,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
           <button
             onClick={analyzeLog}
             disabled={analyzing}
-            className="w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-[var(--action)]/20 hover:shadow-xl hover:shadow-[var(--action)]/30"
+            className="w-full px-4 py-2.5 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-action/20 hover:shadow-xl hover:shadow-action/30"
           >
             {analyzing ? (
               <>
@@ -934,7 +934,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             </h3>
             <button
               onClick={askDeleteAll}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 hover:border-[var(--error)]/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
               title="Borrar todo el historial de este juego"
             >
               <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
@@ -1055,7 +1055,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
                     <button
                       onClick={() => askDeleteBenchmark(bench.id)}
-                      className="p-2 rounded-lg text-[var(--error)] hover:bg-[var(--error)]/10 hover:scale-110 transition-all duration-200"
+                      className="p-2 rounded-lg text-[var(--error)] hover:bg-error/10 hover:scale-110 transition-all duration-200"
                       title="Eliminar benchmark"
                       aria-label="Eliminar benchmark"
                     >
@@ -1092,8 +1092,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             disabled={isCurrentSaved || savingComparison}
             className={`w-full mt-4 px-4 py-3 rounded-lg text-sm font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
               isCurrentSaved
-                ? 'bg-[var(--compatible)]/10 text-[var(--compatible)] border border-[var(--compatible)]/40 cursor-default'
-                : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)] shadow-lg shadow-[var(--action)]/20 disabled:opacity-50 disabled:cursor-not-allowed'
+                ? 'bg-compatible/10 text-[var(--compatible)] border border-compatible/40 cursor-default'
+                : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)] shadow-lg shadow-action/20 disabled:opacity-50 disabled:cursor-not-allowed'
             }`}
           >
             {isCurrentSaved ? (
@@ -1153,8 +1153,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
         {/* Pasos */}
         <div className="space-y-4">
-          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-action/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-action/20">
               1
             </div>
             <div className="flex-1">
@@ -1167,8 +1167,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             </div>
           </div>
 
-          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-action/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-action/20">
               2
             </div>
             <div className="flex-1">
@@ -1181,8 +1181,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             </div>
           </div>
 
-          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--action)]/50 transition-colors">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-[var(--action)]/20">
+          <div className="flex gap-4 p-4 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-action/50 transition-colors">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[var(--action)] to-[var(--action-hover)] flex items-center justify-center text-sm font-bold text-white shrink-0 shadow-lg shadow-action/20">
               3
             </div>
             <div className="flex-1">
@@ -1190,7 +1190,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
                 La comparación aparece sola, sin pulsar nada más. Te diremos quién gana y qué hacer.
               </p>
-              <div className="mt-2 p-2 rounded bg-[var(--caution)]/10 border border-[var(--caution)]/30">
+              <div className="mt-2 p-2 rounded bg-caution/10 border border-caution/30">
                 <p className="text-[11px] text-[var(--caution)] font-semibold">
                   💡 Fíjate primero en la Fluidez: un juego con más FPS pero con tirones se siente peor.
                 </p>
@@ -1221,7 +1221,7 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
         </div>
 
         {/* Ejemplo */}
-        <div className="mt-6 p-4 rounded-lg bg-gradient-to-r from-[#38bdf8]/10 to-[var(--caution)]/10 border border-[var(--border)]">
+        <div className="mt-6 p-4 rounded-lg bg-gradient-to-r from-[#38bdf8]/10 to-caution/10 border border-[var(--border)]">
           <h4 className="text-sm font-bold text-[var(--text)] mb-3">Ejemplo práctico</h4>
           <div className="space-y-2 text-xs text-[var(--text-muted)]">
             <div className="flex items-center gap-2">

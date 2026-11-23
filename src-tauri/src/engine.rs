@@ -212,6 +212,11 @@ fn engine_params(name: &str) -> Option<Vec<String>> {
 }
 
 /// `true` si el motor tiene rama propia (aunque no aporte parametros).
+///
+/// Solo se usa en `get_engine_recommendations` para avisar en **debug** de motores
+/// sin rama, y en los tests: en release sobra, y sin el `cfg` el compilador avisa
+/// de funcion muerta (y `npm run lint:rust` compila con `-D warnings`).
+#[cfg(debug_assertions)]
 pub fn engine_es_conocido(name: &str) -> bool {
     engine_params(name).is_some()
 }

@@ -77,13 +77,8 @@ pub fn scan_library() -> Vec<LibGame> {
 }
 
 fn get_json(url: &str) -> Result<serde_json::Value, String> {
-    ureq::get(url)
-        .set("User-Agent", "thoriapp/1.0")
-        .timeout(std::time::Duration::from_secs(10))
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_json::<serde_json::Value>()
-        .map_err(|e| e.to_string())
+    // Con tope de tamaño: la respuesta de Steam no la controla la app.
+    crate::net::fetch_json(url, std::time::Duration::from_secs(10))
 }
 
 pub fn search_store(term: &str) -> Result<Vec<LibGame>, String> {

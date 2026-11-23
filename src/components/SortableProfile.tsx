@@ -63,7 +63,7 @@ export function SortableProfile({ profile, isExpanded, onToggle, onCopy, onExpor
                 {profile.name}
               </h3>
               {profile.expert_mode && (
-                <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--action)]/10 text-[var(--action)] border border-[var(--action)]/30 shrink-0">
+                <span className="text-[10px] px-2 py-0.5 rounded bg-action/10 text-[var(--action)] border border-action/30 shrink-0">
                   Experto
                 </span>
               )}
@@ -130,7 +130,7 @@ export function SortableProfile({ profile, isExpanded, onToggle, onCopy, onExpor
                 </button>
                 <button
                   onClick={onDelete}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--error)]/10 text-[var(--error)] border border-[var(--error)]/30 hover:bg-[var(--error)]/20 transition-colors"
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 transition-colors"
                 >
                   Eliminar
                 </button>
