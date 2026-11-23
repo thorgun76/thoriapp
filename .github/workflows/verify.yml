@@ -1,0 +1,99 @@
+name: Verificación
+
+# Cuatro cosas, en orden de lo más barato a lo más caro:
+#   1. Dependencias de JS (solo producción: es lo que se publica)
+#   2. Tipos y tests del frontend
+#   3. Vulnerabilidades de Rust (cargo audit)
+#   4. Rust: tests y clippy
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  # Permite lanzarlo a mano desde la pestaña Actions.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dependencias:
+    name: Dependencias de JS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Bloqueante: son las que se empaquetan en la app que recibe el usuario.
+      # Con `--omit=dev` se ignoran esbuild/vite/vitest, que solo se usan para
+      # construir y nunca llegan al binario.
+      - name: Auditoría de dependencias de producción
+        run: npm audit --omit=dev
+
+      # Informativo: las de desarrollo no se publican, pero verlas ayuda a
+      # decidir cuándo actualizar. No rompe la build.
+      - name: Auditoría de dependencias de desarrollo (informativa)
+        run: npm audit || true
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - name: Tipos
+        run: npx tsc --noEmit
+      - name: Tests
+        run: npx vitest run
+      - name: Build
+        run: npm run build
+
+  rust-audit:
+    name: Vulnerabilidades de Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Se audita el Cargo.lock, así que no hace falta compilar ni instalar GTK.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  rust:
+    name: Rust (tests y clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencias de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev pkg-config libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --bins
+
+      - name: Clippy (los avisos son errores)
+        working-directory: src-tauri
+        run: cargo clippy --bins -- -D warnings
