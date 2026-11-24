@@ -81,6 +81,32 @@ export interface GameRules {
   has_rules: boolean;
 }
 
+/**
+ * De dónde salió el comando que se guarda con una grabación.
+ *
+ * Existe para poder auditar una prueba después: ver una prueba con `%command%` no dice si
+ * de verdad no había ajustes o si el dato se leyó en el momento equivocado.
+ *
+ * - `instantanea`: tomado al detectar la grabación. Es el bueno.
+ * - `comando_actual`: la instantánea estaba vacía y se usó el comando del editor al
+ *   guardar. Puede no ser el de la grabación.
+ * - `desconocido`: no había ningún comando; la prueba queda como «no registrado».
+ */
+export type OrigenComando = 'instantanea' | 'comando_actual' | 'desconocido';
+
+/**
+ * Opciones de lanzamiento leídas de Steam (`userdata/<id>/config/localconfig.vdf`).
+ *
+ * Solo lectura: Thoriapp nunca escribe en Steam (Steam reescribe `LaunchOptions` al
+ * cerrarse y perdería el cambio).
+ */
+export interface OpcionesSteam {
+  /** Texto exacto de `LaunchOptions`. `''` = Steam las tiene vacías. */
+  opciones: string;
+  /** Cuenta de Steam de la que se leyeron. */
+  cuenta: string;
+}
+
 export interface GameInfo {
   name?: string;
   native?: boolean;
@@ -185,7 +211,38 @@ export interface Benchmark {
   frame_time_1_percent_high: number;
   total_frames: number;
   notes: string | null;
+  /**
+   * Comando configurado en Thoriapp **cuando se capturó la grabación**. Texto original,
+   * sin normalizar. Vacío en pruebas guardadas antes de que se registrara: nunca se
+   * inventa `%command%`.
+   */
   launch_command: string;
+  /**
+   * De dónde salió `launch_command`. Ausente en pruebas antiguas (= `desconocido`).
+   * Sirve para auditar: una prueba con `%command%` y origen `instantanea` significa «de
+   * verdad no había ajustes»; con origen `comando_actual`, que el dato se leyó al guardar.
+   */
+  origen_comando?: OrigenComando;
+  /**
+   * Opciones que **Steam** tenía configuradas cuando se guardó la prueba.
+   *
+   * Es el comando que de verdad se ejecutó al entrar al juego, así que es el que dice con
+   * qué argumento se hizo la prueba. `launch_command` es lo que Thoriapp proponía en su
+   * editor y puede no coincidir (el usuario copia a Steam a mano).
+   *
+   * `undefined`/`null` = no se pudo leer Steam. `''` = se leyó y estaba vacío, que es un
+   * dato real: la prueba se lanzó sin argumentos.
+   */
+  steam_command?: string | null;
+  /**
+   * Número de presentación de la grabación dentro de su juego («Prueba N»).
+   *
+   * Lo asigna el backend una sola vez al guardar y no cambia nunca: sobrevive a borrar
+   * otras pruebas y al recorte del historial. Ausente/`null` en grabaciones anteriores a
+   * este campo; no se les inventa una cronología, así que la interfaz las llama «Prueba
+   * sin número».
+   */
+  number?: number | null;
   // Solo existen en benchmarks guardados con la versión nueva
   spikes_per_min?: number | null;
   pct_over_33ms?: number | null;
@@ -200,6 +257,29 @@ export interface Benchmark {
    * Es donde aparece la compilación de shaders la primera vez. `null` = sin datos.
    */
   shader_stutter?: ShaderStutter | null;
+  /**
+   * Ruta del CSV del que salió la grabación. Es su identidad: dos análisis del mismo
+   * fichero dan las mismas cifras. Vacío en benchmarks guardados antes de este campo.
+   */
+  log_path?: string;
+  /**
+   * Número de muestras del log. Es lo que `total_frames` contiene de verdad: MangoHud
+   * guarda ~10 filas por segundo, no un frame por fila.
+   */
+  sample_count?: number | null;
+  /**
+   * Serie temporal para el gráfico de frametime. Ausente en las pruebas guardadas antes
+   * de que existiera este campo (no se inventan datos para ellas).
+   */
+  muestras_temporales?: MuestrasTemporales | null;
+}
+
+/** Serie temporal de una grabación (frametime medio por muestra). */
+export interface MuestrasTemporales {
+  /** Frametime de cada muestra, en milisegundos. */
+  frame_time_ms: number[];
+  /** Instante de cada muestra en segundos desde el inicio. Vacío si el log no traía `elapsed`. */
+  elapsed_s?: number[];
 }
 
 /** Arranque vs resto de una grabación (lo calcula el backend). */
@@ -246,6 +326,34 @@ export interface BenchmarkComparison {
   noise_percent?: number | null;
   /** `true` cuando el cambio de FPS entra dentro de ese margen. */
   within_noise?: boolean;
+  /**
+   * `true` solo si los comandos registrados de las dos grabaciones son exactamente el
+   * mismo texto. `null`/`undefined` = alguno no está registrado (pruebas antiguas).
+   */
+  comandos_iguales?: boolean | null;
+}
+
+/**
+ * Comparación de **grupos** de grabaciones (varias por configuración).
+ *
+ * La comparación de dos grabaciones sueltas no distingue una mejora real del ruido
+ * del juego; con 3 o más por lado el backend da un intervalo de confianza.
+ */
+export interface GroupComparison {
+  /** `avg_fps` | `fps1_percent_low` | `fps01_percent_low`. */
+  metric: string;
+  antes_runs: number;
+  despues_runs: number;
+  antes_median: number;
+  despues_median: number;
+  change_percent: number;
+  ci_low_percent: number;
+  ci_high_percent: number;
+  /** Margen mínimo exigido a esta métrica (%), que crece con los percentiles. */
+  required_margin_percent: number;
+  /** `mejora` | `empeora` | `no_concluyente`. */
+  verdict: string;
+  conclusion: string;
 }
 
 /** Datos de anti-cheat de un juego (fuente: AreWeAntiCheatYet). */
@@ -327,4 +435,39 @@ export interface RequirementsReport {
   proton_margin: number;
   margin_note: string;
   raw: Requirement[];
+}
+
+/**
+ * Estado de la configuración **en el momento de grabar**.
+ *
+ * El comando de lanzamiento hay que apuntarlo al empezar la grabación, no al guardarla:
+ * si se lee al guardar, refleja lo que el usuario tiene ahora en la app (que puede haber
+ * cambiado, o ser el `%command%` por defecto si no hay reglas cargadas) y la comparación
+ * acaba diciendo que las dos grabaciones tuvieron el mismo comando. Aquí se guarda lo que
+ * de verdad estaba puesto cuando se pulsó Shift+F2.
+ */
+export interface RecordedSetup {
+  /** Comando completo tal como estaba (p. ej. `MANGOHUD=1 gamemoderun mangohud %command%`). */
+  command: string;
+  /** Nombre del perfil activo en ese momento, si había uno. */
+  profileName?: string;
+  /** Segundos que duró (o se esperaba que durara) la grabación, si se conocía. */
+  expectedSeconds?: number;
+  /** Cuándo se pulsó grabar, en ISO. */
+  at: string;
+}
+
+/**
+ * Grabación de MangoHud que ya terminó (MangoHud escribió su `_summary.csv`).
+ *
+ * Se detecta vigilando la carpeta de logs: así el usuario graba con `Shift+F2` dentro del
+ * juego y no tiene que ir a buscar el fichero a mano después.
+ */
+export interface FinishedLog {
+  /** Ruta del CSV de datos, no del `_summary.csv`. */
+  path: string;
+  /** Ejecutable tal cual lo nombra MangoHud (`7DaysToDie.x86_64`, `Palworld-Win64-Shipping`). */
+  program: string;
+  /** Marca de tiempo del nombre, `YYYY-MM-DD_HH-MM-SS`. */
+  timestamp: string;
 }

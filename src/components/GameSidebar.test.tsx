@@ -25,30 +25,81 @@ const hardware: Hardware = {
 
 describe('GameSidebar', () => {
   it('titula el bloque como «Tu hardware», sin el «perfil de»', () => {
-    render(<GameSidebar hardware={hardware} onMeasurePerformance={vi.fn()} />);
+    render(
+      <GameSidebar
+        hardware={hardware}
+        onMeasurePerformance={vi.fn()}
+        onShowGameTests={vi.fn()}
+      />
+    );
 
     expect(screen.getByText('Tu hardware')).toBeTruthy();
     expect(screen.queryByText(/Tu perfil de hardware/)).toBeNull();
   });
 
   it('no ofrece «Ajustar optimización»: ya se está en la vista del juego', () => {
-    render(<GameSidebar hardware={hardware} onMeasurePerformance={vi.fn()} />);
+    render(
+      <GameSidebar
+        hardware={hardware}
+        onMeasurePerformance={vi.fn()}
+        onShowGameTests={vi.fn()}
+      />
+    );
 
     expect(screen.queryByText(/Ajustar optimización/)).toBeNull();
   });
 
   it('no muestra el bloque de fuentes verificables', () => {
-    render(<GameSidebar hardware={hardware} onMeasurePerformance={vi.fn()} />);
+    render(
+      <GameSidebar
+        hardware={hardware}
+        onMeasurePerformance={vi.fn()}
+        onShowGameTests={vi.fn()}
+      />
+    );
 
     expect(screen.queryByText(/Fuentes verificables/)).toBeNull();
   });
 
-  it('mantiene la acción de medir y comparar', () => {
-    const onMeasurePerformance = vi.fn();
-    render(<GameSidebar hardware={hardware} onMeasurePerformance={onMeasurePerformance} />);
+  it('ya no ofrece «Medir y comparar»: la ventana de pruebas ya lleva a Benchmarks', () => {
+    // Tenías dos botones para lo mismo. Ahora «Pruebas del juego» es la única acción y
+    // desde dentro está «Medir una prueba nueva».
+    render(
+      <GameSidebar
+        hardware={hardware}
+        onMeasurePerformance={vi.fn()}
+        onShowGameTests={vi.fn()}
+      />
+    );
 
-    fireEvent.click(screen.getByText(/Medir y comparar/));
+    expect(screen.queryByText(/Medir y comparar/)).toBeNull();
+  });
 
-    expect(onMeasurePerformance).toHaveBeenCalledTimes(1);
+  // «Pruebas del juego» abre el historial filtrado a este juego. Vive aquí, en las
+  // acciones rápidas de la ficha, y no en el ranking global de la barra lateral, que
+  // mezclaba grabaciones de juegos distintos.
+  it('ofrece «Pruebas del juego» como acción rápida', () => {
+    const onShowGameTests = vi.fn();
+    render(
+      <GameSidebar
+        hardware={hardware}
+        onMeasurePerformance={vi.fn()}
+        onShowGameTests={onShowGameTests}
+      />
+    );
+
+    fireEvent.click(screen.getByText(/Pruebas del juego/));
+
+    expect(onShowGameTests).toHaveBeenCalledTimes(1);
+  });
+
+  it('«Pruebas del juego» es la única acción rápida', () => {
+    render(
+      <GameSidebar hardware={hardware} onMeasurePerformance={vi.fn()} onShowGameTests={vi.fn()} />
+    );
+
+    // Un solo botón dentro del bloque de acciones rápidas.
+    const acciones = screen.getByText('Acciones rápidas').parentElement!;
+    expect(acciones.querySelectorAll('button')).toHaveLength(1);
   });
 });

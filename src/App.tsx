@@ -27,6 +27,10 @@ const BenchmarksView = lazy(() =>
 const DashboardView = lazy(() =>
   import('./components/DashboardView').then((m) => ({ default: m.DashboardView }))
 );
+// Se abre desde la ficha del juego: se carga al pulsar «Pruebas del juego», no antes.
+const PruebasJuego = lazy(() =>
+  import('./components/PruebasJuego').then((m) => ({ default: m.PruebasJuego }))
+);
 import { Sidebar } from './components/Sidebar';
 import { LibraryView } from './components/LibraryView';
 import { SaveProfileModal } from './components/SaveProfileModal';
@@ -53,6 +57,13 @@ import { useLibrary } from './hooks/useLibrary';
 import { useProfiles } from './hooks/useProfiles';
 import { useGameDetails } from './hooks/useGameDetails';
 import { useRuntimeEnv } from './hooks/useRuntimeEnv';
+import { usarOpcionesSteam } from './hooks/useSteamLaunch';
+import {
+  claveJuego,
+  comandoManualDe,
+  editandoAMano,
+  restablecerJuego,
+} from './lib/comandoManual';
 import { useConfirm, useToast } from './hooks/useConfirm';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { missingReason, recommendationStatus } from './lib/recommendations';
@@ -108,6 +119,17 @@ const fileSafeName = (s: string) => s.replace(/[/\\:*?"<>|]/g, '-').trim();
 function App() {
   // Estados principales
   const [sidebarView, setSidebarView] = useState<SidebarView>('library');
+  /**
+   * Ventana «Pruebas de este juego», abierta desde las acciones rápidas de la ficha.
+   *
+   * Es el historial del juego abierto, no el global: comparar 1 % lows entre juegos
+   * distintos no significa nada. Aquí solo se consulta y se borra; para medir se lleva a
+   * la pestaña Benchmarks, que sí sabe capturar y analizar.
+   */
+  const [pruebasDeJuego, setPruebasDeJuego] = useState<{
+    appid: number;
+    gameName: string;
+  } | null>(null);
   const [view, setView] = useState<View>('recommendations');
   // Hardware: detectado una sola vez por su propio hook (ver src/hooks/useHardware.ts)
   const { hw } = useHardware();
@@ -191,9 +213,26 @@ function App() {
   // Fase 3: Toggle para forzar Proton en juegos nativos
   const [forceProton, setForceProton] = useState(false);
 
-  // Fase 4: Editor manual del comando
-  const [manualCommand, setManualCommand] = useState<string>('');
-  const [useManualCommand, setUseManualCommand] = useState(false);
+  // Fase 4: Editor manual del comando.
+  //
+  // El comando manual es **por juego**, no global. Guardarlo en un único estado hacía que
+  // traer el comando de Steam para Palworld lo mostrara también en todos los demás juegos,
+  // que es un fallo de datos: cada juego tiene su propia línea de lanzamiento en Steam.
+  // Se indexa por la clave del juego, que ya distingue un AppID de 0 (juego sin vincular)
+  // y de un id no numérico (Lutris/Heroic).
+  const [manualCommands, setManualCommands] = useState<Record<string, string>>({});
+  // Qué juegos están con el editor manual activo. También por juego: activarlo en uno no
+  // debe activarlo en el resto.
+  const [manualEditingKeys, setManualEditingKeys] = useState<Record<string, boolean>>({});
+
+  const clave = claveJuego(current);
+  const manualCommand = comandoManualDe(manualCommands, clave);
+  const useManualCommand = editandoAMano(manualEditingKeys, clave);
+
+  const setManualCommand = (valor: string) =>
+    setManualCommands((prev) => ({ ...prev, [clave]: valor }));
+  const setUseManualCommand = (valor: boolean) =>
+    setManualEditingKeys((prev) => ({ ...prev, [clave]: valor }));
 
   // Nombre del archivo que se está importando, solo para enseñarlo en la vista previa.
   const [importFileName, setImportFileName] = useState<string>('perfiles.json');
@@ -466,7 +505,11 @@ function App() {
       // muestra el problema y bloquea copiar/guardar: ver `manualCommandCheck`.
       return manualCommand.trim();
     }
-    if (!rules) return '%command%';
+    // Sin reglas cargadas no se sabe qué comando hay: devolver `%command%` aquí es lo que
+    // hacía que una grabación guardada justo al abrir la ficha (o con la carga de reglas
+    // aún en curso) registrara «sin ajustes» aunque el editor estuviera a medias. Se
+    // devuelve vacío, que significa «no registrado», y la caja lo dice así.
+    if (!rules) return '';
 
     const { envVars, wrappers, args } = commandParts();
     if (envVars.length === 0 && wrappers.length === 0 && args.length === 0) {
@@ -474,6 +517,15 @@ function App() {
     }
     return joinCommand({ envVars, wrappers, args });
   };
+
+  /**
+   * Lo que Steam tiene configurado para este juego.
+   *
+   * Se consulta una vez por juego abierto. Solo lectura: la app nunca escribe en
+   * `localconfig.vdf` (Steam reescribe `LaunchOptions` al cerrarse). Si Steam responde
+   * con otro comando, se ofrece traerlo al editor; no se aplica solo.
+   */
+  const steam = usarOpcionesSteam(current?.appid, launchLine());
 
   const copyCmd = async () => {
     if (blockedByAnticheat) {
@@ -807,6 +859,17 @@ function App() {
                       setEnabled(new Array(rules.params.length).fill(false));
                       setSelectedCommunityRecs(new Set());
                       setSelectedEngineRecs(new Set());
+                      // Restablecer devuelve el comando a `%command%`: incluye salir del
+                      // editor manual. Antes se vaciaban los ajustes pero el texto escrito
+                      // a mano (o el traído de Steam) seguía ahí, así que el botón no
+                      // devolvía lo que promete.
+                      const limpio = restablecerJuego(
+                        manualCommands,
+                        manualEditingKeys,
+                        clave
+                      );
+                      setManualEditingKeys(limpio.activos);
+                      setManualCommands(limpio.comandos);
                       setToast('Opciones restablecidas al comando base');
                     }}
                     onToggleManualEditing={() => {
@@ -814,6 +877,17 @@ function App() {
                       if (!useManualCommand) setManualCommand(launchLine());
                     }}
                     onManualCommandChange={setManualCommand}
+                    // Steam ya puede tener otro comando: se ofrece traerlo, sin tocar
+                    // Steam ni sobrescribir el editor por nuestra cuenta.
+                    steamOpciones={steam.discrepancia?.difiere ? steam.discrepancia.steam : null}
+                    onImportarDeSteam={() => {
+                      if (!steam.discrepancia) return;
+                      // Se pasa al modo manual con el texto de Steam: es lo que permite
+                      // comparar en las pruebas contra el comando que él usa de verdad.
+                      setUseManualCommand(true);
+                      setManualCommand(steam.discrepancia.steam.opciones);
+                      setToast('Comando de Steam traído a Thoriapp (Steam no se ha modificado)');
+                    }}
                   />
 
                   {/* TABS: Compatibilidad, Optimización */}
@@ -886,6 +960,12 @@ function App() {
                         setSidebarView('benchmarks');
                         setToast('Graba con MangoHud y analiza aquí el resultado');
                       }}
+                      onShowGameTests={() =>
+                        setPruebasDeJuego({
+                          appid: current.appid,
+                          gameName: current.name,
+                        })
+                      }
                     />
                   </div>
                 </div>
@@ -1026,6 +1106,10 @@ function App() {
                       currentAppid={current?.appid}
                       currentGameName={current?.name}
                       currentLaunchCommand={launchLine()}
+                      currentProfileName={activeProfile?.name}
+                      // Sin juego abierto no hay comando que registrar: la vista lo avisa
+                      // en vez de guardar una prueba con un comando inventado.
+                      hayJuegoAbierto={!!current}
                       mangohudLogPath={mangohudLogPath}
                       onLogPathChange={setMangohudLogPath}
                     />
@@ -1059,6 +1143,23 @@ function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Pruebas del juego abierto: solo lectura y borrado, sin capturar nada. «Medir
+          una prueba nueva» lleva a Benchmarks con el juego ya abierto, que es donde el
+          formulario de análisis tiene sentido. */}
+      {pruebasDeJuego && (
+        <Suspense fallback={null}>
+          <PruebasJuego
+            appid={pruebasDeJuego.appid}
+            gameName={pruebasDeJuego.gameName}
+            onClose={() => setPruebasDeJuego(null)}
+            onMedir={() => {
+              setPruebasDeJuego(null);
+              setSidebarView('benchmarks');
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* Diálogos propios: el nativo del sistema rompería el estilo de la app */}
       {confirmState && <ConfirmDialog state={confirmState} onClose={close} />}

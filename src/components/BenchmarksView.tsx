@@ -1,16 +1,29 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { Benchmark, BenchmarkComparison } from '../lib/types';
+import type { RecordedSetup, Benchmark, BenchmarkComparison, GroupComparison } from '../lib/types';
+import { api } from '../lib/api';
 import { useMangoHud } from '../hooks/useMangoHud';
 import { useBenchmarks } from '../hooks/useBenchmarks';
 import { useShaderCache } from '../hooks/useShaderCache';
 import { ShaderStutterCard } from './ShaderStutterCard';
 import { useComparison } from '../hooks/useComparison';
+import { useLogWatcher } from '../hooks/useLogWatcher';
 import { useConfirm, useToast } from '../hooks/useConfirm';
 import { ConfirmDialog } from './ConfirmDialog';
 import { fmtDuration, formatTimestamp } from '../lib/format';
-import { MIN_TIE, marginLabel, tieThreshold } from '../lib/noise';
+import { tieThreshold, marginLabel } from '../lib/noise';
+import { MIN_TIE_PERCENT } from '../lib/umbrales';
+import {
+  interpretar, ANTES, DESPUES,
+  type Tono, type CambioMetrica, type Ganador,
+} from '../lib/interpretacion';
+import { estabilidad } from '../lib/estabilidad';
+import { etiquetasDe, titularDelCambio, mejorObservada } from '../lib/interpretacion';
+import { GroupComparisonCard } from './GroupComparisonCard';
+import { Toggle } from './Toggle';
 import { openExternal } from '../lib/links';
+import { sufijoOrigen, textoComando } from '../lib/pruebaLabel';
+import { PruebaN } from './PruebaN';
 import {
   Upload, Trash2, BarChart3, AlertCircle, Zap, FileText, Search,
   Clock, Gamepad2, Gauge, Activity, ChevronDown, Timer, ThumbsUp, ThumbsDown,
@@ -44,17 +57,23 @@ interface BenchmarksViewProps {
   currentAppid?: number;
   currentGameName?: string;
   currentLaunchCommand?: string;
+  /** Nombre del perfil activo, para dejarlo apuntado con la grabación. */
+  currentProfileName?: string;
   mangohudLogPath?: string;
   onLogPathChange?: (path: string) => void;
+  /**
+   * ¿Hay un juego abierto ahora mismo?
+   *
+   * Importa porque llegados aquí desde la barra lateral (`Pruebas`, `Benchmarks`) no
+   * tiene por qué haber ninguno: la app permite ver el historial sin abrir un juego. Sin
+   * juego abierto no se sabe qué comando había, y guardar `%command%` sería inventárselo.
+   */
+  hayJuegoAbierto?: boolean;
 }
 
 /* ─────────────────────── Constantes y utilidades ─────────────────────── */
 
 // La más reciente va en azul (#38bdf8); el resto, neutro. Verde y rojo se reservan para "mejor" y "peor".
-
-// Diferencias menores a este % se consideran "igual" (MangoHud tiene algo de ruido entre grabaciones).
-// Cada grabación trae su propio margen estimado; si es mayor, manda el suyo (ver noise.ts).
-const TIE = MIN_TIE;
 
 // Grabaciones más cortas que esto dan resultados poco fiables
 const SHORT_SECONDS = 45;
@@ -77,13 +96,18 @@ const WARMUP_OPTIONS = [
 
 const DEFAULT_WARMUP = 10;
 const WARMUP_STORAGE_KEY = 'mangohud_warmup_seconds';
+/** Recuerda si la recogida automática de grabaciones está activada. */
+const AUTO_RECOGER_KEY = 'mangohud_auto_recoger';
 
-/** Fluidez 0-100: qué parte de tu velocidad media se mantiene en los peores momentos. */
+/**
+ * Estabilidad 0-100: qué parte de tu velocidad media se mantiene en los peores momentos.
+ *
+ * Se delega en `lib/estabilidad.ts`, que sanea NaN/∞/negativos y satura a 100. Aquí se
+ * devuelve 0 solo para que `buildRows` (que trabaja con `number`) siga funcionando; los
+ * datos inválidos se detectan en `lib/interpretacion.ts`, que es quien decide el veredicto.
+ */
 function smoothScore(b: Benchmark): number {
-  if (!b.avg_fps) return 0;
-  const c1 = b.fps_1_percent_low / b.avg_fps;
-  const c01 = b.fps_0_1_percent_low / b.avg_fps;
-  return Math.max(0, Math.min(100, ((2 * c1 + c01) / 3) * 100));
+  return estabilidad(b.avg_fps, b.fps_1_percent_low, b.fps_0_1_percent_low) ?? 0;
 }
 
 function smoothLabel(score: number): string {
@@ -130,17 +154,17 @@ function makeRow(d: RowDef): MetricRow {
   const denom = Math.max(Math.abs(d.base), d.floor);
   const change = ((d.test - d.base) / denom) * 100;
   const gain = d.higherIsBetter ? change : -change;
-  const winner: Winner = winnerOf(gain, TIE);
+  const winner: Winner = winnerOf(gain, MIN_TIE_PERCENT);
   return { ...d, change, gain, winner };
 }
 
 /** Recalcula los ganadores con el margen de ruido real de las dos grabaciones. */
 function applyTie(rows: MetricRow[], tie: number): MetricRow[] {
-  if (!Number.isFinite(tie) || tie <= TIE) return rows;
+  if (!Number.isFinite(tie) || tie <= MIN_TIE_PERCENT) return rows;
   return rows.map((r) => ({ ...r, winner: winnerOf(r.gain, tie) }));
 }
 
-function buildRows(c: BenchmarkComparison): MetricRow[] {
+export function buildRows(c: BenchmarkComparison): MetricRow[] {
   const b = c.baseline;
   const t = c.test;
 
@@ -156,8 +180,8 @@ function buildRows(c: BenchmarkComparison): MetricRow[] {
       higherIsBetter: false, weight: 0, floor: 0.01,
     }),
     makeRow({
-      key: 'smooth', group: 'smooth', label: 'Fluidez', hint: 'Más alto = más parejo',
-      base: smoothScore(b), test: smoothScore(t), decimals: 0, unit: '%',
+      key: 'smooth', group: 'smooth', label: 'Estabilidad de FPS', hint: 'Índice propio de Thoriapp, sobre 100. Más alto = más parejo',
+      base: smoothScore(b), test: smoothScore(t), decimals: 0, unit: '',
       higherIsBetter: true, weight: 3, floor: 1,
     }),
     makeRow({
@@ -201,129 +225,31 @@ function buildRows(c: BenchmarkComparison): MetricRow[] {
   return applyTie(rows, tieThreshold(c.noise_percent));
 }
 
-const clamp = (n: number, lim = 50) => Math.max(-lim, Math.min(lim, n));
+/**
+ * Nivel de una familia de métricas para el chip de cada tarjeta.
+ *
+ * Ya no hay puntuación ponderada (los pesos 3/2/1 se han retirado): el resultado lo
+ * decide `interpretar()` en `lib/interpretacion.ts`, que es el único intérprete que
+ * queda. Aquí solo se traduce el cambio de una métrica a su etiqueta visual.
+ */
+const levelOfCambio = (c: CambioMetrica): Level =>
+  c === 'mejor' ? 'better' : c === 'peor' ? 'worse' : 'same';
 
-function groupScore(rows: MetricRow[], group: Group): number {
-  const voters = rows.filter((r) => r.group === group && r.weight > 0);
-  const total = voters.reduce((s, r) => s + r.weight, 0);
-  if (!total) return 0;
-  return voters.reduce((s, r) => s + r.weight * clamp(r.gain), 0) / total;
-}
+/** Nombres visibles de cada grabación. Únicos para toda la aplicación. */
+export { ANTES as NOMBRE_ANTES, DESPUES as NOMBRE_DESPUES };
 
-const levelOf = (g: number, tie: number = TIE): Level => (g > tie ? 'better' : g < -tie ? 'worse' : 'same');
-
-type VerdictKind = 'test' | 'base' | 'trade' | 'smooth' | 'tie';
-
-interface Verdict {
-  kind: VerdictKind;
-  title: string;
-  detail: string;
-  advice: string;
-  speed: number;
-  smooth: number;
-}
-
-/** La fluidez pesa más que los FPS: un juego con más FPS pero con tirones se siente peor. */
-function buildVerdict(rows: MetricRow[], tie: number = TIE): Verdict {
-  const speed = groupScore(rows, 'speed');
-  const smooth = groupScore(rows, 'smooth');
-  const base = { speed, smooth };
-
-  if (smooth < -tie && speed > tie) {
-    return {
-      ...base, kind: 'trade',
-      title: 'Más FPS, pero con más tirones',
-      detail: 'El juego va más rápido, pero se siente menos suave.',
-      advice: 'Si notas tirones al jugar, mejor desactiva este cambio.',
-    };
-  }
-  if (smooth < -tie) {
-    return {
-      ...base, kind: 'base',
-      title: 'Gana la grabación anterior',
-      detail: speed < -tie ? 'La nueva va más lenta y con más tirones.' : 'La nueva se siente menos suave.',
-      advice: 'Mejor desactiva este cambio.',
-    };
-  }
-  if (smooth > tie && speed < -tie) {
-    return {
-      ...base, kind: 'smooth',
-      title: 'Menos FPS, pero más suave',
-      detail: 'El juego va algo más lento, pero se siente más parejo.',
-      advice: 'Si prefieres suavidad antes que FPS, este cambio te conviene.',
-    };
-  }
-  if (smooth > tie) {
-    return {
-      ...base, kind: 'test',
-      title: 'Gana la grabación nueva',
-      detail: speed > tie ? 'Va más rápido y se siente más suave.' : 'Se siente más suave, con la misma velocidad.',
-      advice: 'Puedes dejar este cambio activado.',
-    };
-  }
-  if (speed > tie) {
-    return {
-      ...base, kind: 'test',
-      title: 'La grabación nueva va más rápido',
-      detail: 'Más FPS, y la suavidad se mantiene igual.',
-      advice: 'Puedes dejar este cambio activado.',
-    };
-  }
-  if (speed < -tie) {
-    return {
-      ...base, kind: 'base',
-      title: 'Gana la grabación anterior',
-      detail: 'La nueva va más lenta y no gana suavidad.',
-      advice: 'Mejor desactiva este cambio.',
-    };
-  }
-  return {
-    ...base, kind: 'tie',
-    title: 'Sin diferencias importantes',
-    detail: `Las dos grabaciones se comportan casi igual: la diferencia entra dentro del ruido (±${Math.round(tie)}%).`,
-    advice: 'Este cambio no se nota. Da igual dejarlo o no.',
-  };
-}
-
-const normName = (n: string) => n.toLowerCase().replace(/\.(x86_64|x86|exe|bin)$/, '').trim();
-
-/** Segundos que de verdad se analizaron (descontando el calentamiento descartado). */
-const analyzedSeconds = (b: Benchmark) =>
-  Math.max(0, b.duration_seconds - (b.warmup_seconds ?? 0));
-
-function buildWarnings(c: BenchmarkComparison): string[] {
-  const w: string[] = [];
-  const a = c.baseline;
-  const b = c.test;
-
-  if (normName(a.game_name) !== normName(b.game_name)) {
-    w.push('Las grabaciones son de juegos distintos, así que la comparación puede no ser justa.');
-  }
-  if (a.duration_seconds > 0 && Math.abs(a.duration_seconds - b.duration_seconds) / a.duration_seconds > 0.3) {
-    w.push('Las dos grabaciones duran muy distinto. Repite la prueba con la misma duración.');
-  }
-  if (analyzedSeconds(a) < SHORT_SECONDS || analyzedSeconds(b) < SHORT_SECONDS) {
-    w.push('Alguna grabación dura menos de 45 s, y el resultado puede variar. Prueba con 1 minuto.');
-  }
-  // Solo se avisa si las dos grabaciones se analizaron enteras (dato explícito).
-  if (a.warmup_seconds === 0 && b.warmup_seconds === 0) {
-    w.push('Se midió también el arranque de las dos grabaciones. Si empezaste a grabar en el menú o la carga, esa parte ensucia el resultado.');
-  }
-  return w;
-}
-
-const VERDICT_STYLE: Record<VerdictKind, { box: string; iconBox: string; text: string; Icon: typeof ThumbsUp }> = {
-  test:   { box: 'border-compatible/60 bg-compatible/10', iconBox: 'bg-compatible/20', text: 'text-[var(--compatible)]', Icon: ThumbsUp },
-  base:   { box: 'border-error/60 bg-error/10',           iconBox: 'bg-error/20',      text: 'text-[var(--error)]',      Icon: ThumbsDown },
-  trade:  { box: 'border-action/60 bg-action/10',         iconBox: 'bg-action/20',     text: 'text-[var(--action)]',     Icon: AlertCircle },
-  smooth: { box: 'border-action/60 bg-action/10',         iconBox: 'bg-action/20',     text: 'text-[var(--action)]',     Icon: Scale },
-  tie:    { box: 'border-[var(--border)] bg-[var(--bg)]',                   iconBox: 'bg-border/40',     text: 'text-[var(--text-muted)]', Icon: Scale },
+/** Color de cada estado del resultado, compartido con la vista de pruebas guardadas. */
+export const TONO_STYLE: Record<Tono, { box: string; iconBox: string; text: string; Icon: typeof ThumbsUp }> = {
+  bien:     { box: 'border-compatible/60 bg-compatible/10', iconBox: 'bg-compatible/20', text: 'text-[var(--compatible)]', Icon: ThumbsUp },
+  mal:      { box: 'border-error/60 bg-error/10',           iconBox: 'bg-error/20',      text: 'text-[var(--error)]',      Icon: ThumbsDown },
+  atencion: { box: 'border-caution/60 bg-caution/10',       iconBox: 'bg-caution/20',    text: 'text-[var(--caution)]',    Icon: Scale },
+  neutro:   { box: 'border-[var(--border)] bg-[var(--bg)]', iconBox: 'bg-border/40',     text: 'text-[var(--text-muted)]', Icon: Scale },
 };
 
 const LEVEL_STYLE: Record<Level, { chip: string; word: string }> = {
-  better: { chip: 'bg-compatible/15 text-[var(--compatible)]', word: 'Antes → ahora: mejor' },
+  better: { chip: 'bg-compatible/15 text-[var(--compatible)]', word: 'Mejor' },
   same:   { chip: 'bg-border/40 text-[var(--text-muted)]',     word: 'Igual' },
-  worse:  { chip: 'bg-error/15 text-[var(--error)]',           word: 'Antes → ahora: peor' },
+  worse:  { chip: 'bg-error/15 text-[var(--error)]',           word: 'Peor' },
 };
 
 /* ─────────────────────────── Componentes pequeños ─────────────────────────── */
@@ -339,6 +265,8 @@ function CompareMeter({
   unit,
   level,
   footer,
+  etiquetaBase,
+  etiquetaTest,
 }: {
   icon: ReactNode;
   title: string;
@@ -349,6 +277,9 @@ function CompareMeter({
   unit: string;
   level: Level;
   footer: string;
+  /** Cómo se llama cada grabación: «Prueba 1» o «Antes» en las antiguas. */
+  etiquetaBase: string;
+  etiquetaTest: string;
 }) {
   const max = Math.max(base, test, 0.0001);
   const pct = (v: number) => `${Math.max(4, (v / max) * 100)}%`;
@@ -370,7 +301,7 @@ function CompareMeter({
       <div className="space-y-3">
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[#38bdf8]">Antes</span>
+            <span className="font-semibold text-[#38bdf8]" title={etiquetaBase}>{etiquetaBase}</span>
             <span className="font-bold text-[var(--text)]">{base.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -379,7 +310,7 @@ function CompareMeter({
         </div>
         <div>
           <div className="flex justify-between text-xs mb-1">
-            <span className="font-semibold text-[var(--caution)]">Ahora</span>
+            <span className="font-semibold text-[var(--caution)]" title={etiquetaTest}>{etiquetaTest}</span>
             <span className="font-bold text-[var(--text)]">{test.toFixed(decimals)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
@@ -393,10 +324,20 @@ function CompareMeter({
   );
 }
 
-function DetailsTable({ rows }: { rows: MetricRow[] }) {
+export function DetailsTable({
+  rows,
+  showEstabilidad = false,
+  etiquetaBase = 'Antes',
+  etiquetaTest = 'Después',
+}: {
+  rows: MetricRow[];
+  showEstabilidad?: boolean;
+  etiquetaBase?: string;
+  etiquetaTest?: string;
+}) {
   const groups: { id: Group; title: string }[] = [
-    { id: 'speed', title: 'Velocidad' },
-    { id: 'smooth', title: 'Fluidez' },
+    { id: 'speed', title: 'FPS medios' },
+    { id: 'smooth', title: showEstabilidad ? 'Estabilidad y peores momentos' : 'Fluidez' },
   ];
 
   return (
@@ -404,8 +345,8 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
       <div className="min-w-[520px] space-y-4">
         <div className="grid grid-cols-[1.6fr_0.8fr_0.8fr_1.4fr] gap-3 px-4 text-xs font-semibold">
           <span className="text-[var(--text-dim)]">Medida</span>
-          <span className="text-[#38bdf8] text-right">Antes</span>
-          <span className="text-[var(--caution)] text-right">Ahora</span>
+          <span className="text-[#38bdf8] text-right">{etiquetaBase}</span>
+          <span className="text-[var(--caution)] text-right">{etiquetaTest}</span>
           <span className="text-[var(--text-dim)] text-right">Resultado</span>
         </div>
 
@@ -419,7 +360,7 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
                   : r.gain > 0
                   ? 'bg-compatible/15 text-[var(--compatible)]'
                   : 'bg-error/15 text-[var(--error)]';
-              const word = r.winner === 'tie' ? 'Igual' : r.gain > 0 ? 'Mejor' : 'Peor';
+              const word = r.winner === 'tie' ? 'Sin cambio concluyente' : r.gain > 0 ? 'Mejor' : 'Peor';
 
               return (
                 <div
@@ -451,17 +392,30 @@ function DetailsTable({ rows }: { rows: MetricRow[] }) {
   );
 }
 
-/** Quién gana en una comparación, para poder mostrarlo fuera de esta pantalla. */
+/**
+ * Quién gana en una comparación, para poder mostrarlo fuera de esta pantalla.
+ *
+ * Delega en `interpretar()`, el único intérprete de la aplicación. Los nombres de la
+ * unión de tipos se mantienen (`empate`/`depende`) para no tocar a sus consumidores.
+ */
 export type OverallWinner = 'antes' | 'despues' | 'empate' | 'depende';
 
-export function summarizeComparison(c: BenchmarkComparison): { winner: OverallWinner; title: string; advice: string } {
-  const verdict = buildVerdict(buildRows(c), tieThreshold(c.noise_percent));
-  const winner: OverallWinner =
-    verdict.kind === 'test' ? 'despues'
-    : verdict.kind === 'base' ? 'antes'
-    : verdict.kind === 'tie' ? 'empate'
-    : 'depende'; // más FPS pero más tirones (o al revés): depende de lo que prefiera el usuario
-  return { winner, title: verdict.title, advice: verdict.advice };
+const GANADOR_A_WINNER: Record<Ganador, OverallWinner> = {
+  antes: 'antes',
+  despues: 'despues',
+  ninguno: 'empate',
+  mixto: 'depende',
+};
+
+export function summarizeComparison(c: BenchmarkComparison): {
+  winner: OverallWinner;
+  title: string;
+} {
+  const r = interpretar(c, etiquetasDe(c));
+  return {
+    winner: GANADOR_A_WINNER[r.ganador],
+    title: r.titulo,
+  };
 }
 
 /* ───────────────────── Tarjeta de resultado (se reutiliza en Mis pruebas) ───────────────────── */
@@ -471,34 +425,46 @@ export function ComparisonResultCard({
   onClose,
   closeLabel = 'Cerrar comparación',
   title = 'Resultado de la comparación',
+  groupRows,
   children,
 }: {
   comparison: BenchmarkComparison;
   onClose?: () => void;
   closeLabel?: string;
   title?: string;
+  /**
+   * Comparación de todas las grabaciones del juego. Es la que puede decir si la
+   * diferencia de estas dos es real; la de una sola contra otra no puede.
+   */
+  groupRows?: GroupComparison[] | null;
   children?: ReactNode;
 }) {
   const [showDetails, setShowDetails] = useState(false);
 
+  // Único intérprete: el mismo que usa la vista de pruebas guardadas. Los avisos que
+  // antes calculaba `buildWarnings` vienen ya de aquí, con las mismas reglas.
+  const etiquetas = etiquetasDe(comparison);
+  const r = interpretar(comparison, etiquetas);
   const rows = buildRows(comparison);
-  const tie = tieThreshold(comparison.noise_percent);
-  const verdict = buildVerdict(rows, tie);
-  const warnings = buildWarnings(comparison);
-  const style = VERDICT_STYLE[verdict.kind];
+  // Titular y ganadora con la MISMA redacción que la vista de prueba guardada: el
+  // «Gana “Prueba 1”» en rojo se leía al revés (parecía que la ganadora era la mala).
+  const mejor = mejorObservada(r, etiquetas);
+  const style = TONO_STYLE[r.tono];
   const VerdictIcon = style.Icon;
 
-  const speedRow = rows.find((r) => r.key === 'avg')!;
-  const smoothRow = rows.find((r) => r.key === 'smooth')!;
-  const smoothLevel = levelOf(verdict.smooth, tie);
-  const noiseText = marginLabel(comparison.noise_percent);
+  const smoothRow = rows.find((rr) => rr.key === 'smooth')!;
+  const avg = r.metricas.find((m) => m.clave === 'avg_fps')!;
+  const est = r.metricas.find((m) => m.clave === 'estabilidad')!;
+  const noiseText = r.margenTexto;
 
   const smoothFooter =
-    smoothLevel === 'better'
-      ? 'Después del cambio el juego se siente más parejo.'
-      : smoothLevel === 'worse'
-      ? 'Después del cambio el juego tiene más tirones.'
-      : 'El juego se siente igual de parejo.';
+    est.cambio === 'mejor'
+      ? `Con ${etiquetas.despues} el juego se mantiene más parejo.`
+      : est.cambio === 'peor'
+      ? `Con ${etiquetas.despues} el juego tiene más tirones.`
+      : est.cambio === 'sin_datos'
+      ? 'No hay datos suficientes para comparar la estabilidad.'
+      : 'El juego se mantiene igual de parejo.';
 
   return (
     <article
@@ -506,9 +472,9 @@ export function ComparisonResultCard({
     >
       <h3 className="text-base font-bold text-[var(--text)] mb-4">{title}</h3>
 
-      {warnings.length > 0 && (
+      {r.avisos.length > 0 && (
         <div className="mb-4 p-3 rounded-lg bg-[var(--caution-bg)] border border-caution/50 space-y-1.5">
-          {warnings.map((w) => (
+          {r.avisos.map((w) => (
             <p key={w} className="text-xs text-[var(--caution)] font-semibold flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
               {w}
@@ -523,9 +489,18 @@ export function ComparisonResultCard({
           <VerdictIcon className={`w-6 h-6 ${style.text}`} />
         </div>
         <div className="min-w-0">
-          <p className={`text-xl font-bold ${style.text}`}>{verdict.title}</p>
-          <p className="text-sm text-[var(--text)] mt-1">{verdict.detail}</p>
-          <p className="text-sm font-semibold text-[var(--text)] mt-2">{verdict.advice}</p>
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <p className={`text-xl font-bold ${style.text}`}>{titularDelCambio(r, etiquetas)}</p>
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[var(--surface)] text-[var(--text-muted)] border border-[var(--border)]">
+              {r.chipConfianza}
+            </span>
+          </div>
+          <p className="text-sm text-[var(--text)] mt-1">{r.explicacion}</p>
+          {mejor ? (
+            <p className="text-sm font-semibold text-[var(--text)] mt-2">
+              Mejor resultado observado: {mejor.nombre}
+            </p>
+          ) : null}
           {noiseText && (
             <p className="text-xs text-[var(--text-muted)] mt-2 flex items-start gap-1.5">
               <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
@@ -535,31 +510,56 @@ export function ComparisonResultCard({
               </span>
             </p>
           )}
+          {/* Las dos grabaciones no bastan para concluir: se dice aquí, junto al
+              titular, para que no se lea solo el «gana» y se ignore el resto. */}
+          {sinEvidenciaDeGrupo(groupRows) && (
+            <p className="text-xs font-semibold text-[var(--caution)] mt-2 flex items-start gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                Todavía no hay pruebas de que este cambio sea real: con las grabaciones
+                que tienes, la diferencia entra dentro del ruido. Graba la misma escena
+                varias veces antes y después.
+              </span>
+            </p>
+          )}
         </div>
       </div>
 
-      {/* Velocidad y Fluidez */}
+      {/* FPS medios y estabilidad. Los niveles salen del intérprete compartido, así que
+          esta tarjeta y la vista de pruebas guardadas no pueden discrepar. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
         <CompareMeter
           icon={<Gauge className="w-4 h-4 text-[var(--action)]" />}
-          title="Velocidad"
+          title="FPS medios"
           help="Cuántas imágenes por segundo (FPS) muestra el juego."
-          base={speedRow.base}
-          test={speedRow.test}
+          base={avg.antes ?? 0}
+          test={avg.despues ?? 0}
           decimals={0}
           unit=" FPS"
-          level={levelOf(verdict.speed, tie)}
-          footer={`${speedRow.change > 0 ? '+' : ''}${speedRow.change.toFixed(1)}% de FPS promedio${noiseText ? ` (ruido ${noiseText})` : ''}.`}
+          level={levelOfCambio(avg.cambio)}
+          etiquetaBase={etiquetas.antes}
+          etiquetaTest={etiquetas.despues}
+          footer={
+            avg.diferencia == null
+              ? 'No hay FPS medios guardados.'
+              : `${avg.diferencia >= 0 ? '+' : ''}${avg.diferencia.toFixed(1)} FPS${
+                  avg.diferenciaPct != null
+                    ? ` (${avg.diferenciaPct >= 0 ? '+' : ''}${avg.diferenciaPct.toFixed(1)} %)`
+                    : ''
+                }${noiseText ? `, margen ${noiseText}` : ''}.`
+          }
         />
         <CompareMeter
           icon={<Activity className="w-4 h-4 text-[var(--action)]" />}
-          title="Fluidez"
-          help="Qué tan parejo va el juego. Más alto, menos tirones."
+          title="Estabilidad de FPS"
+          help="Índice propio de Thoriapp (0-100): qué parte de la velocidad media se mantiene en los peores momentos. Alto no significa que la velocidad sea suficiente."
           base={smoothRow.base}
           test={smoothRow.test}
           decimals={0}
-          unit="%"
-          level={smoothLevel}
+          unit=""
+          level={levelOfCambio(est.cambio)}
+          etiquetaBase={etiquetas.antes}
+          etiquetaTest={etiquetas.despues}
           footer={smoothFooter}
         />
       </div>
@@ -574,7 +574,13 @@ export function ComparisonResultCard({
         Ver detalles técnicos
         <ChevronDown className={`w-4 h-4 transition-transform duration-200 ${showDetails ? 'rotate-180' : ''}`} />
       </button>
-      {showDetails && <DetailsTable rows={rows} />}
+      {showDetails && (
+        <DetailsTable
+          rows={rows}
+          etiquetaBase={etiquetas.antes}
+          etiquetaTest={etiquetas.despues}
+        />
+      )}
 
       {children}
 
@@ -591,8 +597,68 @@ export function ComparisonResultCard({
   );
 }
 
+/**
+ * Compara el historial del juego en dos mitades: las grabaciones antiguas contra las
+ * recientes.
+ *
+ * La pantalla ya compara automáticamente las dos últimas, pero dos grabaciones no
+ * distinguen una mejora real del ruido. Esto usa todas las del historial: si hay 6, se
+ * compara la mitad vieja contra la mitad nueva, que es el reparto más honesto sin
+ * que el usuario tenga que marcar nada. Con menos de `MIN_RUNS` por lado, el backend
+ * responde que no se puede concluir, y eso también se enseña.
+ */
+function useGroupComparison(
+  benchmarks: Benchmark[]
+): GroupComparison[] | null {
+  const [rows, setRows] = useState<GroupComparison[] | null>(null);
+
+  useEffect(() => {
+    if (benchmarks.length < 2) {
+      setRows(null);
+      return;
+    }
+    // `benchmarks` llega de la más antigua a la más reciente.
+    const half = Math.floor(benchmarks.length / 2);
+    const antes = benchmarks.slice(0, half).map((b) => b.id);
+    const despues = benchmarks.slice(half).map((b) => b.id);
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await api.compareBenchmarkGroups(antes, despues);
+        if (!cancelled) setRows(result);
+      } catch {
+        // Comparar grupos es una ayuda: si falla (grabaciones borradas a mano, por
+        // ejemplo) no se rompe la pantalla, simplemente no se muestra.
+        if (!cancelled) setRows(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [benchmarks]);
+
+  return rows;
+}
+
+/**
+ * ¿El grupo dice que no hay diferencia demostrable?
+ *
+ * Sin datos de grupo (menos de dos grabaciones) no se avisa: no hay nada que
+ * contradecir. Con datos, si ninguna métrica supera el ruido, el veredicto de una
+ * sola comparación es una pista, no un resultado.
+ */
+function sinEvidenciaDeGrupo(rows?: GroupComparison[] | null): boolean {
+  if (!rows || rows.length === 0) return false;
+  return !rows.some((r) => r.verdict === 'mejora' || r.verdict === 'empeora');
+}
+
+// `sufijoOrigen` y `textoComando` viven en `lib/pruebaLabel` para compartirse con el
+// tooltip de `PruebaN` y con «Mis pruebas» sin dependencias circulares.
+export { sufijoOrigen, textoComando };
+
 /* ─────────────────────────────── Vista principal ─────────────────────────────── */
-export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, mangohudLogPath, onLogPathChange }: BenchmarksViewProps) {
+export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, currentProfileName, mangohudLogPath, onLogPathChange, hayJuegoAbierto = true }: BenchmarksViewProps) {
   const [logPath, setLogPath] = useState(mangohudLogPath || '/tmp/MangoHud');
   const [notes, setNotes] = useState('');
   // Segundos iniciales que se descartan al analizar. Se recuerda entre sesiones.
@@ -606,6 +672,17 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
   // Los hooks notifican con un toast propio de esta vista.
   const notify = (message: string) => setToast(message);
+
+  // Copiar el comando desde el tooltip de «Prueba N» del historial. Recibe el comando ya
+  // limpio (sin el prefijo «Steam:»), listo para pegar en Steam.
+  const copiarComando = async (texto: string) => {
+    try {
+      await navigator.clipboard.writeText(texto);
+      setToast('✓ Comando copiado');
+    } catch {
+      setToast('❌ No se pudo copiar');
+    }
+  };
 
   const {
     installed: mangohudInstalled,
@@ -621,7 +698,19 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     analyze,
     remove: deleteBenchmark,
     removeAll: deleteAllBenchmarks,
-  } = useBenchmarks({ currentAppid, currentGameName, currentLaunchCommand, onNotify: notify });
+  } = useBenchmarks({
+    currentAppid,
+    currentGameName,
+    currentLaunchCommand,
+    // Grabación de un juego que no está abierto: se recupera el último comando que la app
+    // registró para ese juego. Se pasa el nombre porque el appid del CSV llega a 0.
+    comandoParaJuego: (juego) => api.ultimoComandoRegistrado(juego),
+    // Y lo que Steam tiene puesto de verdad, que es lo que se ejecutó al entrar al juego.
+    // Se manda el nombre porque el AppID del CSV es 0: el backend resuelve por nombre.
+    steamParaJuego: (juego) =>
+      api.steamLaunchOptionsParaJuego(juego).then((o) => o?.opciones ?? null),
+    onNotify: notify,
+  });
 
   // Caché de shaders del juego para el diagnóstico del arranque (solo recorre discos).
   const shaderCache = useShaderCache(currentAppid);
@@ -641,6 +730,70 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     clear: clearComparison,
   } = useComparison(antesId, despuesId, notify);
 
+  // La comparación de dos grabaciones es una pista; el grupo dice si es real.
+  const groupRows = useGroupComparison(benchmarks);
+
+  // Recogida automática: el usuario graba con Shift+F2 dentro del juego y la app se
+  // encarga de analizar y guardar lo que aparece. Se recuerda entre sesiones.
+  const [autoRecoger, setAutoRecoger] = useState(() => {
+    // Apagado por defecto: empezar a analizar ficheros sin que el usuario lo pida
+    // sorprende, y esto guarda cosas en su historial.
+    return localStorage.getItem(AUTO_RECOGER_KEY) === '1';
+  });
+  const [ultimaRecogida, setUltimaRecogida] = useState<string | null>(null);
+
+  /**
+   * Instantánea del comando configurado, tomada en el momento de la acción.
+   *
+   * El valor se toma **aquí**, no dentro del guardado: entre pulsar «analizar» y que el
+   * backend escriba pasan segundos, y en ese hueco el usuario puede cambiar el perfil.
+   *
+   * `command` va tal cual (solo se recortan los extremos). No se tokeniza, no se
+   * reordena y no se quitan `mangohud` ni los wrappers: es el texto que el usuario tiene
+   * configurado, y reconstruirlo cambiaría la historia de la prueba.
+   */
+  const capturarSetup = (): RecordedSetup => ({
+    command: (currentLaunchCommand || '').trim(),
+    profileName: currentProfileName || undefined,
+    expectedSeconds: logDuration ?? undefined,
+    at: new Date().toISOString(),
+  });
+
+  const { checkNow, checking } = useLogWatcher({
+    folder: logPath,
+    enabled: autoRecoger,
+    // El comando se lee cuando aparece la grabación, no al guardarla: si se leyera
+    // después, una grabación hecha con `mangohud %command%` se guardaría con el comando
+    // que el usuario tiene puesto ahora, y la comparación diría que no cambió nada.
+    captureSetup: capturarSetup,
+    process: async (log, setup) => {
+      const saved = await analyze(log.path, '', warmup, setup);
+      if (saved) {
+        setUltimaRecogida(`${log.program} · ${log.timestamp}`);
+      }
+      return saved;
+    },
+    onError: (msg) => notify(msg),
+  });
+
+  const toggleAutoRecoger = (next: boolean) => {
+    setAutoRecoger(next);
+    localStorage.setItem(AUTO_RECOGER_KEY, next ? '1' : '0');
+    if (next) {
+      // Sin juego abierto no hay comando que registrar, y la grabación se guardaría como
+      // «no registrado» aunque el usuario tenga ajustes puestos. Se avisa ANTES de grabar,
+      // no después de que la prueba ya esté guardada sin el dato.
+      notify(
+        hayJuegoAbierto
+          ? '✓ Guardado automático activado. Graba con Shift + F2 dentro del juego.'
+          : '⚠ No hay ningún juego abierto: abre el juego en la Biblioteca primero o la prueba se guardará sin su comando.'
+      );
+      void checkNow();
+    } else {
+      notify('Guardado automático desactivado.');
+    }
+  };
+
   useEffect(() => {
     if (mangohudLogPath) setLogPath(mangohudLogPath);
   }, [mangohudLogPath]);
@@ -652,7 +805,9 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   };
 
   const analyzeLog = async () => {
-    const saved = await analyze(logPath, notes, warmup);
+    // También el guardado manual necesita la instantánea: antes se pasaba `undefined` y
+    // se caía al comando "actual" en el momento de guardar, que no es el de la grabación.
+    const saved = await analyze(logPath, notes, warmup, capturarSetup());
     if (saved) setNotes('');
   };
 
@@ -914,12 +1069,70 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             )}
           </button>
         </div>
+
+        {/* Guardado automático: grabar con Shift+F2 y no volver a tocar nada */}
+        <div className="mt-4 pt-4 border-t border-[var(--border)]">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-[var(--text)]">
+                Guardar las grabaciones automáticamente
+              </p>
+              <p className="text-xs text-[var(--text-muted)] mt-1 leading-relaxed">
+                Tú grabas como siempre (<strong>Shift + F2</strong> dentro del juego); la app
+                vigila <code className="text-[var(--text)]">{logPath}</code> y guarda cada
+                grabación en cuanto MangoHud termina de escribirla. No arranca grabaciones
+                por su cuenta ni toca tu configuración de MangoHud.
+              </p>
+            </div>
+            <Toggle
+              checked={autoRecoger}
+              onChange={toggleAutoRecoger}
+              label="Guardar las grabaciones automáticamente"
+            />
+          </div>
+
+          {/* Sin juego abierto, el guardado automático no puede registrar el comando: se
+              dice aquí, antes de grabar, en vez de descubrirlo en el historial. */}
+          {autoRecoger && !hayJuegoAbierto && (
+            <div className="mt-3 p-3 rounded-lg bg-[var(--caution-bg)] border border-caution/40">
+              <p className="text-xs text-[var(--caution)] font-semibold">
+                No hay ningún juego abierto.
+              </p>
+              <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">
+                Puedes grabar y se guardará la prueba, pero quedará sin comando registrado:
+                Thoriapp no sabe qué ajustes había puestos. Abre el juego en la Biblioteca
+                antes de grabar si quieres que la comparación sepa qué cambió.
+              </p>
+            </div>
+          )}
+
+          {autoRecoger ? (
+            <div className="mt-3 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  checking ? 'bg-[var(--action)] animate-pulse' : 'bg-[var(--compatible)]'
+                }`}
+                aria-hidden="true"
+              />
+              <span className="min-w-0">
+                {checking ? 'Buscando grabaciones nuevas…' : 'Vigilando la carpeta'}
+                {ultimaRecogida && <> · última guardada: <strong className="text-[var(--text)]">{ultimaRecogida}</strong></>}
+              </span>
+            </div>
+          ) : (
+            <p className="mt-3 text-[11px] text-[var(--text-dim)] leading-relaxed">
+              Desactivado: las grabaciones se guardan solo cuando pulsas el botón de arriba.
+            </p>
+          )}
+        </div>
       </article>
 
       {/* Diagnóstico del arranque: shaders compilándose al principio */}
       {shown.length > 0 && (
         <ShaderStutterCard benchmark={shown[0]} cache={shaderCache} loadingCache={shaderCache === null && !!currentAppid} />
       )}
+
+      {/* Clasificación: con varias grabaciones, decir cuál gana de un vistazo */}
 
       {/* Lista de Benchmarks */}
       {shown.length > 0 && (
@@ -960,15 +1173,20 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      {/* Etiqueta automática */}
-                      <div className="mb-3">
-                        <span
-                          className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold text-white ${
-                            isLatest ? 'bg-[#38bdf8]' : 'bg-[var(--border)]'
-                          }`}
-                        >
-                          {isLatest ? 'Más reciente' : `Hace ${idx + 1} grabaciones`}
-                        </span>
+                      {/* Identidad de la grabación: «Prueba N», con su comando consultable
+                          al pasar el ratón, al llegar con el teclado o al pulsar. El
+                          comando no se pinta siempre: ocupa dos líneas y ensucia la lista. */}
+                      <div className="mb-3 flex items-center gap-2">
+                        <PruebaN
+                          bench={bench}
+                          onCopy={copiarComando}
+                          className="text-sm font-bold text-[var(--text)]"
+                        />
+                        {isLatest && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold text-white bg-[#38bdf8]">
+                            Más reciente
+                          </span>
+                        )}
                       </div>
 
                       {/* Nombre del juego */}
@@ -1083,9 +1301,18 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
         </article>
       )}
 
+      {/* ¿La diferencia es real? Necesita varias grabaciones por lado. */}
+      {groupRows && groupRows.some((r) => r.antes_runs + r.despues_runs > 0) && (
+        <GroupComparisonCard rows={groupRows} />
+      )}
+
       {/* Resultado de la comparación */}
       {comparison && (
-        <ComparisonResultCard comparison={comparison} onClose={clearComparison}>
+        <ComparisonResultCard
+          comparison={comparison}
+          groupRows={groupRows}
+          onClose={clearComparison}
+        >
           <button
             type="button"
             onClick={saveCurrentComparison}

@@ -1,13 +1,26 @@
-import { TrendingUp } from 'lucide-react';
+import { ListChecks } from 'lucide-react';
 import type { Hardware } from '../lib/types';
 
 interface GameSidebarProps {
   hardware: Hardware | null;
-  onMeasurePerformance: () => void;
+  /** Ya no se pinta: «Pruebas del juego» lleva a Benchmarks con el juego abierto. */
+  onMeasurePerformance?: () => void;
+  /**
+   * Abre la ventana con el historial de pruebas **de este juego**.
+   *
+   * Es la única acción rápida. Antes había también «Medir y comparar», que abría
+   * Benchmarks: la ventana nueva ya tiene su propio botón para eso, así que dos botones
+   * para lo mismo sobraban.
+   */
+  onShowGameTests: () => void;
 }
 
 /** Columna derecha de la vista de juego: hardware del equipo y acciones rápidas. */
-export function GameSidebar({ hardware, onMeasurePerformance }: GameSidebarProps) {
+export function GameSidebar({
+  hardware,
+  onMeasurePerformance: _onMeasurePerformance,
+  onShowGameTests,
+}: GameSidebarProps) {
   return (
     <div className="space-y-4">
       {/* Hardware Profile */}
@@ -51,11 +64,15 @@ export function GameSidebar({ hardware, onMeasurePerformance }: GameSidebarProps
       <aside className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
         <h3 className="text-sm font-bold mb-3 text-[var(--text)]">Acciones rápidas</h3>
         <div className="space-y-2">
+          {/* Solo queda una acción: «Medir y comparar» se quitó porque la ventana
+              «Pruebas del juego» ya lleva a Benchmarks con el juego abierto, y tener las
+              dos aquí era dos botones para lo mismo. `onMeasurePerformance` sigue
+              aceptándose (la app lo pasa) pero no se pinta. */}
           <button
-            onClick={onMeasurePerformance}
+            onClick={onShowGameTests}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] transition-colors"
           >
-            <TrendingUp className="w-4 h-4" /> Medir y comparar
+            <ListChecks className="w-4 h-4" /> Pruebas del juego
           </button>
         </div>
       </aside>

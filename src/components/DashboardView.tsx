@@ -1,13 +1,11 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import {
-  TrendingUp, BarChart3, Calendar,
-  Gamepad2, Target, Trash2, ArrowLeft, ChevronRight,
-  Terminal, Trophy, Copy,
-} from 'lucide-react';
-import { ComparisonResultCard, summarizeComparison } from './BenchmarksView';
+import { BarChart3, Trash2, ChevronRight } from 'lucide-react';
+import { interpretar, nombreLegible, etiquetasDe, titularDelCambio } from '../lib/interpretacion';
+import { formatTimestamp } from '../lib/format';
+import { PruebaN } from './PruebaN';
+import { SavedComparisonDetail } from './SavedComparisonDetail';
 import type { SavedComparison } from '../hooks/useSavedComparisons';
-import type { BenchmarkComparison } from '../lib/types';
 import { useSavedComparisons } from '../hooks/useSavedComparisons';
 import { useConfirm, useToast } from '../hooks/useConfirm';
 import { ConfirmDialog, Toast } from './ConfirmDialog';
@@ -20,158 +18,16 @@ const testDateOf = (c: SavedComparison) => c.comparison.test.timestamp;
 
 const normGame = (n: string) => n.trim().toLowerCase();
 
-/* ───────────── Argumento probado y ganador (detalle de una prueba) ───────────── */
+/** Color del título del resultado. Mismo vocabulario que el resto de la app. */
+const ESTADO_TEXTO: Record<ReturnType<typeof interpretar>['estado'], string> = {
+  mejora: 'text-[var(--compatible)]',
+  empeora: 'text-[var(--error)]',
+  mixto: 'text-[var(--caution)]',
+  sin_cambio: 'text-[var(--text-muted)]',
+  datos_insuficientes: 'text-[var(--text-dim)]',
+};
 
-// Separa el comando en piezas (variables, banderas, envoltorios) sin el marcador %command%
-const tokenize = (cmd: string) => Array.from(new Set(cmd.split(/\s+/).filter((t) => t && t !== '%command%')));
-
-function diffCommands(before: string, after: string) {
-  const a = tokenize(before);
-  const b = tokenize(after);
-  return {
-    added: b.filter((t) => !a.includes(t)),
-    removed: a.filter((t) => !b.includes(t)),
-  };
-}
-
-function CommandBox({
-  label,
-  color,
-  command,
-  isWinner,
-  onCopy,
-}: {
-  label: string;
-  color: string;
-  command: string;
-  isWinner: boolean;
-  onCopy: (text: string) => void;
-}) {
-  return (
-    <div
-      className={`p-3 rounded-lg bg-[var(--bg)] border-2 ${
-        isWinner ? 'border-compatible/60' : 'border-[var(--border)]'
-      }`}
-    >
-      <div className="flex items-center justify-between gap-2 mb-2">
-        <span className="text-sm font-bold" style={{ color }}>
-          {label}
-        </span>
-        {isWinner && (
-          <span className="flex items-center gap-1 text-[11px] font-bold text-[var(--compatible)]">
-            <Trophy className="w-3.5 h-3.5" />
-            Ganador
-          </span>
-        )}
-      </div>
-      {command ? (
-        <>
-          <code className="block text-[11px] leading-relaxed font-mono text-[var(--text)] break-all select-text">
-            {command}
-          </code>
-          <button
-            type="button"
-            onClick={() => onCopy(command)}
-            className="mt-2 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold text-[var(--text-muted)] bg-[var(--surface)] border border-[var(--border)] hover:text-[var(--text)] hover:border-action/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
-          >
-            <Copy className="w-3 h-3" />
-            Copiar
-          </button>
-        </>
-      ) : (
-        <p className="text-xs text-[var(--text-muted)] italic">Sin parámetros (configuración original)</p>
-      )}
-    </div>
-  );
-}
-
-function ArgumentCard({
-  comparison,
-  onCopy,
-}: {
-  comparison: BenchmarkComparison;
-  onCopy: (text: string) => void;
-}) {
-  const summary = summarizeComparison(comparison);
-  const beforeCmd = (comparison.baseline.launch_command || '').trim();
-  const afterCmd = (comparison.test.launch_command || '').trim();
-  const { added, removed } = diffCommands(beforeCmd, afterCmd);
-  const hasChange = added.length > 0 || removed.length > 0;
-
-  const badge =
-    summary.winner === 'despues'
-      ? { text: 'Ganó la grabación nueva', cls: 'bg-compatible/10 text-[var(--compatible)] border-compatible/40' }
-      : summary.winner === 'antes'
-      ? { text: 'Ganó la grabación anterior', cls: 'bg-compatible/10 text-[var(--compatible)] border-compatible/40' }
-      : summary.winner === 'empate'
-      ? { text: 'Sin ganador claro', cls: 'bg-[var(--bg)] text-[var(--text-muted)] border-[var(--border)]' }
-      : { text: 'Depende de lo que prefieras', cls: 'bg-caution/10 text-[var(--caution)] border-caution/40' };
-
-  return (
-    <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
-      <h3 className="text-base font-bold mb-4 flex items-center gap-2 text-[var(--text)]">
-        <Terminal className="w-5 h-5 text-[var(--action)]" />
-        Argumento probado
-      </h3>
-
-      {/* Qué cambió */}
-      <div className="mb-4">
-        <p className="text-xs text-[var(--text-muted)] mb-2">Lo que cambió entre las dos grabaciones</p>
-        {hasChange ? (
-          <div className="flex flex-wrap gap-2">
-            {added.map((t) => (
-              <span
-                key={`add-${t}`}
-                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-compatible/10 text-[var(--compatible)] border border-compatible/30 select-text"
-              >
-                + {t}
-              </span>
-            ))}
-            {removed.map((t) => (
-              <span
-                key={`rem-${t}`}
-                className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-error/10 text-[var(--error)] border border-error/30 select-text"
-              >
-                − {t}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-            No se registró ninguna diferencia entre los dos comandos. El comando que se guarda es el que tenía la app
-            al pulsar <strong className="text-[var(--text)]">Analizar y guardar</strong>, así que activa el parámetro
-            antes de analizar la grabación.
-          </p>
-        )}
-      </div>
-
-      {/* Ganador */}
-      <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className={`px-3 py-1 rounded-full text-xs font-bold border ${badge.cls}`}>{badge.text}</span>
-        <span className="text-xs text-[var(--text-muted)]">{summary.advice}</span>
-      </div>
-
-      {/* Comandos completos */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <CommandBox
-          label="Inicial"
-          color="#38bdf8"
-          command={beforeCmd}
-          isWinner={summary.winner === 'antes'}
-          onCopy={onCopy}
-        />
-        <CommandBox
-          label="Final"
-          color="var(--caution)"
-          command={afterCmd}
-          isWinner={summary.winner === 'despues'}
-          onCopy={onCopy}
-        />
-      </div>
-    </article>
-  );
-}
-
+/** «Mis pruebas»: las comparaciones guardadas, de la más reciente a la más antigua. */
 export function DashboardView() {
   const { toast, setToast } = useToast();
   const { confirmState, ask, close } = useConfirm();
@@ -213,7 +69,7 @@ export function DashboardView() {
       onConfirm: deleteAll,
     });
 
-  // Fecha relativa para la tarjeta "Última prueba"
+  // Fecha relativa: la de la prueba más reciente, para el subtítulo.
   const formatRelative = (dateString: string) => {
     const date = parseDate(dateString);
     const diffMs = Date.now() - date.getTime();
@@ -221,27 +77,11 @@ export function DashboardView() {
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
     if (Number.isNaN(diffMs)) return dateString;
-    if (diffHours < 1) return 'Hace menos de 1 hora';
-    if (diffHours < 24) return `Hace ${diffHours} hora${diffHours > 1 ? 's' : ''}`;
-    if (diffDays < 7) return `Hace ${diffDays} día${diffDays > 1 ? 's' : ''}`;
+    if (diffHours < 1) return 'hace menos de 1 hora';
+    if (diffHours < 24) return `hace ${diffHours} hora${diffHours > 1 ? 's' : ''}`;
+    if (diffDays < 7) return `hace ${diffDays} día${diffDays > 1 ? 's' : ''}`;
     return date.toLocaleDateString('es-ES');
   };
-
-  // Fecha y hora exactas en que se hizo la prueba
-  const formatFull = (dateString: string) => {
-    const date = parseDate(dateString);
-    if (Number.isNaN(date.getTime())) return dateString;
-    return date.toLocaleString('es-ES', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
-
-  const percentClass = (p: number) =>
-    p > 0 ? 'text-[var(--compatible)]' : p < 0 ? 'text-[var(--error)]' : 'text-[var(--text-muted)]';
 
   const sorted = [...items].sort(
     (a, b) => parseDate(testDateOf(b)).getTime() - parseDate(testDateOf(a)).getTime()
@@ -270,47 +110,15 @@ export function DashboardView() {
   /* ───────────────────────── Detalle de una prueba ───────────────────────── */
   if (selected) {
     return (
-      <div className="max-w-6xl mx-auto p-8 space-y-6">
-        <button
-          type="button"
-          onClick={() => setSelectedId(null)}
-          className="flex items-center gap-2 text-sm font-semibold text-[var(--text-muted)] hover:text-[var(--text)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] rounded"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Volver a Mis pruebas
-        </button>
-
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <p className="text-xs text-[var(--text-muted)] mb-2">Prueba guardada</p>
-            <h2 className="text-2xl font-bold truncate">{selected.game_name || 'Desconocido'}</h2>
-            <p className="text-sm text-[var(--text-muted)] mt-1">
-              {formatFull(testDateOf(selected))} • {selected.before_fps.toFixed(1)} FPS → {selected.after_fps.toFixed(1)} FPS{' '}
-              <span className={`font-bold ${percentClass(selected.fps_change_percent)}`}>
-                ({selected.fps_change_percent > 0 ? '+' : ''}{selected.fps_change_percent.toFixed(1)}%)
-              </span>
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => askDeleteOne(selected)}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 transition-all duration-200 flex items-center gap-1.5 shrink-0"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            Eliminar prueba
-          </button>
-        </div>
-
-        <ArgumentCard comparison={selected.comparison} onCopy={copyText} />
-
-        <ComparisonResultCard
+      <>
+        <SavedComparisonDetail
           comparison={selected.comparison}
-          onClose={() => setSelectedId(null)}
-          closeLabel="Volver a Mis pruebas"
+          onBack={() => setSelectedId(null)}
+          onDelete={() => askDeleteOne(selected)}
+          onCopy={copyText}
         />
-
         {overlays}
-      </div>
+      </>
     );
   }
 
@@ -336,151 +144,131 @@ export function DashboardView() {
   }
 
   /* ───────────────────────────── Estadísticas ───────────────────────────── */
-  const totalGames = new Set(items.map((c) => normGame(c.game_name))).size;
+  const idiomas = new Set(items.map((c) => normGame(c.game_name)));
   const lastTestDate = sorted.length > 0 ? testDateOf(sorted[0]) : null;
 
+  // El subtítulo resume lo mismo que antes ocupaba tres tarjetas (pruebas, juegos y
+  // última fecha) en una línea: sin cajas, sin iconos grandes y sin contadores sueltos.
+  const subtitulo = [
+    `${items.length} ${items.length === 1 ? 'comparación guardada' : 'comparaciones guardadas'}`,
+    `${idiomas.size} ${idiomas.size === 1 ? 'juego' : 'juegos'}`,
+    lastTestDate ? `última ${formatRelative(lastTestDate)}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
-    <div className="max-w-6xl mx-auto p-8 space-y-6">
-      {/* Header */}
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <p className="text-xs text-[var(--text-muted)] mb-2">Dashboard</p>
-          <h2 className="text-2xl font-bold">Mis pruebas de rendimiento</h2>
+    <div className="max-w-4xl mx-auto p-4 sm:p-8 space-y-5">
+      {/* Header: título, resumen en una línea y la única acción destructiva. */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs text-[var(--text-muted)] mb-1">Dashboard</p>
+          <h2 className="text-2xl font-bold text-[var(--text)]">Mis pruebas de rendimiento</h2>
+          <p className="text-sm text-[var(--text-muted)] mt-1">{subtitulo}</p>
         </div>
         <button
           type="button"
           onClick={askDeleteAll}
-          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 transition-all duration-200 flex items-center gap-1.5 group"
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 transition-all duration-200 flex items-center gap-1.5 group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
           title="Eliminar todas las pruebas guardadas"
         >
-          <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
+          <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" aria-hidden="true" />
           Borrar todas las pruebas
         </button>
       </div>
 
-      {/* Estadísticas generales */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
-        >
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-action/10 flex items-center justify-center">
-              <Target className="w-5 h-5 text-[var(--action)]" />
-            </div>
-            <div>
-              <p className="text-xs text-[var(--text-muted)]">Total de pruebas</p>
-              <p className="text-2xl font-bold text-[var(--text)]">{items.length}</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
-        >
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-compatible/10 flex items-center justify-center">
-              <Gamepad2 className="w-5 h-5 text-[var(--compatible)]" />
-            </div>
-            <div>
-              <p className="text-xs text-[var(--text-muted)]">Juegos probados</p>
-              <p className="text-2xl font-bold text-[var(--text)]">{totalGames}</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
-        >
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-caution/10 flex items-center justify-center">
-              <Calendar className="w-5 h-5 text-[var(--caution)]" />
-            </div>
-            <div>
-              <p className="text-xs text-[var(--text-muted)]">Última prueba</p>
-              <p className="text-lg font-bold text-[var(--text)]">
-                {lastTestDate ? formatRelative(lastTestDate) : 'N/A'}
-              </p>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-
-      {/* Pruebas guardadas */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
+      {/* Lista. Una fila por comparación; el resultado lo decide el intérprete, no la
+          resta de FPS. El nombre del juego solo se repite cuando cambia respecto a la
+          fila de arriba: con varias pruebas seguidas del mismo juego, repetirlo en cada
+          línea era la mitad del texto de la pantalla. */}
+      <motion.ul
+        initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.5 }}
-        className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]"
+        transition={{ duration: 0.25 }}
+        className="rounded-xl bg-[var(--surface)] border border-[var(--border)] divide-y divide-[var(--border)] overflow-hidden"
       >
-        <h3 className="text-base font-bold mb-1 flex items-center gap-2 text-[var(--text)]">
-          <TrendingUp className="w-5 h-5 text-[var(--action)]" />
-          Pruebas recientes
-        </h3>
-        <p className="text-xs text-[var(--text-muted)] mb-4">
-          Haz clic en una prueba para ver la comparación completa.
-        </p>
-        <div className="space-y-2">
-          {sorted.map((test) => (
-            <div
-              key={test.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => setSelectedId(test.id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  setSelectedId(test.id);
-                }
-              }}
-              className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-action/50 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)]"
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <Gamepad2 className="w-5 h-5 text-[var(--text-muted)] shrink-0" />
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-[var(--text)] truncate">{test.game_name || 'Desconocido'}</p>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    {test.before_fps.toFixed(1)} FPS → {test.after_fps.toFixed(1)} FPS
+        {sorted.map((test, i) => {
+          const r = interpretar(test.comparison);
+          const et = etiquetasDe(test.comparison);
+          const titulo = titularDelCambio(r, et);
+          const mismoJuego =
+            i > 0 && normGame(sorted[i - 1].game_name) === normGame(test.game_name);
+          const pctCambio = test.fps_change_percent;
+
+          return (
+            <li key={test.id}>
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedId(test.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setSelectedId(test.id);
+                  }
+                }}
+                aria-label={`${nombreLegible(test.game_name)}: ${et.antes} ${test.before_fps.toFixed(1)} FPS, ${et.despues} ${test.after_fps.toFixed(1)} FPS. ${titulo}`}
+                className="group flex items-center gap-3 px-3 sm:px-4 py-2.5 cursor-pointer hover:bg-[var(--bg)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--action)]"
+              >
+                {/* Juego (solo cuando cambia) y la línea de números. */}
+                <div className="min-w-0 flex-1">
+                  <p
+                    className={`text-sm font-semibold text-[var(--text)] truncate ${
+                      mismoJuego ? 'sr-only' : ''
+                    }`}
+                  >
+                    {nombreLegible(test.game_name)}
+                  </p>
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[var(--text-muted)]">
+                    <span className="font-mono tabular-nums">
+                      <PruebaN bench={test.comparison.baseline} compacto />
+                      {' '}
+                      <span className="text-[var(--text)]">{test.before_fps.toFixed(1)}</span>
+                      <span className="text-[var(--text-dim)]"> → </span>
+                      <PruebaN bench={test.comparison.test} compacto />
+                      {' '}
+                      <span className="text-[var(--text)]">{test.after_fps.toFixed(1)}</span>
+                      <span className="text-[var(--text-dim)]"> FPS</span>
+                    </span>
+                    <span className="text-[var(--text-dim)]" aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">{formatTimestamp(testDateOf(test))}</span>
                   </p>
                 </div>
-              </div>
 
-              <div className="flex items-center gap-3 shrink-0">
-                <div className="text-right">
-                  <p className={`text-sm font-bold ${percentClass(test.fps_change_percent)}`}>
-                    {test.fps_change_percent > 0 ? '+' : ''}{test.fps_change_percent.toFixed(1)}%
-                  </p>
-                  <p className="text-xs text-[var(--text-dim)]">{formatFull(testDateOf(test))}</p>
+                {/* Resultado: variación de FPS y titular del intérprete. */}
+                <div className="flex items-center gap-3 shrink-0">
+                  <div className="text-right max-w-[13rem]">
+                    <p className={`text-sm font-bold font-mono tabular-nums ${ESTADO_TEXTO[r.estado]}`}>
+                      {pctCambio > 0 ? '+' : ''}
+                      {pctCambio.toFixed(1)}%
+                    </p>
+                    <p className={`text-xs font-semibold truncate ${ESTADO_TEXTO[r.estado]}`}>{titulo}</p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      askDeleteOne(test);
+                    }}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    className="p-1.5 rounded-lg text-[var(--text-dim)] hover:text-[var(--error)] hover:bg-error/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+                    title="Eliminar esta prueba"
+                    aria-label={`Eliminar la prueba de ${test.game_name || 'este juego'}`}
+                  >
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
+                  </button>
+
+                  <ChevronRight
+                    className="w-4 h-4 text-[var(--text-dim)] group-hover:text-[var(--action)] transition-colors"
+                    aria-hidden="true"
+                  />
                 </div>
-
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    askDeleteOne(test);
-                  }}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  className="p-2 rounded-lg text-[var(--error)] hover:bg-error/10 hover:scale-110 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
-                  title="Eliminar esta prueba"
-                  aria-label={`Eliminar la prueba de ${test.game_name || 'este juego'}`}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-
-                <ChevronRight className="w-4 h-4 text-[var(--text-dim)]" />
               </div>
-            </div>
-          ))}
-        </div>
-      </motion.div>
+            </li>
+          );
+        })}
+      </motion.ul>
 
       {overlays}
     </div>

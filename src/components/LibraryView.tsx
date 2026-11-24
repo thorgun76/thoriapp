@@ -81,7 +81,9 @@ export function LibraryView({
   launcherFilter,
   externalCount,
   hiddenDuplicates = 0,
-  heroniteUninstalled = 0,
+  // `heroniteUninstalled` se sigue aceptando (App lo pasa) pero ya no se pinta: el
+  // recuento de juegos desinstalados de Heronite era ruido en la cabecera.
+  heroniteUninstalled: _heroniteUninstalled,
   showExternalGames,
   scanningLaunchers,
   onFilterChange,
@@ -146,16 +148,6 @@ export function LibraryView({
               {hiddenDuplicates === 1
                 ? '1 juego ya está en Steam, así que no se repite desde otro launcher'
                 : `${hiddenDuplicates} juegos ya están en Steam, así que no se repiten desde otros launchers`}
-            </p>
-          )}
-          {heroniteUninstalled > 0 && (
-            // Heronite conserva los juegos desinstalados en su library.json
-            // (para no perder las horas jugadas). Se ocultan aquí, pero se dice
-            // para que el usuario no crea que faltan.
-            <p className="text-xs text-[var(--text-dim)] mt-1">
-              {heroniteUninstalled === 1
-                ? '1 juego desinstalado en Heronite no se muestra'
-                : `${heroniteUninstalled} juegos desinstalados en Heronite no se muestran`}
             </p>
           )}
         </div>

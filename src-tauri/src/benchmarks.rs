@@ -4,6 +4,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+/// Origen del comando registrado en una grabación.
+///
+/// `Instantanea` es el bueno (tomado al detectar la grabación). `ComandoActual` significa
+/// que la instantánea estaba vacía y se leyó al guardar: el comando puede no ser el de la
+/// grabación. `Desconocido` es «no registrado».
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrigenComando {
+    Instantanea,
+    ComandoActual,
+    #[default]
+    Desconocido,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Benchmark {
     pub id: String,
@@ -21,7 +35,50 @@ pub struct Benchmark {
     pub frame_time_1_percent_high: f64,
     pub total_frames: u64,
     pub notes: Option<String>,
+    /// Comando de lanzamiento que Thoriapp tenía configurado **cuando se detectó la
+    /// grabación** (no cuando se pulsó «analizar»).
+    ///
+    /// Es una **instantánea**, no una referencia: si mañana el usuario cambia el comando
+    /// del juego, este campo no cambia. `""` significa «no registrado»: benchmarks
+    /// guardados antes de que la app capturara el comando. `"%command%"` es un valor
+    /// legítimo y significa «sin ajustes activos».
+    ///
+    /// No se puede saber si el usuario editó las opciones de lanzamiento en Steam a mano
+    /// después: esto es el comando que Thoriapp configuraba, no el que Steam ejecutó. Por
+    /// eso la interfaz lo llama «comando registrado».
+    #[serde(default)]
     pub launch_command: String,
+    /// De dónde salió `launch_command`.
+    ///
+    /// Permite auditar una prueba después: ver `%command%` no dice si de verdad no había
+    /// ajustes o si el dato se leyó en el momento equivocado (instantánea vacía → comando
+    /// del editor al guardar). Los benchmarks antiguos no lo tienen: `#[serde(default)]`
+    /// los lee como `desconocido`.
+    #[serde(default)]
+    pub origen_comando: OrigenComando,
+    /// Opciones de lanzamiento que **Steam** tenía configuradas para este juego cuando se
+    /// guardó la prueba, leídas de `localconfig.vdf`.
+    ///
+    /// Es lo que de verdad se ejecutó al entrar al juego, así que es el dato que sirve para
+    /// saber «con qué argumento hice esta prueba». `launch_command` es lo que Thoriapp
+    /// proponía en su editor, que puede no coincidir (el usuario lo copia a Steam a mano).
+    ///
+    /// `None` = no se pudo leer Steam (no instalado, otro usuario, Flatpak sin permisos).
+    /// `Some("")` = se leyó y Steam las tiene vacías, que es un dato real: se lanzó sin
+    /// argumentos. No se confunden a propósito.
+    #[serde(default)]
+    pub steam_command: Option<String>,
+    /// Número de presentación de la grabación dentro de su juego (`Prueba N`).
+    ///
+    /// Se asigna **una sola vez**, al guardar, y no cambia nunca: sobrevive a borrar otras
+    /// grabaciones, al recorte de `trim_history` y a guardar/abrir una comparación (que
+    /// embute copias de los dos benchmarks, así que el número viaja con ellos).
+    ///
+    /// `None` en las grabaciones guardadas antes de existir este campo: no se les inventa
+    /// una cronología, porque el historial puede haber sufrido borrados y el orden no se
+    /// puede reconstruir con seguridad. La interfaz las llama «Prueba sin número».
+    #[serde(default)]
+    pub number: Option<u32>,
     // Métricas de fluidez. Son None en los benchmarks guardados antes de esta versión
     // (por eso #[serde(default)]: los benchmarks viejos se siguen cargando sin problema).
     #[serde(default)]
@@ -46,7 +103,56 @@ pub struct Benchmark {
     /// suficientes para compararlo.
     #[serde(default)]
     pub shader_stutter: Option<ShaderStutter>,
+    /// Ruta del CSV del que salió esta grabación.
+    ///
+    /// Es la identidad real de una grabación: dos análisis del mismo fichero dan el mismo
+    /// resultado y las mismas métricas. Sin esto, detectar duplicados exigía comparar
+    /// números con tolerancia, que falla justo cuando dos grabaciones son parecidas.
+    /// Vacío en los benchmarks guardados antes de existir este campo.
+    #[serde(default)]
+    pub log_path: String,
+    /// Número de muestras del log usadas en el análisis (tras descartar el calentamiento).
+    ///
+    /// Es el nombre correcto de lo que `total_frames` contiene realmente: MangoHud
+    /// guarda ~10 filas por segundo, no un frame por fila, así que `total_frames` nunca
+    /// fueron frames. Renombrarlo habría roto la lectura de los JSON ya guardados
+    /// (`total_frames` desaparecería), así que se mantienen los dos: el campo viejo se
+    /// sigue leyendo y escribiendo con el mismo significado, y este lo dice sin engañar.
+    #[serde(default)]
+    pub sample_count: Option<u64>,
+    /// Tiempos por muestra, para el gráfico temporal. `None` en las pruebas guardadas
+    /// antes de que existiera este campo (y en las que se analizaron sin guardarlo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muestras_temporales: Option<MuestrasTemporales>,
 }
+
+/// Serie temporal de una grabación, para dibujar el frametime en el tiempo.
+///
+/// **No se guardan los frame times** (los datos crudos de MangoHud): se guarda el
+/// frametime **medio de cada muestra**, que es exactamente lo que MangoHud escribe en
+/// una fila. Guardar los frames individuales exigiría decenas de miles de valores por
+/// grabación y no aporta nada que esta pantalla pueda mostrar.
+///
+/// `frame_time_ms[i]` corresponde a `elapsed_s[i]`; ambos vectores tienen la misma
+/// longitud. Si el log no trae la columna `elapsed`, `elapsed_s` queda vacío y el
+/// gráfico se dibuja por índice de muestra (ver `interpretacion` en el frontend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MuestrasTemporales {
+    /// Frametime medio de cada muestra, en milisegundos.
+    pub frame_time_ms: Vec<f32>,
+    /// Instante de cada muestra, en segundos desde el inicio de la grabación.
+    /// Vacío cuando el log no traía la columna `elapsed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elapsed_s: Vec<f32>,
+}
+
+/// Tope de muestras que se guardan por grabación.
+///
+/// Una grabación de 60 s a 10 Hz son ~600 muestras (~4,8 KB en JSON). El tope protege
+/// de logs anormalmente largos (una grabación olvidada de una hora) sin recortar nada
+/// que un usuario normal vaya a producir. Al recortar se **diezma uniformemente**, no
+/// se corta el final: así el gráfico sigue representando toda la grabación.
+const MAX_MUESTRAS_TEMPORALES: usize = 4000;
 
 /// Coste del arranque: lo que se pierde en los primeros segundos de la grabación,
 /// cuando los shaders todavía se están compilando.
@@ -357,6 +463,59 @@ fn combined_noise(a: Option<f64>, b: Option<f64>) -> f64 {
     combined.max(MIN_NOISE)
 }
 
+/// Serie temporal para el gráfico de frametime, recortando a `max` muestras.
+///
+/// `con_tiempos` indica si el log traía la columna `elapsed`. Si no la traía, la serie
+/// se guarda igual (el gráfico puede dibujarse por índice de muestra) pero sin tiempos:
+/// inventar un eje de segundos a partir del número de muestra sería afirmar una
+/// regularidad que el log no garantiza.
+///
+/// La diezma es uniforme para que el gráfico siga cubriendo toda la grabación: cortar el
+/// final mostraría solo el principio y el usuario creería que ahí acaba su partida.
+fn serie_temporal(
+    samples: &[Sample],
+    max: usize,
+    con_tiempos: bool,
+) -> Option<MuestrasTemporales> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let paso = ((samples.len() as f64) / (max as f64)).ceil().max(1.0) as usize;
+    let recogidas: Vec<&Sample> = samples.iter().step_by(paso).collect();
+
+    let frame_time_ms: Vec<f32> = recogidas
+        .iter()
+        .map(|s| {
+            // Un frametime negativo o no finito es un dato corrupto: se descarta la
+            // muestra entera antes de llegar aquí (drop_stuck_samples) pero se protege
+            // igualmente para que un log raro no produzca NaN en el JSON.
+            if s.frame_time.is_finite() && s.frame_time > 0.0 {
+                s.frame_time as f32
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    let elapsed_s: Vec<f32> = if con_tiempos {
+        let inicio = recogidas.first().and_then(|s| s.elapsed_ns).unwrap_or(0.0);
+        recogidas
+            .iter()
+            .filter_map(|s| s.elapsed_ns)
+            .map(|ns| ((ns - inicio) / 1e9) as f32)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Si los tiempos no quedaron alineados con los frametimes, se descartan: un eje X
+    // de longitud distinta al eje Y es un gráfico mal dibujado.
+    let elapsed_s = if elapsed_s.len() == frame_time_ms.len() { elapsed_s } else { Vec::new() };
+
+    Some(MuestrasTemporales { frame_time_ms, elapsed_s })
+}
+
 fn compute_stutter(frame_times: &[f64], duration_seconds: f64) -> StutterStats {
     let n = frame_times.len();
 
@@ -410,11 +569,32 @@ pub struct BenchmarkComparison {
     /// `true` cuando el cambio de FPS promedio entra dentro del margen de ruido.
     #[serde(default)]
     pub within_noise: bool,
+    /// `true` solo si los dos comandos registrados son exactamente el mismo texto.
+    ///
+    /// Se calcula aquí, en el backend, y no en cada pantalla: la comparación se guarda en
+    /// disco, así que tiene que llevar la respuesta ya resuelta. `None` cuando alguno de
+    /// los dos comandos no está registrado (benchmarks antiguos): en ese caso **no se
+    /// puede afirmar** que fueran iguales, ni que fueran distintos.
+    #[serde(default)]
+    pub comandos_iguales: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarksData {
     pub benchmarks: Vec<Benchmark>,
+    /// Último número de prueba **repartido** por juego. Nunca retrocede.
+    ///
+    /// Es un contador persistente y no algo derivado de `benchmarks` a propósito: tanto
+    /// `trim_history` (que descarta las más antiguas al pasar de
+    /// `MAX_BENCHMARKS_PER_GAME`) como el borrado manual quitan grabaciones del historial,
+    /// así que «el máximo + 1 de lo que queda» reutilizaría números ya usados y una
+    /// comparación guardada pasaría a señalar otra prueba. Aquí el número gastado se
+    /// queda gastado.
+    ///
+    /// La clave es `game_key` (`appid:<id>` o `name:<nombre normalizado>`), la misma que
+    /// agrupa el historial.
+    #[serde(default)]
+    pub counters: HashMap<String, u32>,
 }
 
 fn get_benchmarks_dir() -> std::path::PathBuf {
@@ -434,7 +614,7 @@ fn get_benchmarks_file() -> std::path::PathBuf {
     get_benchmarks_dir().join("benchmarks.json")
 }
 
-fn load_benchmarks_data() -> BenchmarksData {
+pub(crate) fn load_benchmarks_data() -> BenchmarksData {
     let file = get_benchmarks_file();
 
     if file.exists() {
@@ -447,6 +627,7 @@ fn load_benchmarks_data() -> BenchmarksData {
 
     BenchmarksData {
         benchmarks: Vec::new(),
+        counters: HashMap::new(),
     }
 }
 
@@ -749,6 +930,8 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
     // MangoHud guarda ~1 fila cada 100 ms, así que sumar los frametimes (lo que se hacía
     // antes) daba ~7 s en una grabación de 60 s.
     let elapsed_only: Vec<f64> = raw_samples.iter().filter_map(|s| s.elapsed_ns).collect();
+    // ¿El log trae tiempos reales? Si no, la serie temporal se guarda sin eje X.
+    let con_tiempos = elapsed_only.len() >= 2;
     let duration_seconds = if elapsed_only.len() >= 2 {
         let first = elapsed_only[0];
         let last = elapsed_only[elapsed_only.len() - 1];
@@ -799,6 +982,10 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
 
     // Las muestras están espaciadas de forma uniforme en el tiempo, así que el promedio
     // simple de FPS equivale a (frames totales / tiempo total).
+    // `total_frames` es un nombre heredado: son MUESTRAS del log (una fila cada
+    // `log_interval` ms), no frames. Sumar frames daría el doble o el triple. Se mantiene
+    // el nombre para no romper los JSON ya guardados; `sample_count` dice lo mismo sin
+    // engañar.
     let total_frames = fps_values.len() as u64;
     let avg_fps = fps_values.iter().sum::<f64>() / fps_values.len() as f64;
     let frame_time_avg = frame_times.iter().sum::<f64>() / frame_times.len() as f64;
@@ -882,6 +1069,17 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
         warmup_seconds: Some(warmup_applied),
         noise_percent: noise,
         shader_stutter: shader,
+        sample_count: Some(total_frames),
+        muestras_temporales: serie_temporal(&samples, MAX_MUESTRAS_TEMPORALES, con_tiempos),
+        log_path: std::fs::canonicalize(&file_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_path.to_string_lossy().to_string()),
+        // El análisis del CSV no sabe qué comando había: eso lo rellena `save_benchmark`
+        // con lo que le manda el frontend.
+        origen_comando: OrigenComando::Desconocido,
+        steam_command: None,
+        // Se rellena en `save_benchmark`, que es quien conoce el historial del juego.
+        number: None,
     })
 }
 
@@ -905,6 +1103,61 @@ fn game_key(b: &Benchmark) -> String {
     }
 }
 
+/// ¿La grabación `b` pertenece al juego `(appid, game_name)`?
+///
+/// Hay que aceptar **las dos** identidades, no solo el appid: `analyze_log` deja siempre
+/// `appid` a 0 porque MangoHud no escribe el AppID en su CSV, así que las grabaciones
+/// antiguas solo se identifican por nombre. Filtrar únicamente por `appid` hacía que la
+/// ventana «Pruebas de este juego» dijera «todavía no hay pruebas» aunque el usuario ya
+/// tuviera una de ese juego guardada (visible en «Mis pruebas», que no filtra).
+///
+/// El nombre se compara normalizado (`norm_game_name`: sin mayúsculas, espacios sobrantes
+/// ni extensión de ejecutable) porque el CSV trae el nombre del binario
+/// («Palworld-Win64-Shipping.exe») y la ficha del juego el nombre comercial.
+///
+/// **Solo se cae al nombre cuando alguna de las dos partes no tiene appid.** Si las dos lo
+/// tienen y son distintos, se descarta: dos juegos distintos pueden llamarse igual, y
+/// mezclar sus historiales sería peor que no enseñar nada.
+fn juego_coincide(b: &Benchmark, appid: u32, game_name: &str) -> bool {
+    // Con appid en las dos partes, manda el appid y solo el appid.
+    if appid != 0 && b.appid != 0 {
+        return b.appid == appid;
+    }
+    // Alguien no tiene appid: se compara por nombre.
+    let buscado = norm_game_name(game_name);
+    if buscado.is_empty() {
+        // Sin nombre ni appid no hay forma de identificarlo: no se puede afirmar nada.
+        return false;
+    }
+    norm_game_name(&b.game_name) == buscado
+}
+
+/// Asigna a `benchmark` el siguiente número de su juego y avanza el contador.
+///
+/// El número sale del **contador persistente**, no del historial conservado: borrar una
+/// prueba o dejar que `trim_history` descarte las antiguas no devuelve números al bombo.
+/// Si el contador del juego aún no existe (archivo anterior a este campo), se inicializa
+/// con el mayor número ya presente en el historial de ese juego, de forma que una
+/// instalación que ya tuviera números siga la serie en vez de repetirlos. Las grabaciones
+/// antiguas **sin** número no cuentan: no se les inventa una cronología.
+fn asignar_numero(data: &mut BenchmarksData, benchmark: &mut Benchmark) {
+    // Se calcula la clave con el benchmark ya completo (appid y nombre definitivos).
+    let clave = game_key(benchmark);
+    let maximo_existente = data
+        .benchmarks
+        .iter()
+        .filter(|b| game_key(b) == clave)
+        .filter_map(|b| b.number)
+        .max()
+        .unwrap_or(0);
+
+    let contador = data.counters.entry(clave).or_insert(maximo_existente);
+    // El contador nunca retrocede, ni aunque el historial se haya vaciado.
+    let siguiente = (*contador).max(maximo_existente) + 1;
+    *contador = siguiente;
+    benchmark.number = Some(siguiente);
+}
+
 /// Recorta el historial a las `MAX_BENCHMARKS_PER_GAME` grabaciones más recientes de
 /// cada juego, descartando las más antiguas.
 ///
@@ -913,6 +1166,33 @@ fn game_key(b: &Benchmark) -> String {
 /// exceso se va por la cola según `timestamp` (formato ISO, que ordena bien como texto).
 /// Si dos grabaciones comparten fecha, gana la que está más al final de la lista, que es
 /// la última que se añadió. Conserva el orden original de lo que sobrevive.
+/// Qué comando acaba guardado en un benchmark.
+///
+/// - Se guarda **tal cual llega**, sin recortar ni normalizar: es una instantánea del
+///   texto que el usuario tenía configurado, con sus variables de entorno, wrappers,
+///   comillas y el `%command%`. Tocarlo aquí (quitar `mangohud`, reordenar argumentos)
+///   haría que la prueba guardada describiera un comando que nunca existió.
+/// - Si llega vacío **no se pisa** lo que ya traía el benchmark: un guardado sin comando
+///   no puede borrar un registro que sí existía. Perder el comando de una prueba ya
+///   guardada es exactamente el fallo que hay que evitar.
+fn comando_a_guardar(actual: &str, nuevo: &str) -> String {
+    if nuevo.is_empty() && !actual.is_empty() {
+        actual.to_string()
+    } else {
+        nuevo.to_string()
+    }
+}
+
+/// Decide qué opciones de Steam quedan en la prueba.
+///
+/// La lectura de Steam es un **dato histórico** de la prueba, no del editor: si el guardado
+/// llega sin ella (Steam no instalado, permiso denegado, llamada antigua), se conserva la
+/// que ya tuviera la grabación en vez de borrarla. `Some("")` sí gana: significa «se leyó
+/// y Steam no tenía nada», que es información distinta de «no se pudo leer».
+fn steam_a_guardar(actual: Option<&String>, nueva: Option<String>) -> Option<String> {
+    nueva.or_else(|| actual.cloned())
+}
+
 fn trim_history(list: &mut Vec<Benchmark>) {
     let mut keep: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, b) in list.iter().enumerate() {
@@ -942,6 +1222,35 @@ fn trim_history(list: &mut Vec<Benchmark>) {
     });
 }
 
+/// Analiza un log y dice si **esa misma ruta** ya está en el historial.
+///
+/// Va aquí y no en el frontend porque el frontend no sabe de dónde salió cada
+/// benchmark. Comparar métricas es una heurística frágil: dos grabaciones distintas en el
+/// mismo sitio dan valores casi idénticos, y una grabación ya guardada se reintenta si su
+/// marca de "procesada" se pierde. La ruta del fichero es la identidad de verdad.
+///
+/// Devuelve `true` si ya había un benchmark de esa ruta.
+pub fn benchmark_exists_for_path(data: &BenchmarksData, log_path: &str) -> bool {
+    let objetivo = std::fs::canonicalize(log_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| log_path.to_string());
+    data.benchmarks.iter().any(|b| {
+        if b.log_path.is_empty() {
+            return false;
+        }
+        let suyo = std::fs::canonicalize(&b.log_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| b.log_path.clone());
+        suyo == objetivo
+    })
+}
+
+/// ¿Esta ruta ya está guardada? Lo consulta el vigilante antes de analizar siquiera.
+#[tauri::command]
+pub fn is_log_already_saved(log_path: String) -> Result<bool, String> {
+    Ok(benchmark_exists_for_path(&load_benchmarks_data(), &log_path))
+}
+
 #[tauri::command]
 pub fn save_benchmark(
     mut benchmark: Benchmark,
@@ -949,6 +1258,10 @@ pub fn save_benchmark(
     game_name: String,
     appid: u32,
     launch_command: String,
+    // De dónde salió `launch_command`. Si falta (llamada antigua), `desconocido`.
+    origen_comando: Option<OrigenComando>,
+    // Opciones leídas de Steam. `None` = no se pudo leer; no se inventa nada.
+    steam_command: Option<String>,
     notes: Option<String>,
 ) -> Result<Benchmark, String> {
     let mut data = load_benchmarks_data();
@@ -963,8 +1276,27 @@ pub fn save_benchmark(
     }
 
     benchmark.appid = appid;
-    benchmark.launch_command = launch_command;
+    let comando_previo = benchmark.launch_command.clone();
+    benchmark.launch_command = comando_a_guardar(&benchmark.launch_command, &launch_command);
+    // Si el guardado no trae lectura de Steam, se conserva la que hubiera: es un dato
+    // histórico de la prueba, no del momento de guardar.
+    benchmark.steam_command = steam_a_guardar(benchmark.steam_command.as_ref(), steam_command);
+    // El origen solo se actualiza cuando el comando **sí** se actualizó. Si el guardado
+    // vino sin comando y se conservó el anterior, el origen tiene que seguir describiendo
+    // a ese comando, no a este guardado.
+    benchmark.origen_comando = if benchmark.launch_command != comando_previo
+        || comando_previo.is_empty()
+    {
+        origen_comando.unwrap_or(OrigenComando::Desconocido)
+    } else {
+        benchmark.origen_comando
+    };
     benchmark.notes = notes;
+
+    // Número de presentación («Prueba N»), asignado una sola vez y para siempre. Va aquí,
+    // en el único punto de escritura, para que ninguna grabación pueda quedar sin número
+    // ni heredar el de otra.
+    asignar_numero(&mut data, &mut benchmark);
 
     // Historial por juego: se añade la grabación nueva y se conservan las
     // `MAX_BENCHMARKS_PER_GAME` más recientes de ESTE juego; las más viejas se van solas.
@@ -975,8 +1307,7 @@ pub fn save_benchmark(
     // `trim_history`. Un `retain` por clave de juego en este punto dejaría una sola
     // grabación por juego y el historial de 10 no llegaría a existir.
     data.benchmarks.push(benchmark.clone());
-    trim_history(&mut data.benchmarks);
-    save_benchmarks_data(&data)?;
+    trim_history(&mut data.benchmarks);    save_benchmarks_data(&data)?;
 
     Ok(benchmark)
 }
@@ -991,16 +1322,78 @@ pub fn load_benchmarks() -> Result<Vec<Benchmark>, String> {
     Ok(list)
 }
 
+/// Grabaciones de **un solo juego**.
+///
+/// `game_name` no es decorativo: las grabaciones antiguas (y las hechas con el juego no
+/// abierto, porque MangoHud no escribe el AppID) tienen `appid: 0` y solo se identifican
+/// por nombre. Filtrar solo por appid las dejaba fuera y la ficha del juego decía que no
+/// había pruebas. Ver {@link juego_coincide}.
 #[tauri::command]
-pub fn load_benchmarks_for_game(appid: u32) -> Result<Vec<Benchmark>, String> {
+pub fn load_benchmarks_for_game(
+    appid: u32,
+    game_name: Option<String>,
+) -> Result<Vec<Benchmark>, String> {
+    let nombre = game_name.unwrap_or_default();
     let data = load_benchmarks_data();
     let mut benchmarks: Vec<Benchmark> = data
         .benchmarks
         .into_iter()
-        .filter(|b| b.appid == appid)
+        .filter(|b| juego_coincide(b, appid, &nombre))
         .collect();
     trim_history(&mut benchmarks);
     Ok(benchmarks)
+}
+
+/// Último comando **registrado de verdad** en una prueba de este juego.
+///
+/// Sirve para las grabaciones hechas sin abrir la ficha del juego (entrando a «Pruebas»
+/// desde la barra lateral): ahí Thoriapp no sabe qué tiene configurado el editor, pero sí
+/// lo que dijo la última vez que capturó ese dato. Se devuelve `None` si ninguna prueba de
+/// ese juego tiene comando: no se inventa nada.
+///
+/// **Por qué acepta un nombre.** `analyze_log` deja siempre `appid` a 0 (MangoHud no
+/// escribe el AppID en el CSV), así que la única identidad fiable de la grabación es el
+/// nombre del juego, que sale del propio fichero. Buscar solo por `appid` hacía que esta
+/// recuperación no encontrara nunca nada: la prueba se guardaba sin comando y la vista
+/// mostraba «Comando no registrado» aunque la app lo tuviera apuntado.
+///
+/// Solo cuentan las pruebas con texto: una cadena vacía es «no registrado», no una
+/// observación.
+#[tauri::command]
+pub fn ultimo_comando_registrado(
+    appid: Option<u32>,
+    game_name: Option<String>,
+) -> Result<Option<String>, String> {
+    Ok(ayuda_ultimo_comando(
+        &load_benchmarks_data().benchmarks,
+        appid.unwrap_or(0),
+        game_name.as_deref(),
+    ))
+}
+
+/// Implementación de `ultimo_comando_registrado`, separada para poder probarla.
+///
+/// Orden de preferencia: mismo AppID; si no hay, mismo nombre normalizado.
+fn ayuda_ultimo_comando(
+    benchmarks: &[Benchmark],
+    appid: u32,
+    game_name: Option<&str>,
+) -> Option<String> {
+    let candidatas: Vec<&Benchmark> = benchmarks
+        .iter()
+        .filter(|b| !b.launch_command.trim().is_empty())
+        .filter(|b| {
+            (appid != 0 && b.appid == appid)
+                || game_name
+                    .map(|n| !n.trim().is_empty() && norm_game_name(n) == norm_game_name(&b.game_name))
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    candidatas
+        .iter()
+        .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
+        .map(|b| b.launch_command.clone())
 }
 
 #[tauri::command]
@@ -1009,6 +1402,33 @@ pub fn delete_benchmark(benchmark_id: String) -> Result<(), String> {
     data.benchmarks.retain(|b| b.id != benchmark_id);
     save_benchmarks_data(&data)?;
     Ok(())
+}
+
+/// Borra **solo** las grabaciones de un juego, dejando intactas las de los demás.
+///
+/// La ventana «Pruebas de este juego» enseña el historial de un único juego; su botón de
+/// borrar todo no puede llevarse por delante el historial de los otros. `delete_all_benchmarks`
+/// vacía la lista entera y no sirve para eso.
+///
+/// Se identifica el juego igual que `trim_history` (`game_key`): por `appid` si la grabación
+/// lo tiene, y por nombre normalizado cuando es 0. Así el filtrado coincide exactamente con
+/// el de `load_benchmarks_for_game` y no se borra nada que la vista no estuviera enseñando.
+/// Devuelve cuántas se borraron.
+#[tauri::command]
+pub fn delete_benchmarks_for_game(appid: u32, game_name: String) -> Result<usize, String> {
+    let mut data = load_benchmarks_data();
+    let antes = data.benchmarks.len();
+    // Mismo criterio que la lectura: borrar tiene que borrar exactamente lo que la ventana
+    // estaba enseñando, incluidas las grabaciones antiguas sin appid. Con una clave
+    // `name:` no se borraban, y el botón «Borrar todas» parecía no hacer nada.
+    data.benchmarks.retain(|b| !juego_coincide(b, appid, &game_name));
+    let borradas = antes - data.benchmarks.len();
+    if borradas == 0 {
+        return Ok(0);
+    }
+    save_benchmarks_data(&data)?;
+    println!("[Benchmark] ✅ Se eliminaron {} benchmarks de {}", borradas, game_name);
+    Ok(borradas)
 }
 
 // NUEVO: Comando para borrar todos los benchmarks
@@ -1020,6 +1440,45 @@ pub fn delete_all_benchmarks() -> Result<(), String> {
     save_benchmarks_data(&data)?;
     println!("[Benchmark] ✅ Se eliminaron {} benchmarks", count);
     Ok(())
+}
+
+/// Texto del resultado de comparar dos grabaciones.
+///
+/// Función pura para poder probarla: el texto es lo que el usuario lee como
+/// veredicto, así que su política (no llamar «mejora confirmada» a un resultado de
+/// una sola sesión) merece test propio.
+fn texto_comparacion(
+    fps_change_percent: f64,
+    fps_1_percent_change_percent: f64,
+    noise: f64,
+    within_noise: bool,
+) -> String {
+    if within_noise {
+        format!(
+            "Sin cambio concluyente: {:+.1}% de FPS medios, dentro del margen estimado ±{:.1}%. Repite la prueba antes de decidir.",
+            fps_change_percent, noise
+        )
+    } else if fps_change_percent > noise && fps_1_percent_change_percent < -noise {
+        format!(
+            "Resultado mixto: más FPS medios (+{:.1}%) pero peores momentos ({:.1}%). Puede haber más tirones.",
+            fps_change_percent, fps_1_percent_change_percent
+        )
+    } else if fps_change_percent < -noise && fps_1_percent_change_percent > noise {
+        format!(
+            "Resultado mixto: menos FPS medios ({:.1}%) pero mejores peores momentos (+{:.1}%). Puede sentirse más parejo.",
+            fps_change_percent, fps_1_percent_change_percent
+        )
+    } else if fps_change_percent > noise {
+        format!(
+            "Mejora observada: +{:.1}% de FPS medios, por encima del margen estimado ±{:.1}%. Resultado provisional: repite la prueba para comprobarlo.",
+            fps_change_percent, noise
+        )
+    } else {
+        format!(
+            "Empeoramiento observado: {:.1}% de FPS medios, por encima del margen estimado ±{:.1}%. Resultado provisional: repite la prueba para comprobarlo.",
+            fps_change_percent, noise
+        )
+    }
 }
 
 #[tauri::command]
@@ -1063,35 +1522,22 @@ pub fn compare_benchmarks(
     // Entre dos grabaciones del mismo juego en las mismas condiciones, el propio ruido
     // se estima a partir de las propias grabaciones (variación entre bloques). El mínimo
     // es MIN_NOISE: por debajo de eso nunca se afirma una mejora.
+    //
+    // IMPORTANTE sobre lo que esto permite afirmar: `noise_percent` es el error de
+    // estimación de la media DENTRO de cada grabación, no la variación entre partidas
+    // distintas (otro enemigo, otra zona, la GPU más caliente). Superarlo significa
+    // «estas dos grabaciones midieron distinto más allá del ruido de muestreo», no
+    // «el juego rinde más». Por eso el texto dice «observada» y pide repetir: la
+    // confirmación solo la da comparar grupos (ver `stats.rs`).
     let noise = combined_noise(baseline.noise_percent, test.noise_percent);
     let within_noise = fps_change_percent.abs() <= noise;
 
-    let mut conclusion = if within_noise {
-        format!(
-            "🟡 Sin diferencia clara ({:+.1}% FPS promedio, dentro del margen de ruido ±{:.1}%). Repite la prueba antes de decidir.",
-            fps_change_percent, noise
-        )
-    } else if fps_change_percent > noise && fps_1_percent_change_percent < -noise {
-        format!(
-            "⚠️ Más FPS promedio (+{:.1}%) pero los peores momentos empeoran ({:.1}%): puede haber más tirones",
-            fps_change_percent, fps_1_percent_change_percent
-        )
-    } else if fps_change_percent < -noise && fps_1_percent_change_percent > noise {
-        format!(
-            "⚠️ Menos FPS promedio ({:.1}%) pero los peores momentos mejoran (+{:.1}%): el juego puede sentirse más parejo",
-            fps_change_percent, fps_1_percent_change_percent
-        )
-    } else if fps_change_percent > noise {
-        format!(
-            "✅ Mejora: +{:.1}% FPS promedio (por encima del ruido, ±{:.1}%)",
-            fps_change_percent, noise
-        )
-    } else {
-        format!(
-            "❌ Rendimiento degradado: {:.1}% FPS promedio (por encima del ruido, ±{:.1}%)",
-            fps_change_percent, noise
-        )
-    };
+    let mut conclusion = texto_comparacion(
+        fps_change_percent,
+        fps_1_percent_change_percent,
+        noise,
+        within_noise,
+    );
 
     // Avisos que ayudan a no sacar conclusiones erróneas
     if baseline.game_name != test.game_name {
@@ -1106,6 +1552,8 @@ pub fn compare_benchmarks(
         );
     }
 
+    let iguales = comandos_iguales(&baseline.launch_command, &test.launch_command);
+
     Ok(BenchmarkComparison {
         baseline,
         test,
@@ -1116,7 +1564,27 @@ pub fn compare_benchmarks(
         conclusion,
         noise_percent: Some(noise),
         within_noise,
+        comandos_iguales: iguales,
     })
+}
+
+/// ¿Los dos comandos registrados son el mismo texto?
+///
+/// - Compara el texto **completo** tras recortar espacios de los extremos. No tokeniza ni
+///   normaliza: `mangohud %command%` y `mangohud  %command%` son el mismo comando para el
+///   shell, pero darles el mismo trato exigiría interpretarlo, y este campo existe para
+///   ser conservador. Dos comandos que solo difieren en espacios internos se consideran
+///   distintos, que es el error seguro.
+/// - Devuelve `None` si **alguno** está vacío. Un benchmark antiguo sin comando no prueba
+///   nada: ni que fuera igual, ni que fuera distinto. Antes se asumía `%command%` y la
+///   pantalla decía «sin cambios», que es exactamente el fallo que había.
+pub fn comandos_iguales(antes: &str, despues: &str) -> Option<bool> {
+    let a = antes.trim();
+    let b = despues.trim();
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some(a == b)
 }
 
 #[tauri::command]
@@ -1696,6 +2164,9 @@ mod tests {
             total_frames: 3600,
             notes: None,
             launch_command: "%command%".to_string(),
+            origen_comando: OrigenComando::Instantanea,
+            steam_command: None,
+            number: None,
             spikes_per_min: None,
             pct_over_33ms: None,
             jitter_ms: None,
@@ -1703,11 +2174,518 @@ mod tests {
             warmup_seconds: None,
             noise_percent: None,
             shader_stutter: None,
+            log_path: String::new(),
+            sample_count: None,
+            muestras_temporales: None,
         }
+    }
+
+    #[test]
+    fn texto_comparacion_no_confirma_nada_con_una_sesion() {
+        // Una diferencia grande sigue siendo "observada": el margen de estimación no
+        // mide la variación entre partidas, así que no permite confirmar.
+        let t = texto_comparacion(12.0, 4.0, 5.0, false);
+        assert!(t.contains("Mejora observada"));
+        assert!(t.contains("provisional"));
+        assert!(!t.to_lowercase().contains("confirmad"));
+        assert!(!t.contains('✅'));
+    }
+
+    #[test]
+    fn texto_comparacion_avisa_del_mixto_en_los_dos_sentidos() {
+        let mas_fps = texto_comparacion(20.0, -20.0, 5.0, false);
+        assert!(mas_fps.starts_with("Resultado mixto"));
+        assert!(mas_fps.contains("tirones"));
+
+        let menos_fps = texto_comparacion(-20.0, 20.0, 5.0, false);
+        assert!(menos_fps.starts_with("Resultado mixto"));
+        assert!(menos_fps.contains("parejo"));
+    }
+
+    #[test]
+    fn texto_comparacion_dentro_del_ruido_pide_repetir() {
+        let t = texto_comparacion(3.0, 0.5, 5.1, true);
+        assert!(t.starts_with("Sin cambio concluyente"));
+        assert!(t.contains("Repite"));
+        assert!(!t.contains("Mejora"));
+    }
+
+    #[test]
+    fn texto_comparacion_empeoramiento() {
+        let t = texto_comparacion(-15.0, -10.0, 5.0, false);
+        assert!(t.starts_with("Empeoramiento observado"));
+        assert!(!t.contains("Mejora"));
+    }
+
+    // ── Serie temporal ──────────────────────────────────────────────────────
+
+    fn muestra_con_tiempo(fps: f64, ft: f64, ns: f64) -> Sample {
+        Sample { fps, frame_time: ft, elapsed_ns: Some(ns) }
+    }
+
+    #[test]
+    fn serie_temporal_guarda_frametimes_y_tiempos() {
+        let samples: Vec<Sample> = (0..10)
+            .map(|i| muestra_con_tiempo(100.0, 10.0 + i as f64, i as f64 * 1e8))
+            .collect();
+        let serie = serie_temporal(&samples, 4000, true).expect("debería haber serie");
+        assert_eq!(serie.frame_time_ms.len(), 10);
+        assert_eq!(serie.elapsed_s.len(), 10);
+        assert!((serie.frame_time_ms[0] - 10.0).abs() < 1e-4);
+        // El eje X empieza en 0 (segundos desde el inicio), no en el reloj absoluto.
+        assert!(serie.elapsed_s[0].abs() < 1e-6);
+        assert!((serie.elapsed_s[9] - 0.9).abs() < 1e-4);
+    }
+
+    #[test]
+    fn serie_temporal_sin_columna_elapsed_no_inventa_tiempos() {
+        let samples: Vec<Sample> =
+            (0..5).map(|i| Sample { fps: 60.0, frame_time: 16.0 + i as f64, elapsed_ns: None }).collect();
+        let serie = serie_temporal(&samples, 4000, false).expect("debería haber serie");
+        assert_eq!(serie.frame_time_ms.len(), 5);
+        // Sin tiempos reales, el eje X queda vacío: el frontend dibuja por índice.
+        assert!(serie.elapsed_s.is_empty());
+    }
+
+    #[test]
+    fn serie_temporal_diezma_sin_cortar_el_final() {
+        // 10 000 muestras con tope 1000 → paso 10, y la última debe caer cerca del final.
+        let samples: Vec<Sample> = (0..10_000)
+            .map(|i| muestra_con_tiempo(60.0, i as f64, i as f64 * 1e8))
+            .collect();
+        let serie = serie_temporal(&samples, 1000, true).unwrap();
+        assert_eq!(serie.frame_time_ms.len(), 1000);
+        // El último valor recogido es el de la muestra 9990, no el de la 1000.
+        assert!((serie.frame_time_ms[999] - 9990.0).abs() < 1e-1);
+    }
+
+    #[test]
+    fn serie_temporal_vacia_devuelve_none() {
+        assert!(serie_temporal(&[], 4000, true).is_none());
+    }
+
+    #[test]
+    fn serie_temporal_no_produce_nan_con_frametimes_corruptos() {
+        let samples = vec![
+            Sample { fps: 60.0, frame_time: f64::NAN, elapsed_ns: Some(0.0) },
+            Sample { fps: 60.0, frame_time: -5.0, elapsed_ns: Some(1e8) },
+            Sample { fps: 60.0, frame_time: 16.0, elapsed_ns: Some(2e8) },
+        ];
+        let serie = serie_temporal(&samples, 4000, true).unwrap();
+        assert!(serie.frame_time_ms.iter().all(|v| v.is_finite()));
+        assert_eq!(serie.frame_time_ms, vec![0.0, 0.0, 16.0]);
+    }
+
+    #[test]
+    fn un_log_de_60_segundos_ocupa_poco() {
+        // Comprobación de tamaño: 600 muestras (60 s a 10 Hz) con tiempos.
+        let samples: Vec<Sample> = (0..600)
+            .map(|i| muestra_con_tiempo(60.0, 16.6667, i as f64 * 1e8))
+            .collect();
+        let serie = serie_temporal(&samples, MAX_MUESTRAS_TEMPORALES, true).unwrap();
+        let json = serde_json::to_string(&serie).unwrap();
+        // ~12 bytes por valor × 2 series × 600 + corchetes. Menos de 20 KB es holgado.
+        assert!(
+            json.len() < 20_000,
+            "la serie temporal ocupa {} bytes, más de lo esperado",
+            json.len()
+        );
+        assert!(json.len() > 1_000, "la serie debería tener datos de verdad");
+    }
+
+    // ── Compatibilidad de serialización ─────────────────────────────────────
+
+    #[test]
+    fn un_benchmark_antiguo_sin_campos_nuevos_se_sigue_leyendo() {
+        // JSON tal y como lo escribía la versión anterior: sin sample_count ni serie.
+        let viejo = r#"{
+            "id":"bench_1","profile_id":"","game_name":"Juego","appid":440,
+            "timestamp":"2026-11-02 14:43:52","duration_seconds":60.0,
+            "avg_fps":100.0,"fps_1_percent_low":70.0,"fps_0_1_percent_low":60.0,
+            "max_fps":140.0,"min_fps":40.0,"frame_time_avg":10.0,
+            "frame_time_1_percent_high":14.3,"total_frames":600,
+            "notes":null,"launch_command":"%command%"
+        }"#;
+        let b: Benchmark = serde_json::from_str(viejo).expect("debe deserializar");
+        assert_eq!(b.total_frames, 600);
+        // No se inventan datos temporales en pruebas antiguas.
+        assert!(b.muestras_temporales.is_none());
+        assert!(b.sample_count.is_none());
+        // Y el nombre legible de los FPS sigue intacto.
+        assert_eq!(b.avg_fps, 100.0);
+    }
+
+    #[test]
+    fn total_frames_antiguo_se_usa_como_sample_count_al_leer() {
+        // El campo `total_frames` guardado siempre contuvo muestras, aunque el nombre
+        // diga frames. Al no existir `sample_count`, el valor viejo sigue siendo válido.
+        let viejo = r#"{
+            "id":"b","profile_id":"","game_name":"J","appid":1,
+            "timestamp":"","duration_seconds":60.0,"avg_fps":60.0,
+            "fps_1_percent_low":30.0,"fps_0_1_percent_low":20.0,
+            "max_fps":1.0,"min_fps":1.0,"frame_time_avg":16.0,
+            "frame_time_1_percent_high":33.0,"total_frames":300,
+            "notes":null,"launch_command":""
+        }"#;
+        let b: Benchmark = serde_json::from_str(viejo).unwrap();
+        assert_eq!(b.total_frames, 300);
+    }
+
+    #[test]
+    fn la_serie_temporal_es_opcional_al_serializar() {
+        // Una prueba sin serie no debe escribir un campo vacío en el JSON: cada byte
+        // cuenta cuando hay cientos de benchmarks.
+        let mut b = bench(1, "J");
+        b.sample_count = Some(600);
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(!json.contains("muestras_temporales"), "no debería serializarse: {json}");
+        assert!(json.contains("\"sample_count\":600"));
+    }
+
+    #[test]
+    fn ida_y_vuelta_de_la_serie_temporal() {
+        let mut b = bench(1, "J");
+        b.muestras_temporales = Some(MuestrasTemporales {
+            frame_time_ms: vec![16.6, 17.0, 33.3],
+            elapsed_s: vec![0.0, 0.1, 0.2],
+        });
+        let json = serde_json::to_string(&b).unwrap();
+        let vuelta: Benchmark = serde_json::from_str(&json).unwrap();
+        let serie = vuelta.muestras_temporales.expect("debería conservarse");
+        assert_eq!(serie.frame_time_ms, vec![16.6, 17.0, 33.3]);
+        assert_eq!(serie.elapsed_s, vec![0.0, 0.1, 0.2]);
+    }
+
+    #[test]
+    fn serie_temporal_con_tiempos_vacios_se_lee_bien() {
+        let json = r#"{"frame_time_ms":[16.0,17.0]}"#;
+        let m: MuestrasTemporales = serde_json::from_str(json).unwrap();
+        assert_eq!(m.frame_time_ms.len(), 2);
+        assert!(m.elapsed_s.is_empty());
+    }
+
+    // ── Comando registrado ───────────────────────────────────────────────
+
+    // ── Origen del comando ────────────────────────────────────────────────
+
+    #[test]
+    fn encuentra_el_comando_solo_por_el_nombre_cuando_no_hay_appid() {
+        // Caso real: `analyze_log` deja `appid` a 0 (MangoHud no escribe el AppID en el
+        // CSV), así que la grabación nueva llega sin appid. La anterior sí tiene el 1623730
+        // porque se guardó con la ficha abierta. Buscar solo por appid no encontraba nada y
+        // la prueba salía como «Comando no registrado».
+        let mut anterior = bench(1623730, "Palworld");
+        anterior.launch_command = COMANDO_PALWORLD.into();
+        anterior.timestamp = "2026-11-20 10:00:00".into();
+
+        assert_eq!(
+            ayuda_ultimo_comando(&[anterior], 0, Some("Palworld")).as_deref(),
+            Some(COMANDO_PALWORLD)
+        );
+    }
+
+    #[test]
+    fn el_nombre_se_compara_normalizado() {
+        let mut anterior = bench(1623730, "Palworld.x86_64");
+        anterior.launch_command = COMANDO_PALWORLD.into();
+
+        assert_eq!(
+            ayuda_ultimo_comando(&[anterior], 0, Some("palworld")).as_deref(),
+            Some(COMANDO_PALWORLD)
+        );
+    }
+
+    #[test]
+    fn un_nombre_de_otro_juego_no_presta_su_comando() {
+        let mut otro = bench(1623730, "Palworld");
+        otro.launch_command = COMANDO_PALWORLD.into();
+
+        assert_eq!(ayuda_ultimo_comando(&[otro], 0, Some("Elden Ring")), None);
+    }
+
+    #[test]
+    fn el_appid_manda_sobre_el_nombre() {
+        let mut por_appid = bench(440, "Team Fortress 2");
+        por_appid.launch_command = "gamemoderun %command%".into();
+        por_appid.timestamp = "2026-11-01 10:00:00".into();
+
+        let mut por_nombre = bench(0, "TF2");
+        por_nombre.launch_command = COMANDO_PALWORLD.into();
+        por_nombre.timestamp = "2026-11-20 10:00:00".into();
+
+        // Con appid 440 se devuelve el de ese appid, no el que coincide por nombre.
+        assert_eq!(
+            ayuda_ultimo_comando(&[por_appid, por_nombre], 440, Some("Palworld")).as_deref(),
+            Some("gamemoderun %command%")
+        );
+    }
+
+    #[test]
+    fn ni_appid_ni_nombre_devuelve_none() {
+        let mut anterior = bench(1623730, "Palworld");
+        anterior.launch_command = COMANDO_PALWORLD.into();
+        assert_eq!(ayuda_ultimo_comando(&[anterior.clone()], 0, None), None);
+        assert_eq!(ayuda_ultimo_comando(&[anterior], 0, Some("")), None);
+    }
+
+    #[test]
+    fn sin_pruebas_previas_no_hay_comando_que_recuperar() {
+        assert_eq!(ayuda_ultimo_comando(&[], 1623730, None), None);
+    }
+
+    #[test]
+    fn recupera_el_comando_de_la_ultima_prueba_del_juego() {
+        let mut vieja = bench(1623730, "Palworld");
+        vieja.launch_command = "gamemoderun %command%".into();
+        vieja.timestamp = "2026-11-20 10:00:00".into();
+
+        let mut nueva = bench(1623730, "Palworld");
+        nueva.launch_command = "mesa_glthread=true game-performance mangohud %command%".into();
+        nueva.timestamp = "2026-11-23 13:29:33".into();
+
+        assert_eq!(
+            ayuda_ultimo_comando(&[vieja, nueva], 1623730, None).as_deref(),
+            Some("mesa_glthread=true game-performance mangohud %command%")
+        );
+    }
+
+    #[test]
+    fn no_mezcla_comandos_de_otro_juego() {
+        let mut otro = bench(730, "CS2");
+        otro.launch_command = "gamemoderun %command%".into();
+        assert_eq!(ayuda_ultimo_comando(&[otro], 1623730, None), None);
+    }
+
+    #[test]
+    fn un_comando_vacio_no_es_una_observacion() {
+        // Una prueba antigua sin comando no puede «prestar» su vacío a la nueva.
+        let mut vacia = bench(1623730, "Palworld");
+        vacia.launch_command = String::new();
+        vacia.timestamp = "2026-11-23 13:29:33".into();
+
+        let mut con_dato = bench(1623730, "Palworld");
+        con_dato.launch_command = "mangohud %command%".into();
+        con_dato.timestamp = "2026-11-20 10:00:00".into();
+
+        assert_eq!(
+            ayuda_ultimo_comando(&[con_dato, vacia], 1623730, None).as_deref(),
+            Some("mangohud %command%")
+        );
+    }
+
+    #[test]
+    fn solo_vacios_devuelve_none_no_cadena_vacia() {
+        let mut vacia = bench(1623730, "Palworld");
+        vacia.launch_command = String::new();
+        assert_eq!(ayuda_ultimo_comando(&[vacia], 1623730, None), None);
+    }
+
+    #[test]
+    fn un_benchmark_antiguo_sin_origen_se_lee_como_desconocido() {
+        let json = r#"{
+            "id":"viejo","profile_id":"","game_name":"Palworld","appid":1623730,
+            "timestamp":"2026-11-23 15:10:13","duration_seconds":30.0,
+            "avg_fps":60.0,"fps_1_percent_low":50.0,"fps_0_1_percent_low":45.0,
+            "max_fps":80.0,"min_fps":30.0,"frame_time_avg":16.6,
+            "frame_time_1_percent_high":20.0,"total_frames":300,"notes":null,
+            "launch_command":"%command%"
+        }"#;
+        let b: Benchmark = serde_json::from_str(json).unwrap();
+        assert_eq!(b.origen_comando, OrigenComando::Desconocido);
+        // El comando sí se lee: es el que hay, aunque no se sepa de dónde vino.
+        assert_eq!(b.launch_command, "%command%");
+        // Y no hay lectura de Steam: `None`, no `""` (que significaría «Steam sin nada»).
+        assert_eq!(b.steam_command, None);
+    }
+
+    /// Una prueba de Palworld con el editor en `%command%` pero Steam lanzando con
+    /// argumentos: lo que sirve para saber qué se probó es lo que dice Steam.
+    #[test]
+    fn steam_sin_leer_no_borra_lo_que_ya_se_sabia() {
+        let viejo = Some("mangohud %command%".to_string());
+        assert_eq!(steam_a_guardar(viejo.as_ref(), None), viejo);
+    }
+
+    #[test]
+    fn steam_leido_y_vacio_es_un_dato_y_pisa_al_anterior() {
+        // `Some("")` = se leyó y Steam no tenía opciones: se lanzó sin argumentos.
+        // Es información real, así que gana a la lectura vieja.
+        let viejo = Some("mangohud %command%".to_string());
+        assert_eq!(steam_a_guardar(viejo.as_ref(), Some(String::new())), Some(String::new()));
+    }
+
+    #[test]
+    fn steam_guardado_sobrevive_a_la_serializacion() {
+        let mut b = bench(1623730, "Palworld");
+        b.steam_command = Some("mesa_glthread=true gamemoderun mangohud %command%".into());
+        let json = serde_json::to_string(&b).unwrap();
+        let vuelta: Benchmark = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            vuelta.steam_command.as_deref(),
+            Some("mesa_glthread=true gamemoderun mangohud %command%")
+        );
+    }
+
+    #[test]
+    fn el_origen_se_serializa_en_snake_case() {
+        let mut b = bench(1, "J");
+        b.origen_comando = OrigenComando::ComandoActual;
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(json.contains(r#""origen_comando":"comando_actual""#));
+        let vuelta: Benchmark = serde_json::from_str(&json).unwrap();
+        assert_eq!(vuelta.origen_comando, OrigenComando::ComandoActual);
+    }
+
+    #[test]
+    fn un_guardado_sin_comando_no_borra_el_que_ya_habia() {
+        assert_eq!(comando_a_guardar(COMANDO_PALWORLD, ""), COMANDO_PALWORLD);
+    }
+
+    #[test]
+    fn un_comando_nuevo_sustituye_al_anterior() {
+        assert_eq!(
+            comando_a_guardar("%command%", COMANDO_PALWORLD),
+            COMANDO_PALWORLD
+        );
+    }
+
+    #[test]
+    fn el_comando_no_se_normaliza_al_guardar() {
+        // Con espacios de más, comillas y orden raro: se guarda igual.
+        let raro = r#"  A="x y"  mangohud   %command%  "#;
+        assert_eq!(comando_a_guardar("", raro), raro);
+    }
+
+    #[test]
+    fn guardar_vacio_sobre_vacio_deja_vacio() {
+        assert_eq!(comando_a_guardar("", ""), "");
+    }
+
+    const COMANDO_PALWORLD: &str =
+        "mesa_glthread=true game-performance mangohud %command%";
+
+    #[test]
+    fn comandos_identicos_son_iguales() {
+        assert_eq!(comandos_iguales(COMANDO_PALWORLD, COMANDO_PALWORLD), Some(true));
+        assert_eq!(comandos_iguales("%command%", "%command%"), Some(true));
+    }
+
+    #[test]
+    fn comandos_distintos_son_distintos() {
+        assert_eq!(comandos_iguales("%command%", COMANDO_PALWORLD), Some(false));
+        assert_eq!(comandos_iguales(COMANDO_PALWORLD, "%command%"), Some(false));
+    }
+
+    #[test]
+    fn un_comando_ausente_no_prueba_nada() {
+        // Es el fallo de Palworld: un benchmark antiguo sin comando no puede dar ni
+        // «iguales» ni «distintos», porque no hay dato.
+        assert_eq!(comandos_iguales("", COMANDO_PALWORLD), None);
+        assert_eq!(comandos_iguales(COMANDO_PALWORLD, ""), None);
+        assert_eq!(comandos_iguales("", ""), None);
+        assert_eq!(comandos_iguales("   ", "%command%"), None);
+    }
+
+    #[test]
+    fn se_ignoran_los_espacios_de_los_extremos() {
+        assert_eq!(
+            comandos_iguales(&format!("  {COMANDO_PALWORLD} "), COMANDO_PALWORLD),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn los_espacios_internos_cuentan_como_diferencia() {
+        // Conservador a propósito: normalizar espacios exigiría interpretar el comando.
+        assert_eq!(
+            comandos_iguales("mangohud  %command%", "mangohud %command%"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn el_orden_de_los_argumentos_cuenta() {
+        assert_eq!(
+            comandos_iguales("--foo=1 --bar=2 %command%", "--bar=2 --foo=1 %command%"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn las_variables_de_entorno_y_los_wrappers_se_distinguen() {
+        assert_eq!(
+            comandos_iguales("gamemoderun %command%", COMANDO_PALWORLD),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn un_comando_antiguo_sin_el_campo_se_lee_como_vacio() {
+        // JSON de una versión anterior a que existiera `launch_command`.
+        let json = r#"{
+            "id":"viejo","profile_id":"","game_name":"Palworld","appid":1623730,
+            "timestamp":"2026-11-02 14:43:52","duration_seconds":60.0,
+            "avg_fps":100.0,"fps_1_percent_low":70.0,"fps_0_1_percent_low":60.0,
+            "max_fps":140.0,"min_fps":40.0,"frame_time_avg":10.0,
+            "frame_time_1_percent_high":14.3,"total_frames":600,"notes":null
+        }"#;
+        let b: Benchmark = serde_json::from_str(json).expect("debe deserializar");
+        assert_eq!(b.launch_command, "");
+        // Y no se inventa un comando al compararlo.
+        assert_eq!(comandos_iguales(&b.launch_command, COMANDO_PALWORLD), None);
+    }
+
+    #[test]
+    fn el_comando_sobrevive_a_la_serializacion_sin_cambios() {
+        let mut b = bench(1, "Palworld");
+        b.launch_command = COMANDO_PALWORLD.to_string();
+        let json = serde_json::to_string(&b).unwrap();
+        let vuelta: Benchmark = serde_json::from_str(&json).unwrap();
+        assert_eq!(vuelta.launch_command, COMANDO_PALWORLD);
+    }
+
+    #[test]
+    fn un_comando_con_comillas_y_espacios_se_conserva_exacto() {
+        let comando = r#"DXVK_HUD="fps,frametimes" mangohud --dlsym %command% -novid"#;
+        let mut b = bench(1, "J");
+        b.launch_command = comando.to_string();
+        let vuelta: Benchmark = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(vuelta.launch_command, comando);
     }
 
     fn sample(fps: f64, ft: f64) -> Sample {
         Sample { fps, frame_time: ft, elapsed_ns: None }
+    }
+
+    fn con_ruta(log_path: &str) -> crate::benchmarks::BenchmarksData {
+        let mut b = bench(440, "Team Fortress 2");
+        b.log_path = log_path.to_string();
+        crate::benchmarks::BenchmarksData {
+            benchmarks: vec![b],
+            counters: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn la_misma_ruta_cuenta_como_duplicado() {
+        let data = con_ruta("/tmp/juego.csv");
+        assert!(benchmark_exists_for_path(&data, "/tmp/juego.csv"));
+    }
+
+    #[test]
+    fn otra_ruta_no_es_duplicado_aunque_las_metricas_coincidan() {
+        // Esto es lo que fallaba: dos grabaciones distintas del mismo sitio dan cifras
+        // casi iguales, y el historial las rechazaba como "duplicado".
+        let data = con_ruta("/tmp/juego-1.csv");
+        assert!(!benchmark_exists_for_path(&data, "/tmp/juego-2.csv"));
+    }
+
+    #[test]
+    fn un_benchmark_viejo_sin_ruta_nunca_es_duplicado() {
+        // Los guardados antes de existir `log_path` no pueden identificarse; es mejor
+        // guardar la grabación otra vez que rechazarla sin motivo.
+        let data = con_ruta("");
+        assert!(!benchmark_exists_for_path(&data, "/tmp/juego.csv"));
     }
 
     #[test]
@@ -1819,6 +2797,275 @@ mod tests {
         b.timestamp = format!("2026-01-{:02} 10:00:00", day);
         b.id = format!("{}-{}", b.id, day);
         b
+    }
+
+    /// Simula un guardado completo: asigna número, añade y recorta, como `save_benchmark`.
+    fn guardar(data: &mut BenchmarksData, appid: u32, nombre: &str, dia: u32) -> u32 {
+        let mut b = bench_at(appid, nombre, dia);
+        asignar_numero(data, &mut b);
+        let n = b.number.expect("toda grabación nueva tiene número");
+        data.benchmarks.push(b);
+        trim_history(&mut data.benchmarks);
+        n
+    }
+
+    fn vacio() -> BenchmarksData {
+        BenchmarksData {
+            benchmarks: vec![],
+            counters: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn numera_consecutivo_por_juego() {
+        let mut d = vacio();
+        assert_eq!(guardar(&mut d, 440, "TF2", 1), 1);
+        assert_eq!(guardar(&mut d, 440, "TF2", 2), 2);
+        assert_eq!(guardar(&mut d, 440, "TF2", 3), 3);
+    }
+
+    #[test]
+    fn numeracion_independiente_entre_juegos() {
+        let mut d = vacio();
+        assert_eq!(guardar(&mut d, 440, "TF2", 1), 1);
+        assert_eq!(guardar(&mut d, 730, "CS2", 2), 1);
+        assert_eq!(guardar(&mut d, 440, "TF2", 3), 2);
+        assert_eq!(guardar(&mut d, 730, "CS2", 4), 2);
+    }
+
+    #[test]
+    fn borrar_una_prueba_no_renumera_las_demas() {
+        let mut d = vacio();
+        guardar(&mut d, 440, "TF2", 1);
+        guardar(&mut d, 440, "TF2", 2);
+        guardar(&mut d, 440, "TF2", 3);
+
+        // Se borra la del medio, como hace `delete_benchmark`.
+        d.benchmarks.retain(|b| b.number != Some(2));
+
+        let numeros: Vec<u32> = d.benchmarks.iter().filter_map(|b| b.number).collect();
+        assert_eq!(numeros, vec![1, 3], "borrar no puede renumerar");
+    }
+
+    #[test]
+    fn tras_borrar_la_siguiente_no_reutiliza_el_numero() {
+        let mut d = vacio();
+        guardar(&mut d, 440, "TF2", 1);
+        guardar(&mut d, 440, "TF2", 2);
+
+        // Se borran TODAS: el historial queda vacío y el contador debe aguantar.
+        d.benchmarks.clear();
+
+        // Este es el caso que un contador derivado del historial rompería: sin estado
+        // persistente volvería a repartir el 1.
+        assert_eq!(guardar(&mut d, 440, "TF2", 3), 3);
+    }
+
+    // ── Identidad del juego ──────────────────────────────────────────────────
+    //
+    // Regresión: la ventana «Pruebas de este juego» decía «todavía no hay pruebas» aunque
+    // el usuario tuviera una guardada. `analyze_log` deja `appid` a 0 (MangoHud no escribe
+    // el AppID en su CSV), así que filtrar solo por appid no encontraba nada.
+
+    #[test]
+    fn coincide_por_nombre_cuando_la_grabacion_no_tiene_appid() {
+        // El caso real: prueba guardada antes, con appid 0 y nombre del juego.
+        let b = bench(0, "Palworld");
+        assert!(juego_coincide(&b, 1623730, "Palworld"));
+    }
+
+    #[test]
+    fn coincide_por_nombre_ignorando_el_sufijo_del_ejecutable() {
+        // El CSV de MangoHud trae el binario, no el nombre comercial.
+        let b = bench(0, "Palworld-Win64-Shipping.exe");
+        assert!(juego_coincide(&b, 1623730, "Palworld-Win64-Shipping"));
+        let b2 = bench(0, "Celeste.exe");
+        assert!(juego_coincide(&b2, 504230, "Celeste"));
+    }
+
+    #[test]
+    fn coincide_por_appid_cuando_lo_tiene() {
+        let b = bench(1623730, "Palworld");
+        assert!(juego_coincide(&b, 1623730, "Palworld"));
+    }
+
+    #[test]
+    fn no_coincide_con_otro_juego_aunque_se_llame_igual() {
+        // Dos juegos distintos con el mismo nombre: manda el appid, no el texto.
+        let b = bench(440, "Team Fortress 2");
+        assert!(!juego_coincide(&b, 730, "Team Fortress 2"));
+    }
+
+    #[test]
+    fn una_grabacion_antigua_no_se_cuela_en_otro_juego_de_igual_nombre() {
+        // Antigua (appid 0) frente a una ficha con appid: solo entra si el nombre cuadra.
+        let b = bench(0, "Palworld");
+        assert!(juego_coincide(&b, 1623730, "Palworld"));
+        assert!(!juego_coincide(&b, 1623730, "Otro Juego"));
+    }
+
+    #[test]
+    fn sin_appid_ni_nombre_no_se_afirma_nada() {
+        let b = bench(0, "");
+        assert!(!juego_coincide(&b, 0, ""));
+    }
+
+    #[test]
+    fn load_benchmarks_for_game_encuentra_la_prueba_antigua_sin_appid() {
+        // Reproduce el fallo: una grabación antigua de Palworld con appid 0.
+        let data = BenchmarksData {
+            benchmarks: vec![bench(0, "Palworld"), bench(730, "CS2")],
+            counters: HashMap::new(),
+        };
+        let mut del_juego: Vec<Benchmark> = data
+            .benchmarks
+            .into_iter()
+            .filter(|b| juego_coincide(b, 1623730, "Palworld"))
+            .collect();
+        trim_history(&mut del_juego);
+
+        assert_eq!(del_juego.len(), 1, "la prueba antigua debe aparecer");
+        assert_eq!(del_juego[0].game_name, "Palworld");
+    }
+
+    // ── Borrado por juego ────────────────────────────────────────────────────
+    //
+    // `delete_benchmarks_for_game` es lo que usa la ventana «Pruebas de este juego».
+    // Lo importante es que NO toque el historial de los otros juegos: borrar todo desde
+    // la ficha de un juego no puede vaciar la lista entera.
+
+    #[test]
+    fn borrar_por_juego_respeta_los_demas_juegos() {
+        let mut d = vacio();
+        d.benchmarks.push(bench(440, "TF2"));
+        d.benchmarks.push(bench(730, "CS2"));
+
+        // Mismo criterio que usa el comando.
+        d.benchmarks.retain(|b| !juego_coincide(b, 440, "TF2"));
+
+        assert_eq!(d.benchmarks.len(), 1);
+        assert_eq!(d.benchmarks[0].game_name, "CS2");
+    }
+
+    #[test]
+    fn borrar_por_juego_sin_appid_usa_el_nombre_normalizado() {
+        let mut d = vacio();
+        // Grabaciones sin AppID (MangoHud no lo escribe): la clave es el nombre.
+        d.benchmarks.push(bench(0, "Hollow Knight"));
+        d.benchmarks.push(bench(0, "Celeste"));
+
+        d.benchmarks.retain(|b| !juego_coincide(b, 0, "hollow knight"));
+
+        assert_eq!(d.benchmarks.len(), 1);
+        assert_eq!(d.benchmarks[0].game_name, "Celeste");
+    }
+
+    #[test]
+    fn borrar_por_juego_sin_coincidencias_no_cambia_nada() {
+        let mut d = vacio();
+        d.benchmarks.push(bench(440, "TF2"));
+
+        let antes = d.benchmarks.len();
+        d.benchmarks.retain(|b| !juego_coincide(b, 999, "Otro Juego"));
+
+        assert_eq!(d.benchmarks.len(), antes);
+    }
+
+    #[test]
+    fn borrar_por_juego_no_renumera_las_pruebas_de_otros_juegos() {
+        // El contador de números vive aparte; borrar por juego no lo toca.
+        let mut d = vacio();
+        guardar(&mut d, 440, "TF2", 1);
+        guardar(&mut d, 730, "CS2", 1);
+        guardar(&mut d, 730, "CS2", 2);
+
+        d.benchmarks.retain(|b| !juego_coincide(b, 440, "TF2"));
+
+        let de_cs2: Vec<u32> = d.benchmarks.iter().filter_map(|b| b.number).collect();
+        assert_eq!(de_cs2, vec![1, 2], "CS2 conserva sus números");
+        // Y la siguiente prueba de CS2 sigue la cuenta.
+        assert_eq!(guardar(&mut d, 730, "CS2", 3), 3);
+    }
+
+    #[test]
+    fn trim_history_no_devuelve_numeros_al_bombo() {
+        let mut d = vacio();
+        for dia in 1..=MAX_BENCHMARKS_PER_GAME as u32 {
+            guardar(&mut d, 440, "TF2", dia);
+        }
+        assert_eq!(d.benchmarks.len(), MAX_BENCHMARKS_PER_GAME);
+
+        // La 11.ª provoca el recorte de la 1.ª, pero la nueva es la 11, no la 1.
+        assert_eq!(guardar(&mut d, 440, "TF2", 11), 11);
+        assert_eq!(d.benchmarks.len(), MAX_BENCHMARKS_PER_GAME);
+        assert!(!d.benchmarks.iter().any(|b| b.number == Some(1)));
+    }
+
+    #[test]
+    fn el_contador_se_inicializa_desde_los_numeros_ya_guardados() {
+        // Archivo anterior a `counters`, pero con números ya repartidos: la serie sigue,
+        // no vuelve a empezar en 1.
+        let mut d = vacio();
+        let mut viejo = bench_at(440, "TF2", 1);
+        viejo.number = Some(7);
+        d.benchmarks.push(viejo);
+
+        assert_eq!(guardar(&mut d, 440, "TF2", 2), 8);
+    }
+
+    #[test]
+    fn grabaciones_antiguas_sin_numero_no_inventan_cronologia() {
+        let mut d = vacio();
+        // Dos antiguas sin número: NO cuentan para inicializar el contador.
+        d.benchmarks.push(bench_at(440, "TF2", 1));
+        d.benchmarks.push(bench_at(440, "TF2", 2));
+
+        assert_eq!(guardar(&mut d, 440, "TF2", 3), 1);
+        // Y las viejas siguen sin número: no se les asigna uno retroactivo.
+        assert_eq!(d.benchmarks.iter().filter(|b| b.number.is_none()).count(), 2);
+    }
+
+    #[test]
+    fn juegos_sin_appid_se_numeran_por_nombre_normalizado() {
+        let mut d = vacio();
+        assert_eq!(guardar(&mut d, 0, "Hollow Knight", 1), 1);
+        // Mismo juego, nombre con mayúsculas y espacios: misma serie.
+        assert_eq!(guardar(&mut d, 0, "  hollow knight  ", 2), 2);
+        // Otro juego sin appid: serie propia.
+        assert_eq!(guardar(&mut d, 0, "Celeste", 3), 1);
+    }
+
+    #[test]
+    fn el_numero_sobrevive_a_serializar_y_recargar() {
+        let mut d = vacio();
+        guardar(&mut d, 440, "TF2", 1);
+        guardar(&mut d, 440, "TF2", 2);
+
+        let json = serde_json::to_string(&d).unwrap();
+        let vuelta: BenchmarksData = serde_json::from_str(&json).unwrap();
+
+        let numeros: Vec<u32> = vuelta.benchmarks.iter().filter_map(|b| b.number).collect();
+        assert_eq!(numeros, vec![1, 2]);
+        assert_eq!(vuelta.counters.get("appid:440"), Some(&2));
+    }
+
+    #[test]
+    fn json_antiguo_sin_numero_ni_contadores_se_lee_sin_romper() {
+        // Exactamente el formato anterior: sin `number` y sin `counters`.
+        let json = r#"{
+            "benchmarks": [{
+                "id":"b","profile_id":"","game_name":"TF2","appid":440,
+                "timestamp":"2026-01-01 10:00:00","duration_seconds":60.0,
+                "avg_fps":60.0,"fps_1_percent_low":50.0,"fps_0_1_percent_low":45.0,
+                "max_fps":80.0,"min_fps":30.0,"frame_time_avg":16.6,
+                "frame_time_1_percent_high":20.0,"total_frames":300,"notes":null,
+                "launch_command":"%command%"
+            }]
+        }"#;
+        let d: BenchmarksData = serde_json::from_str(json).unwrap();
+        assert_eq!(d.benchmarks.len(), 1);
+        assert_eq!(d.benchmarks[0].number, None);
+        assert!(d.counters.is_empty());
     }
 
     #[test]

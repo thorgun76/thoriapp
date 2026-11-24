@@ -1393,9 +1393,12 @@ mod tests {
         let base = dir_temporal_launchers("heronite_tilde");
         let name = base.file_name().unwrap().to_string_lossy().to_string();
 
-        std::env::set_var("HOME", base.parent().unwrap());
-        assert!(install_target_exists(&format!("~/{name}")));
-        assert!(!install_target_exists("~/carpeta_que_no_existe_xyz"));
+        {
+            // Sin el guardián, este test pisaba el `HOME` de los de `steam_launch.rs`.
+            let _entorno = crate::test_entorno::HomeTemporal::nuevo(base.parent().unwrap());
+            assert!(install_target_exists(&format!("~/{name}")));
+            assert!(!install_target_exists("~/carpeta_que_no_existe_xyz"));
+        }
 
         let _ = fs::remove_dir_all(&base);
     }

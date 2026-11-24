@@ -31,32 +31,29 @@ function renderLibrary(props: Partial<Parameters<typeof LibraryView>[0]> = {}) {
 }
 
 describe('LibraryView: avisos de juegos ocultos', () => {
-  it('avisa de los juegos de Heronite desinstalados', () => {
-    // Heronite no borra la entrada al desinstalar (guarda las horas jugadas),
-    // así que se ocultan aquí. Sin este aviso el usuario cree que la app ha
-    // perdido juegos.
-    renderLibrary({ heroniteUninstalled: 3 });
+  // Heronite no borra la entrada al desinstalar (guarda las horas jugadas), así que
+  // esos juegos se ocultan de la lista. Antes se avisaba con un recuento («199 juegos
+  // desinstalados en Heronite no se muestran»): era ruido en la cabecera, un número que
+  // no se puede usar para nada. Ya no se dice nada.
+  it('no avisa de los juegos de Heronite desinstalados', () => {
+    renderLibrary({ heroniteUninstalled: 199 });
 
-    expect(screen.getByText('3 juegos desinstalados en Heronite no se muestran')).toBeTruthy();
-  });
-
-  it('en singular concuerda con el número', () => {
-    renderLibrary({ heroniteUninstalled: 1 });
-
-    expect(screen.getByText('1 juego desinstalado en Heronite no se muestra')).toBeTruthy();
+    expect(screen.queryByText(/desinstalado/i)).toBeNull();
+    expect(screen.queryByText(/Heronite no se muestran/i)).toBeNull();
   });
 
   it('no dice nada si no hay desinstalados', () => {
     renderLibrary({ heroniteUninstalled: 0 });
 
-    expect(screen.queryByText(/desinstalado/)).toBeNull();
+    expect(screen.queryByText(/desinstalado/i)).toBeNull();
   });
 
-  it('muestra a la vez el aviso de duplicados de Steam y el de Heronite', () => {
+  it('mantiene el aviso de duplicados de Steam', () => {
+    // Ese sí se queda: evita que el usuario crea que la app ha perdido juegos.
     renderLibrary({ hiddenDuplicates: 1, heroniteUninstalled: 4 });
 
     expect(screen.getByText(/1 juego ya está en Steam/)).toBeTruthy();
-    expect(screen.getByText('4 juegos desinstalados en Heronite no se muestran')).toBeTruthy();
+    expect(screen.queryByText(/desinstalado/i)).toBeNull();
   });
 });
 

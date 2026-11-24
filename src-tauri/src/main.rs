@@ -7,6 +7,8 @@ mod gpu_rank;
 mod hw;
 mod launchers;
 mod log;
+mod log_watcher;
+mod log_watcher_state;
 mod net;
 mod preflight;
 mod profiles;
@@ -14,7 +16,11 @@ mod proton_pulse;
 mod requirements;
 mod rules;
 mod shaders;
+mod stats;
 mod steam;
+mod steam_launch;
+#[cfg(test)]
+mod test_entorno;
 
 use serde::Serialize;
 use tauri::async_runtime::spawn_blocking;
@@ -119,6 +125,34 @@ async fn scan_library() -> Result<Vec<steam::LibGame>, String> {
 #[tauri::command]
 async fn search_store(term: String) -> Result<Vec<steam::LibGame>, String> {
     spawn_blocking(move || steam::search_store(&term))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Opciones de lanzamiento que Steam tiene configuradas para un juego.
+///
+/// Solo lectura: no escribe nada en Steam (ver `steam_launch`). `None` = no se puede
+/// saber, que es distinto de «Steam las tiene vacías» (`opciones: Some("")`).
+#[tauri::command]
+async fn steam_launch_options(appid: u32) -> Result<Option<steam_launch::OpcionesSteam>, String> {
+    // Leer varios `localconfig.vdf` puede ser lento (son grandes): fuera del hilo de UI.
+    tauri::async_runtime::spawn_blocking(move || Ok(steam_launch::leer_opciones(appid)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Opciones de lanzamiento de Steam para el juego de una grabación.
+///
+/// El AppID de un CSV de MangoHud llega a 0 (el fichero no lo trae), así que se resuelve
+/// por nombre contra la biblioteca instalada. Sin esto, una prueba analizada sin la ficha
+/// del juego abierta se quedaba sin saber con qué argumentos se había hecho.
+#[tauri::command]
+async fn steam_launch_options_para_juego(
+    appid: Option<u32>,
+    game_name: Option<String>,
+) -> Result<Option<steam_launch::OpcionesSteam>, String> {
+    // Recorre bibliotecas y `localconfig.vdf` (megabytes): fuera del hilo de UI.
+    spawn_blocking(move || Ok(steam_launch::leer_opciones_juego(appid, game_name.as_deref())))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -240,6 +274,56 @@ fn heronite_uninstalled_count() -> usize {
     launchers::heronite_desinstalados()
 }
 
+/// Compara dos grupos de grabaciones (la misma configuración repetida varias veces).
+///
+/// Una sola comparación entre dos grabaciones no distingue una mejora real de la
+/// varianza del juego; con 3 o más por lado sí se puede dar un intervalo. Devuelve
+/// una entrada por métrica para que la UI decida cuál enseñar.
+#[tauri::command]
+fn compare_benchmark_groups(
+    antes_ids: Vec<String>,
+    despues_ids: Vec<String>,
+) -> Result<Vec<stats::GroupComparison>, String> {
+    let data = benchmarks::load_benchmarks_data();
+    let pick = |ids: &[String]| -> Result<Vec<benchmarks::Benchmark>, String> {
+        ids.iter()
+            .map(|id| {
+                data.benchmarks
+                    .iter()
+                    .find(|b| &b.id == id)
+                    .cloned()
+                    .ok_or_else(|| format!("Grabación no encontrada: {id}"))
+            })
+            .collect()
+    };
+
+    let antes = pick(&antes_ids)?;
+    let despues = pick(&despues_ids)?;
+    if antes.is_empty() || despues.is_empty() {
+        return Err("Elige al menos una grabación de cada lado.".to_string());
+    }
+    // Juegos distintos no se comparan: el número saldría, pero no significaría nada.
+    if antes[0].game_name != despues[0].game_name {
+        return Err(format!(
+            "Son juegos distintos ({} y {}): no se pueden comparar.",
+            antes[0].game_name, despues[0].game_name
+        ));
+    }
+
+    let avg_a: Vec<f64> = antes.iter().map(|b| b.avg_fps).collect();
+    let avg_d: Vec<f64> = despues.iter().map(|b| b.avg_fps).collect();
+    let low1_a: Vec<f64> = antes.iter().map(|b| b.fps_1_percent_low).collect();
+    let low1_d: Vec<f64> = despues.iter().map(|b| b.fps_1_percent_low).collect();
+    let low01_a: Vec<f64> = antes.iter().map(|b| b.fps_0_1_percent_low).collect();
+    let low01_d: Vec<f64> = despues.iter().map(|b| b.fps_0_1_percent_low).collect();
+
+    Ok(vec![
+        stats::compare_groups(&avg_a, &avg_d, stats::Metric::AvgFps),
+        stats::compare_groups(&low1_a, &low1_d, stats::Metric::Fps1PercentLow),
+        stats::compare_groups(&low01_a, &low01_d, stats::Metric::Fps01PercentLow),
+    ])
+}
+
 /// ¿Se está ejecutando como root?
 ///
 /// Thoriapp escribe en la configuración del usuario (`~/.config/MangoHud`,
@@ -281,6 +365,9 @@ fn main() {
             scan_library,
             search_store,
             game_info,
+            steam_launch_options,
+            steam_launch_options_para_juego,
+            benchmarks::ultimo_comando_registrado,
             analyze_log,
             open_url,
             detect_engine,
@@ -300,7 +387,9 @@ fn main() {
             benchmarks::save_benchmark,
             benchmarks::load_benchmarks,
             benchmarks::load_benchmarks_for_game,
+            benchmarks::is_log_already_saved,
             benchmarks::delete_benchmark,
+            benchmarks::delete_benchmarks_for_game,
             benchmarks::delete_all_benchmarks,
             benchmarks::compare_benchmarks,
             benchmarks::analyze_mangohud_log_command,
@@ -314,6 +403,12 @@ fn main() {
             preflight::get_runtime_env_command,
             anticheat::get_anticheat_info,
             proton_pulse::get_proton_pulse_reports,
+            compare_benchmark_groups,
+            log_watcher::scan_new_mangohud_logs,
+            log_watcher::list_mangohud_logs,
+            log_watcher::mark_logs_processed,
+            log_watcher::processed_logs_count,
+            log_watcher::forget_processed_logs,
             shaders::get_shader_cache,
             benchmarks::save_comparison,
             benchmarks::load_comparisons,

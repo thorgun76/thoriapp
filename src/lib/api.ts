@@ -4,14 +4,18 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  OpcionesSteam,
   AntiCheatReport,
   Benchmark,
   BenchmarkComparison,
   CommunityRecommendation,
+  FinishedLog,
   Game,
+  OrigenComando,
   GameEngine,
   GameInfo,
   GameRules,
+  GroupComparison,
   Hardware,
   ImportPreview,
   Profile,
@@ -70,6 +74,20 @@ export interface SaveBenchmarkPayload {
   gameName: string;
   appid: number;
   launchCommand: string;
+  /**
+   * De dónde salió el comando. Se guarda con la prueba para poder auditarla después.
+   * Opcional: si falta, el backend asume `desconocido`.
+   */
+  origenComando?: OrigenComando;
+  /**
+   * Opciones que **Steam** tenía configuradas (`localconfig.vdf`) al guardar la prueba.
+   *
+   * Es lo que de verdad se ejecutó, así que es el dato que responde «¿con qué argumento
+   * hice esta prueba?». `launchCommand` es lo que Thoriapp proponía en su editor y puede
+   * no coincidir. `null`/`undefined` = no se pudo leer; `''` es un dato real («sin
+   * opciones»). Nunca se inventa.
+   */
+  steamCommand?: string | null;
   notes: string | null;
 }
 
@@ -85,6 +103,29 @@ export const api = {
   /** Juegos de Heronite ocultos por estar desinstalados (`is_installed: false`). */
   heroniteUninstalledCount: () => invoke<number>('heronite_uninstalled_count'),
   searchStore: (term: string) => invoke<Game[]>('search_store', { term }),
+
+  /**
+   * Opciones de lanzamiento que Steam tiene configuradas para un juego.
+   *
+   * Solo lectura. Devuelve `null` cuando no se puede saber (sin Steam, sin
+   * `localconfig.vdf`, o el juego no aparece), que es **distinto** de Steam tenerlas
+   * vacías (`opciones: ''`).
+   */
+  steamLaunchOptions: (appid: number) =>
+    invoke<OpcionesSteam | null>('steam_launch_options', { appid }),
+
+  /**
+   * Igual que `steamLaunchOptions`, pero para una grabación.
+   *
+   * El AppID de un CSV de MangoHud llega a 0 (el fichero no lo trae), así que el backend lo
+   * resuelve por nombre contra la biblioteca instalada de Steam. Devuelve `null` solo
+   * cuando no se puede saber nada.
+   */
+  steamLaunchOptionsParaJuego: (juego: { appid?: number | null; gameName?: string | null }) =>
+    invoke<OpcionesSteam | null>('steam_launch_options_para_juego', {
+      appid: juego.appid || null,
+      gameName: juego.gameName || null,
+    }),
 
   /**
    * Carátula que el launcher guarda en disco (Lutris, Heroic, Heronite),
@@ -191,8 +232,18 @@ export const api = {
 
   // ---------- Pruebas de rendimiento ----------
   loadBenchmarks: () => invoke<Benchmark[]>('load_benchmarks'),
-  loadBenchmarksForGame: (appid: number) =>
-    invoke<Benchmark[]>('load_benchmarks_for_game', { appid }),
+  /**
+   * Grabaciones de un juego.
+   *
+   * `gameName` hace falta de verdad: las grabaciones antiguas tienen `appid: 0` (MangoHud
+   * no escribe el AppID en su CSV) y solo se identifican por nombre. Mandando solo el
+   * appid, la ventana «Pruebas del juego» decía que no había pruebas aunque las hubiera.
+   */
+  loadBenchmarksForGame: (juego: { appid: number; gameName?: string }) =>
+    invoke<Benchmark[]>('load_benchmarks_for_game', {
+      appid: juego.appid,
+      gameName: juego.gameName ?? null,
+    }),
   analyzeMangohudLog: (logPath: string, warmupSeconds: number) =>
     invoke<Benchmark>('analyze_mangohud_log_command', { logPath, warmupSeconds }),
   saveBenchmark: (p: SaveBenchmarkPayload) =>
@@ -202,9 +253,37 @@ export const api = {
       gameName: p.gameName,
       appid: p.appid,
       launchCommand: p.launchCommand,
+      origenComando: p.origenComando ?? 'desconocido',
+      steamCommand: p.steamCommand ?? null,
       notes: p.notes,
     }),
+  /**
+   * Último comando registrado de verdad en una prueba de este juego.
+   *
+   * Se usa cuando la grabación es de un juego que no está abierto: sin esto, la prueba se
+   * guardaría sin comando aunque Thoriapp lo tuviera apuntado de antes. `null` = no hay
+   * dato; no se inventa.
+   *
+   * El nombre hace falta porque `appid` llega a 0 al analizar un CSV (MangoHud no lo
+   * escribe en el fichero): el nombre del juego es la única identidad disponible.
+   */
+  ultimoComandoRegistrado: (juego: { appid: number; gameName: string }) =>
+    invoke<string | null>('ultimo_comando_registrado', {
+      appid: juego.appid || null,
+      gameName: juego.gameName || null,
+    }),
   deleteBenchmark: (benchmarkId: string) => invoke<void>('delete_benchmark', { benchmarkId }),
+  /**
+   * Borra solo el historial de un juego.
+   *
+   * `deleteAllBenchmarks` vacía la lista entera: desde la ficha de un juego eso se
+   * llevaría por delante las pruebas de todos los demás. Devuelve cuántas se borraron.
+   */
+  deleteBenchmarksForGame: (juego: { appid: number; gameName: string }) =>
+    invoke<number>('delete_benchmarks_for_game', {
+      appid: juego.appid || 0,
+      gameName: juego.gameName || '',
+    }),
   deleteAllBenchmarks: () => invoke<void>('delete_all_benchmarks'),
   compareBenchmarks: (baselineId: string, testId: string) =>
     invoke<BenchmarkComparison>('compare_benchmarks', { baselineId, testId }),
@@ -238,6 +317,25 @@ export const api = {
     invoke<number>('set_mangohud_log_duration', { seconds }),
   /** Deshace el último cambio de log_duration desde la copia .thoriapp.bak. */
   restoreMangohudConf: () => invoke<number>('restore_mangohud_conf'),
+  /**
+   * Compara dos grupos de grabaciones. Devuelve una entrada por métrica
+   * (`avg_fps`, `fps1_percent_low`, `fps01_percent_low`).
+   */
+  compareBenchmarkGroups: (antesIds: string[], despuesIds: string[]) =>
+    invoke<GroupComparison[]>('compare_benchmark_groups', { antesIds, despuesIds }),
+  /** ¿Esta ruta de CSV ya está guardada en el historial? */
+  isLogAlreadySaved: (logPath: string) =>
+    invoke<boolean>('is_log_already_saved', { logPath }),
+  /** Grabaciones nuevas (ya cerradas) que Thoriapp todavía no conoce. */
+  scanNewMangohudLogs: (folder: string) =>
+    invoke<FinishedLog[]>('scan_new_mangohud_logs', { folder }),
+  /** Todas las grabaciones cerradas de la carpeta, procesadas o no. */
+  listMangohudLogs: (folder: string) =>
+    invoke<FinishedLog[]>('list_mangohud_logs', { folder }),
+  markLogsProcessed: (paths: string[]) =>
+    invoke<void>('mark_logs_processed', { paths }),
+  processedLogsCount: () => invoke<number>('processed_logs_count'),
+  forgetProcessedLogs: () => invoke<void>('forget_processed_logs'),
   loadComparisons: () => invoke<SavedComparison[]>('load_comparisons'),
   deleteComparison: (comparisonId: string) =>
     invoke<void>('delete_comparison', { comparisonId }),

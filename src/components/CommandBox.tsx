@@ -10,10 +10,12 @@ import {
   Terminal,
 } from 'lucide-react';
 import { useState } from 'react';
-import type { GameInfo, RuntimeEnv } from '../lib/types';
+import type { GameInfo, OpcionesSteam, RuntimeEnv } from '../lib/types';
 import { preflight, type PreflightCheck } from '../lib/preflight';
 import { AppidPicker } from './AppidPicker';
+import { AvisoSteamDesincronizado } from './AvisoSteamDesincronizado';
 import { GameBadges } from './GameBadges';
+import { Toggle } from './Toggle';
 
 interface CommandBoxProps {
   gameName: string;
@@ -67,6 +69,13 @@ interface CommandBoxProps {
   onReset: () => void;
   onToggleManualEditing: () => void;
   onManualCommandChange: (value: string) => void;
+  /**
+   * Opciones de lanzamiento que Steam tiene para este juego, si se pudieron leer.
+   * `null`/`undefined` = no se sabe (no se avisa de nada).
+   */
+  steamOpciones?: OpcionesSteam | null;
+  /** Trae el texto de Steam al editor. Solo cambia el editor, nunca Steam. */
+  onImportarDeSteam?: () => void;
 }
 
 /** El comando de lanzamiento: elemento protagonista de la vista de juego. */
@@ -92,6 +101,8 @@ export function CommandBox({
   onReset,
   onToggleManualEditing,
   onManualCommandChange,
+  steamOpciones = null,
+  onImportarDeSteam,
 }: CommandBoxProps) {
   // Diálogo para vincular el juego a mano con su ficha de Steam. Solo aplica a
   // juegos sin AppID cuya detección por nombre ha fallado.
@@ -107,6 +118,16 @@ export function CommandBox({
         launcher,
         manual: manualEditing,
       });
+
+  /**
+   * ¿Hay que avisar de que Steam tiene otro comando?
+   *
+   * Solo si Steam contestó, el juego tiene AppID y el texto no coincide. Sin dato
+   * (`steamOpciones` nulo) no se dice nada: avisar «no coincide» sin saber el valor del
+   * otro lado sería inventarse la discrepancia.
+   */
+  const mostrarAvisoSteam =
+    !blocked && !!appid && steamOpciones != null && steamOpciones.opciones.trim() !== launchCommand.trim();
 
   if (blocked) {
     return (
@@ -142,9 +163,13 @@ export function CommandBox({
           </p>
           <h2 className="text-3xl font-bold tracking-tight mb-2">{gameName}</h2>
           <p className="text-sm text-[var(--text-muted)] leading-relaxed max-w-2xl">
-            {launchCommand === '%command%'
-              ? 'Punto de partida sin modificaciones. Activa los ajustes opcionales para realizar pruebas.'
-              : `${activeCount} ajuste(s) activo(s). Prueba cada cambio por separado.`}
+            {/* Vacío = aún no se sabe el comando (reglas sin cargar). No se dice «sin
+                modificaciones»: eso afirmaría algo que no está comprobado. */}
+            {launchCommand === ''
+              ? 'Todavía no se ha cargado el comando de este juego.'
+              : launchCommand === '%command%'
+                ? 'Punto de partida sin modificaciones. Activa los ajustes opcionales para realizar pruebas.'
+                : `${activeCount} ajuste(s) activo(s). Prueba cada cambio por separado.`}
           </p>
         </div>
         <GameBadges
@@ -171,8 +196,22 @@ export function CommandBox({
       {/* Codebox grande y prominente */}
       <div className="p-4 rounded-xl bg-[var(--bg)] border border-[var(--border-hover)] mb-4">
         <code className="text-[15px] text-[var(--compatible)] font-mono break-all leading-relaxed">
-          {launchCommand}
+          {launchCommand || (
+            <span className="text-[var(--text-dim)] italic">Sin comando cargado todavía</span>
+          )}
         </code>
+
+        {/* Steam ya tiene configurado otro comando para este juego. El aviso vive aquí,
+            pegado al código, en vez de ser un banner o un botón permanente: solo aparece
+            cuando hay una diferencia real. */}
+        {mostrarAvisoSteam && steamOpciones && (
+          <AvisoSteamDesincronizado
+            steam={steamOpciones}
+            comandoActual={launchCommand}
+            onImportar={() => onImportarDeSteam?.()}
+            onRevisar={onCopy}
+          />
+        )}
       </div>
 
       {/* Resumen de lo que lleva el comando. El código de arriba es la verdad,
@@ -267,23 +306,11 @@ export function CommandBox({
                 Modifica el comando directamente. Los cambios manuales sobrescriben las selecciones automáticas.
               </p>
             </div>
-            <button
-              onClick={onToggleManualEditing}
-              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${
-                manualEditing ? 'bg-[var(--action)]' : 'bg-[var(--border)]'
-              }`}
-              role="switch"
-              aria-checked={manualEditing}
-              // El interruptor no lleva texto: sin nombre accesible sería un botón
-              // anónimo en el orden de tabulación.
-              aria-label="Editar comando manualmente"
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ease-in-out ${
-                  manualEditing ? 'translate-x-6' : 'translate-x-1'
-                }`}
-              />
-            </button>
+            <Toggle
+              checked={manualEditing}
+              onChange={() => onToggleManualEditing()}
+              label="Editar comando manualmente"
+            />
           </div>
           {manualEditing && (
             <>

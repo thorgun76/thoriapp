@@ -18,13 +18,23 @@ describe('empaquetado', () => {
     // inicial y el arranque pagaba por una pantalla que quizá no se abre.
     expect(app).toMatch(/const BenchmarksView = lazy\(/);
     expect(app).toMatch(/const DashboardView = lazy\(/);
+    // La ventana «Pruebas del juego» solo se abre al pulsar un botón de la ficha: no
+    // tiene por qué pagarse al arrancar.
+    expect(app).toMatch(/const PruebasJuego = lazy\(/);
     expect(app).not.toMatch(/import \{ BenchmarksView \} from/);
     expect(app).not.toMatch(/import \{ DashboardView \} from/);
+    expect(app).not.toMatch(/import \{ PruebasJuego \} from/);
   });
 
   it('las vistas bajo demanda tienen un hueco de carga', () => {
     // Sin fallback, el primer cambio de sección enseña un salto en blanco.
-    expect(app.match(/<Suspense fallback=/g) ?? []).toHaveLength(2);
+    //
+    // Son tres: Benchmarks, Mis pruebas y la ventana de pruebas del juego. La ventana
+    // usa `fallback={null}` a propósito: se abre encima de la ficha, y un texto de
+    // «cargando» parpadeando sobre el juego abierto distraería más que ayudar.
+    const fallbacks = app.match(/<Suspense fallback=/g) ?? [];
+    expect(fallbacks).toHaveLength(3);
+    expect(app).toMatch(/<Suspense fallback=\{null\}>\s*\n\s*<PruebasJuego/);
   });
 
   it('las dependencias van en trozos separados del código de la app', () => {
