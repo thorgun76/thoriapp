@@ -74,6 +74,45 @@ Simultaneidad validada en **Steam + Steam** (Palworld + Deskrawl) y **Lutris + S
 - `bajo_proton` solo marca Proton; `bajo_compatibilidad` cubre Wine y Proton.
 - Unicidad de identificadores de sesión mediante sufijo, conservando el formato histórico.
 
+### Seguridad
+
+- **Dos vulnerabilidades corregidas en dependencias de Rust.** `cargo audit` sobre
+  `src-tauri/Cargo.lock` detectó dos fallos con parche disponible, ambos transitivos de
+  Tauri. Se aplicaron actualizaciones puntuales, sin actualización general:
+  - `url` 2.5.8 → **2.5.9** (RUSTSEC-2026-0592): desbordamiento de pila en `Url::origin()`
+    con URL `blob:` anidadas.
+  - `cookie` 0.18.2 → **0.18.3** (RUSTSEC-2026-0594): los nonces de cookies privadas podían
+    repetirse en procesos que hacen `fork`.
+  - Arrastra a `form_urlencoded` 1.2.2 → 1.2.3, su dependencia directa.
+- **La verificación de dependencias pasa a ejecutarse de forma reproducible**:
+  `cargo audit` con versión fija (`0.23.0`) sobre `src-tauri/Cargo.lock`, y `npm audit
+  --omit=dev` sobre las dependencias que se empaquetan. Ambas son bloqueantes.
+- Quedan tres avisos de RustSec de categoría informativa, no bloqueantes y visibles en el
+  registro: `chrono` y `proc-macro-error` sin mantener, y `glib` 0.18.5 con una implementación
+  de iterador no sólida. Corregirlos exige subir Tauri y GTK, que es una actualización mayor
+  fuera del alcance de esta entrega.
+
+  **Limitaciones de este análisis.** Las comprobaciones se hicieron con las herramientas de
+  RustSec sobre el lockfile; no son una auditoría manual del código de esas dependencias:
+
+  - `glib`, `gtk`, `webkit2gtk` llegan **de forma transitiva** a través de `tauri` y `wry`.
+    Thoriapp no las declara ni las invoca directamente, así que no se puede afirmar desde
+    este repositorio qué partes exactas de la API usa la pila de WebKit en tiempo de
+    ejecución. La revisión se limitó a comprobar que `glib::VariantStrIter` no aparece en el
+    código de Thoriapp; **no** se ha auditado el código de GTK ni de WebKit.
+  - `chrono` es dependencia directa y sí se usa (formato de fechas de benchmarks). El aviso
+    es de falta de mantenimiento, no un fallo descrito, pero eso **no garantiza** que no
+    vaya a aparecer uno: hoy no hay versión a la que actualizar.
+  - `proc-macro-error` solo interviene en la compilación (`proc-macro`), no en el binario
+    distribuido; aun así no se ha verificado qué macros generan el código que finalmente se
+    enlaza.
+  - El resultado depende de la base de datos de RustSec en el momento de ejecutar. Un aviso
+    puede publicarse después y no aparecer hasta la siguiente ejecución.
+
+  En consecuencia, el riesgo residual de estos tres avisos **no se ha medido**: se ha
+  reducido la exposición donde estaba en esta entrega, pero determinar el riesgo real exige
+  una revisión manual de las dependencias transitivas.
+
 ### Limitaciones conocidas
 
 - **Detección simultánea de Eslabong (Heronite) y Tattoo Tycoon (Heroic): incompleta** en ambos

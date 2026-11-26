@@ -2445,7 +2445,6 @@ pub struct PruebaDeProceso {
 #[cfg(test)]
 mod pruebas_topologia_real {
     use crate::fixtures_procesos as f;
-    use crate::fixtures_procesos::ProcesoDeFixture;
     use crate::proceso_linux::{escanear_desde, pruebas_de_regresion::rasgos_para_pruebas};
 
     fn grupos_de(fixture: &[f::ProcesoDeFixture]) -> Vec<crate::sessions::GrupoDeProcesos> {
@@ -2747,7 +2746,6 @@ mod pruebas_topologia_real {
     /// si llegaran, dos juegos lanzados desde la misma sesión de usuario compartirían raíz.
     #[test]
     fn palworld_real_5_3_no_mete_los_systemd_en_el_grupo_del_juego() {
-        let procesos: Vec<_> = f::PALWORLD_REAL_5_3.iter().map(rasgos_para_pruebas).collect();
         // El agrupador solo, sin el prefiltro de candidatos.
         let grupos = grupos_de(f::PALWORLD_REAL_5_3);
         let todos: Vec<u32> = grupos.iter().flat_map(|g| g.miembros.iter().map(|m| m.pid)).collect();

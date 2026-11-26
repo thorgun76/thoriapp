@@ -5,6 +5,10 @@ name: Verificación
 #   2. Tipos y tests del frontend
 #   3. Vulnerabilidades de Rust (cargo audit)
 #   4. Rust: tests y clippy
+#
+# Cada trabajo tiene su propio sistema de archivos. El trabajo de Rust necesita
+# un `dist/` de verdad porque `tauri` lo exige al compilar (`frontendDist`), así
+# que construye el frontend aquí mismo en vez de depender de otro trabajo.
 
 on:
   push:
@@ -12,6 +16,10 @@ on:
   pull_request:
   # Permite lanzarlo a mano desde la pestaña Actions.
   workflow_dispatch:
+
+# Solo lectura del repositorio: ningún trabajo escribe en él.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,9 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Versión exacta y compartida por los tres trabajos, en .node-version.
+          # `jsdom` 31 y su `undici` 8 exigen Node >=22.19: con Node 20 los
+          # tests ni siquiera arrancaban.
+          node-version-file: .node-version
           cache: npm
 
       - run: npm ci
@@ -45,9 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
 
       - run: npm ci
@@ -63,17 +78,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # Se audita el Cargo.lock, así que no hace falta compilar ni instalar GTK.
-      - uses: rustsec/audit-check@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Se ejecuta cargo-audit directamente, sin acción intermedia: la acción
+      # `rustsec/audit-check` instalaba la herramienta en tiempo de ejecución y
+      # fallaba al parsear su salida ("Unexpected end of JSON input"). Así la
+      # versión es fija y el comando es el mismo que se puede reproducir a mano.
+      #
+      # Se audita `src-tauri/Cargo.lock`, que es el lockfile real del proyecto
+      # (no hay Cargo.lock en la raíz).
+      - name: Instalar cargo-audit
+        # Versión exacta: `--locked` fija las dependencias del crate, no la
+        # versión de cargo-audit. Fijarla aquí hace la auditoría reproducible.
+        run: cargo install cargo-audit --version 0.23.0 --locked
+
+      # Bloqueante ante vulnerabilidades, sin exclusiones.
+      #
+      # Con esta invocación, `cargo audit` falla ante vulnerabilidades que
+      # RustSec marca como tales, tenga o no parche publicado: una
+      # vulnerabilidad sin actualización disponible también hace fallar el
+      # comando, lo cual es lo correcto, porque el fallo sigue presente. Lo que
+      # no bloquea son los avisos de categoría `informational` (crate sin
+      # mantener o con API no sólida): esos se imprimen y el comando termina
+      # en 0.
+      #
+      # Por eso no hay ningún `--ignore` aquí: las advertencias quedan visibles
+      # en el registro del trabajo, sin ocultarse y sin romper la build.
+      #
+      # Si se quiere que esos avisos informativos también bloqueen, se añade
+      # `--deny unsound --deny unmaintained` de forma explícita. No se hace
+      # porque hoy dejaría el trabajo en rojo permanente sin arreglo posible
+      # desde este proyecto.
+      - name: Auditar Cargo.lock
+        working-directory: src-tauri
+        run: cargo audit --file Cargo.lock
 
   rust:
     name: Rust (tests y clippy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Dependencias de sistema
         run: |
@@ -90,10 +139,21 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # `tauri` valida en tiempo de compilación que exista `frontendDist`
+      # (`../dist`). Sin un build real el crate no compila, así que se construye
+      # el frontend aquí: los trabajos no comparten sistema de archivos.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - name: Construir el frontend (dist/)
+        run: npm run build
+
       - name: Tests
         working-directory: src-tauri
-        run: cargo test --bins
+        run: cargo test --locked --bins
 
       - name: Clippy (los avisos son errores)
         working-directory: src-tauri
-        run: cargo clippy --bins -- -D warnings
+        run: cargo clippy --locked --bins -- -D warnings

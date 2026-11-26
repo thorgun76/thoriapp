@@ -926,10 +926,53 @@ que la detección funciona; ver el protocolo en `AGENTS.md`.
 
 ## Pruebas
 
-- Rust: 687 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
-- TypeScript: 997.
+- Rust: 894 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
+- TypeScript: 1027, en 75 ficheros.
 - `tsc --noEmit` limpio.
-- Clippy: solo el aviso preexistente de `save_benchmark` (9/7 argumentos).
+- `cargo clippy --locked --bins -- -D warnings`: **sin avisos**. `save_benchmark` lleva un
+  `#[allow(clippy::too_many_arguments)]` localizado porque su firma plana es el contrato IPC
+  con el frontend (mismo criterio ya aplicado en `save_profile`).
+- `cargo audit` sobre `src-tauri/Cargo.lock`: sin vulnerabilidades. Quedan tres avisos
+  informativos de la base de RustSec, visibles y no bloqueantes (ver `CHANGELOG.md`).
+
+## Deuda técnica registrada
+
+### Avisos de Clippy en el código de pruebas (`--tests`)
+
+El CI ejecuta `cargo clippy --locked --bins -- -D warnings`, que **no analiza el código de
+pruebas**. Con `--tests` (o `--all-targets`) aparecen **40 avisos** en pruebas y fixtures,
+todos preexistentes: los ficheros afectados (`fixtures_procesos.rs`, `evidencia_proceso.rs`)
+están sin modificar respecto a los commits anteriores a esta entrega.
+
+Aclaración de la discrepancia 40/41: la ejecución imprime 41 líneas que empiezan por
+`error`, pero solo **40 son avisos**; la 41 es la línea de resumen
+`error: could not compile ... due to 40 previous errors`. El recuento correcto es 40.
+
+Prioridad alta, porque puede tratarse de un defecto de los fixtures y no solo de estilo:
+
+- **Escapes octales ambiguos** (3): `"lutris-wrapper\0Star Sector\00\0starsector.sh\0"`,
+  `"…Star Valor\00\0wine\0…"` y `b"/usr/bin/sleep\0300\0"`. En Rust, `\00` y `\0300` son
+  escapes octales, no dos caracteres: pueden no describir el `cmdline` que la prueba cree
+  estar describiendo. Hay que decidir si el fixture debe llevar `NUL` reales (`\0` + `"0"`)
+  y corregirlo. Hasta entonces, esas pruebas podrían estar pasando por el motivo equivocado.
+
+Resto de avisos, prioridad menor (estilo y limpieza):
+
+- 8 funciones `*_publico` nunca usadas (puentes de prueba que quedaron sin llamadores).
+- 7 usos innecesarios de `clone()`/`collect()`/`vec!`.
+- 5 elementos de lista en documentación sin sangría.
+- 3 asignaciones de campo fuera del inicializador con `Default::default()`.
+- 2 aserciones con valor constante (no pueden fallar: no prueban nada).
+- 2 `replacing text with itself` (sustituciones que no sustituyen nada).
+- 2 bloques de `items after a test module`.
+- Y 8 sueltos: lifetimes elidibles, `&*` redundante, `field_reassign_with_default`, etc.
+
+No se corrigen en esta entrega, que solo pretendía arreglar el CI. Corregirlos es una tarea
+aparte, y conviene empezar por los escapes octales.
+
+### Otras
+
+- `revision_motor` de la instantánea es `null`: el motor no publica una revisión estable.
 
 ## Limitaciones conocidas
 

@@ -2074,6 +2074,11 @@ pub fn is_log_already_saved(log_path: String) -> Result<bool, String> {
     Ok(benchmark_exists_for_path(&load_benchmarks_data(), &log_path))
 }
 
+// La firma es plana a propósito: es el contrato que invoca el frontend (una
+// llamada IPC por argumento). Agruparlos en un struct cambiaría el JSON que
+// envía React y obligaría a tocar api.ts y todos los llamadores, sin ganar nada
+// en un punto de escritura que solo se usa desde ahí.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn save_benchmark(
     mut benchmark: Benchmark,

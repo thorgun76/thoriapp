@@ -4292,7 +4292,7 @@ mod pruebas_continuidad_de_sesion {
     }
 
     fn servicio_con(dir: &std::path::Path) -> ServicioDeSesiones {
-        let mut s = servicio_en(dir.join("sessions.json"));
+        let s = servicio_en(dir.join("sessions.json"));
         s.fijar_activo(true);
         s
     }
