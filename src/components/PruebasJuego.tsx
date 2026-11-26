@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowRight, Info, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Info, X } from 'lucide-react';
 import { api } from '../lib/api';
 import type { Benchmark, GroupComparison } from '../lib/types';
 import { useBenchmarks } from '../hooks/useBenchmarks';
@@ -81,7 +81,7 @@ export function PruebasJuego({
   const { confirmState, ask, close } = useConfirm();
   const notify = useCallback((m: string) => setToast(m), [setToast]);
 
-  const { benchmarks, remove, removeAllForGame } = useBenchmarks({
+  const { benchmarks, remove, removeAllForGame, error } = useBenchmarks({
     currentAppid: appid,
     currentGameName: gameName,
     onNotify: notify,
@@ -163,7 +163,23 @@ export function PruebasJuego({
         </header>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
-          {vacio ? (
+          {/* No se pudieron leer: NO es «no hay ninguna». Se dice cuál de las dos cosas
+              pasa, porque la pantalla vacía de abajo afirmaría lo segundo. */}
+          {error && (
+            <div
+              role="alert"
+              className="p-4 rounded-xl bg-[var(--caution-bg)] border border-caution/50"
+            >
+              <p className="flex items-center gap-2 text-sm font-semibold text-[var(--caution)] mb-1">
+                <AlertTriangle className="w-4 h-4" />
+                No se pudo leer el historial de {gameName}
+              </p>
+              <p className="text-xs text-[var(--text-muted)] leading-relaxed break-words">
+                {error}
+              </p>
+            </div>
+          )}
+          {error ? null : vacio ? (
             <div className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
               <p className="flex items-center gap-2 text-sm font-semibold text-[var(--text)] mb-1">
                 <Info className="w-4 h-4 text-[#38bdf8]" />

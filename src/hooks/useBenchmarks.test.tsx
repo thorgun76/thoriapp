@@ -24,6 +24,7 @@ vi.mock('../lib/api', () => ({
 }));
 
 import { useBenchmarks } from './useBenchmarks';
+import { COMPARISONS_CHANGED_EVENT } from './useSavedComparisons';
 
 const PALWORLD = 'mesa_glthread=true game-performance mangohud %command%';
 
@@ -413,5 +414,126 @@ describe('useBenchmarks: borrado filtrado al juego', () => {
 
     // Una llamada al montar y otra tras borrar.
     await waitFor(() => expect(loadBenchmarksForGame).toHaveBeenCalledTimes(2));
+  });
+
+  // ── Subfase 5.1: distinguir «no hay pruebas» de «no se pudo leer» ──
+
+  it('s51 expone el error de lectura en vez de mostrar una lista vacía', async () => {
+    loadBenchmarksForGame.mockReset().mockRejectedValue(
+      'El historial de pruebas está dañado. No se ha modificado nada en disco.'
+    );
+
+    const { result } = renderHook(() => useBenchmarks({ currentAppid: 1623730 }));
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error).toMatch(/dañado/);
+  });
+
+  it('s51 conserva las pruebas ya cargadas si una recarga falla', async () => {
+    const una = bench();
+    loadBenchmarksForGame.mockReset().mockResolvedValueOnce([una]);
+
+    const { result } = renderHook(() => useBenchmarks({ currentAppid: 1623730 }));
+    await waitFor(() => expect(result.current.benchmarks).toHaveLength(1));
+
+    // La segunda carga falla: los datos anteriores NO se borran de la pantalla, porque
+    // pintar cero pruebas afirmaría que no hay ninguna.
+    loadBenchmarksForGame.mockRejectedValueOnce('no se pudo leer');
+    await result.current.load();
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.benchmarks).toHaveLength(1);
+  });
+
+  it('s51 sin error, error vuelve a null tras una carga correcta', async () => {
+    loadBenchmarksForGame.mockReset().mockRejectedValueOnce('fallo').mockResolvedValueOnce([]);
+
+    const { result } = renderHook(() => useBenchmarks({ currentAppid: 1623730 }));
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+
+    await result.current.load();
+    await waitFor(() => expect(result.current.error).toBeNull());
+  });
+
+  /**
+   * Subfase 5.2: el contexto de captura viaja con el guardado.
+   */
+  it('s52 manda el contexto del juego al guardar', async () => {
+    const contextoParaJuego = vi.fn().mockResolvedValue({
+      appidReal: 1623730,
+      comandoConfirmado: PALWORLD,
+      perfilId: 'p1',
+      perfilNombre: 'Rendimiento',
+      modoProton: false,
+      correspondeAlJuego: true,
+    });
+
+    const { result } = renderHook(() =>
+      useBenchmarks({ currentAppid: 1623730, currentGameName: 'Palworld', contextoParaJuego })
+    );
+    await waitFor(() => expect(result.current.benchmarks).toEqual([]));
+
+    await result.current.analyze('/tmp/log.csv', '', 0);
+
+    // Se pide para el juego de la GRABACIÓN, no para «lo que haya abierto».
+    expect(contextoParaJuego).toHaveBeenCalledWith({ appid: 1623730, gameName: 'Palworld' });
+    expect(saveBenchmark.mock.calls[0][0].contexto).toMatchObject({
+      perfilId: 'p1',
+      correspondeAlJuego: true,
+    });
+  });
+
+  it('s52 si el contexto falla, la prueba se guarda igual sin él', async () => {
+    const contextoParaJuego = vi.fn().mockRejectedValue('boom');
+
+    const { result } = renderHook(() =>
+      useBenchmarks({ currentAppid: 1623730, contextoParaJuego })
+    );
+    await waitFor(() => expect(result.current.benchmarks).toEqual([]));
+
+    const ok = await result.current.analyze('/tmp/log.csv', '', 0);
+
+    expect(ok).toBe(true);
+    expect(saveBenchmark).toHaveBeenCalledTimes(1);
+    // Sin contexto: la instantánea se guardará con la configuración en desconocido, no con
+    // datos de otro sitio.
+    expect(saveBenchmark.mock.calls[0][0].contexto ?? null).toBeNull();
+  });
+
+  // Complemento final de 5.3: el backend purga las comparaciones guardadas que dependían de
+  // las pruebas borradas. La interfaz tiene que enterarse, o «Mis pruebas» enseña informes
+  // que ya no están en disco.
+  it('avisa a las comparaciones guardadas al borrar el historial de un juego', async () => {
+    deleteBenchmarksForGame.mockResolvedValue(2);
+    const oyente = vi.fn();
+    window.addEventListener(COMPARISONS_CHANGED_EVENT, oyente);
+    try {
+      const { result } = renderHook(() =>
+        useBenchmarks({ currentAppid: 4623570, currentGameName: 'Deskrawl' })
+      );
+      await waitFor(() => expect(result.current.benchmarks).toEqual([]));
+      await result.current.removeAllForGame();
+      expect(oyente).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(COMPARISONS_CHANGED_EVENT, oyente);
+    }
+  });
+
+  it('si no había nada que borrar, no molesta a las comparaciones', async () => {
+    // Sin pruebas borradas no puede haber comparaciones huérfanas: recargar la lista sería
+    // ruido, y un aviso de «algo ha cambiado» cuando no cambió nada es desinformar.
+    deleteBenchmarksForGame.mockResolvedValue(0);
+    const oyente = vi.fn();
+    window.addEventListener(COMPARISONS_CHANGED_EVENT, oyente);
+    try {
+      const { result } = renderHook(() =>
+        useBenchmarks({ currentAppid: 4623570, currentGameName: 'Deskrawl' })
+      );
+      await waitFor(() => expect(result.current.benchmarks).toEqual([]));
+      await result.current.removeAllForGame();
+      expect(oyente).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(COMPARISONS_CHANGED_EVENT, oyente);
+    }
   });
 });

@@ -26,7 +26,7 @@ const info: GameInfo = { name: 'Juego', native: false, errors: [] };
 function renderTab(params: Param[], enabled: boolean[], overrides: Partial<Parameters<typeof OptimizeTab>[0]> = {}) {
   const rules = { name: 'Juego', appid: 1, bottleneck: 'cpu', params, has_rules: true } as GameRules;
   const onToggleRule = vi.fn();
-  render(
+  const { container } = render(
     <OptimizeTab
       rules={rules}
       info={info}
@@ -36,8 +36,6 @@ function renderTab(params: Param[], enabled: boolean[], overrides: Partial<Param
       enabled={enabled}
       selectedCommunityRecs={new Set()}
       selectedEngineRecs={new Set()}
-      expertMode={false}
-      onToggleExpertMode={vi.fn()}
       forceProton={false}
       showUnavailable
       onToggleRule={onToggleRule}
@@ -51,7 +49,7 @@ function renderTab(params: Param[], enabled: boolean[], overrides: Partial<Param
       {...overrides}
     />
   );
-  return { onToggleRule };
+  return { onToggleRule, container };
 }
 
 describe('OptimizeTab: distinción entre comando y ajustes del juego', () => {
@@ -88,7 +86,7 @@ describe('OptimizeTab: distinción entre comando y ajustes del juego', () => {
   it('un parámetro normal sí se togglea con el ratón', () => {
     const { onToggleRule } = renderTab([param({ title: 'HUD' })], [false]);
 
-    fireEvent.click(screen.getByText('HUD').closest('[role="checkbox"]')!);
+    fireEvent.click(screen.getByRole('switch', { name: /HUD/ }));
 
     expect(onToggleRule).toHaveBeenCalledWith(0);
   });
@@ -96,7 +94,9 @@ describe('OptimizeTab: distinción entre comando y ajustes del juego', () => {
   it('y también con el teclado', () => {
     const { onToggleRule } = renderTab([param({ title: 'HUD' })], [false]);
 
-    fireEvent.keyDown(screen.getByRole('checkbox'), { key: ' ' });
+    // El control es un `<button role="switch">`: el navegador convierte Intro/Espacio en
+    // `click` por sí solo, así que se dispara `click`, no un `keydown` a mano.
+    fireEvent.click(screen.getByRole('switch', { name: /HUD/ }));
 
     expect(onToggleRule).toHaveBeenCalledWith(0);
   });
@@ -105,50 +105,6 @@ describe('OptimizeTab: distinción entre comando y ajustes del juego', () => {
     renderTab([param({ title: 'dxr', warn: 'Activa ray tracing.' })], [true]);
 
     expect(screen.getAllByText('Activa ray tracing.')).toHaveLength(1);
-  });
-});
-
-describe('OptimizeTab: conmutador de modo experto', () => {
-  it('muestra el modo guiado con el interruptor apagado', () => {
-    renderTab([param()], [false]);
-
-    const sw = screen.getByRole('switch', { name: /modo experto/i });
-    expect(sw.getAttribute('aria-checked')).toBe('false');
-    expect(screen.getByText('Modo guiado')).toBeTruthy();
-  });
-
-  it('pulsar el interruptor avisa a App (no cambia el estado por su cuenta)', () => {
-    // El estado vive en App: el sidebar y esta pestaña deben moverse juntos.
-    const rules = { name: 'Juego', appid: 1, bottleneck: 'cpu', params: [param()], has_rules: true } as GameRules;
-    const onToggleExpertMode = vi.fn();
-    render(
-      <OptimizeTab
-        rules={rules}
-        info={info}
-        engine={null}
-        engineRecommendations={[]}
-        communityRecommendations={[]}
-        enabled={[false]}
-        selectedCommunityRecs={new Set()}
-        selectedEngineRecs={new Set()}
-        expertMode={false}
-        onToggleExpertMode={onToggleExpertMode}
-        forceProton={false}
-        showUnavailable
-        onToggleRule={vi.fn()}
-        onToggleCommunityRec={vi.fn()}
-        onToggleEngineRec={vi.fn()}
-        onToggleProton={vi.fn()}
-        missing={() => null}
-        getRecommendationStatus={() => 'ok'}
-        impactColor={() => ''}
-        evidenceLabel={() => ''}
-      />
-    );
-
-    fireEvent.click(screen.getByRole('switch', { name: /modo experto/i }));
-
-    expect(onToggleExpertMode).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -335,7 +291,9 @@ describe('OptimizeTab: las etiquetas de impacto filtran de verdad', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'medio' }));
 
-    expect(screen.getByText('NTSYNC=1')).toBeTruthy();
+    // Sale dos veces: una como ajuste del juego y otra como recomendación de motor, que
+    // es justo el caso que el test describe (mismo parámetro por dos vías).
+    expect(screen.getAllByText('NTSYNC=1').length).toBeGreaterThan(0);
   });
 
   it('el impacto y el texto se combinan', () => {
@@ -441,22 +399,19 @@ describe('OptimizeTab: no se ofrecen etiquetas que no llevan a nada', () => {
       .map((b) => b.textContent)
       .filter((t): t is string => !!t && ['alto', 'medio', 'bajo', 'medicion', 'evitar'].includes(t));
 
-  it('en modo guiado no aparece «bajo» si sus ajustes no son esenciales', () => {
+  it('«bajo» aparece siempre: ya no hay modos que lo escondan', () => {
     renderTab(params, [false, false]);
 
     expect(chips()).toContain('alto');
-    expect(chips()).not.toContain('bajo');
-  });
-
-  it('en modo experto sí aparece, porque ahí esos ajustes se ven', () => {
-    renderTab(params, [false, false], { expertMode: true });
-
     expect(chips()).toContain('bajo');
     fireEvent.click(screen.getByRole('button', { name: 'bajo' }));
     expect(screen.getByText('SoloBajo')).toBeTruthy();
   });
 
-  it('no aparece «evitar»: esos ajustes nunca se listan', () => {
+  it('«evitar» tampoco se ofrece como filtro', () => {
+    // `evitar` no es un nivel para filtrar por impacto: su tarjeta se ve en la lista
+    // con el aviso de riesgo, pero el chip de filtro no existe para no invitar a
+    // «buscar los ajustes que empeoran el rendimiento».
     renderTab([...params, param({ title: 'Malo', value: 'MALO=1', impact: 'evitar' })], [false, false, false]);
 
     expect(chips()).not.toContain('evitar');
@@ -510,5 +465,197 @@ describe('OptimizeTab: se ve por qué un ajuste no aplica', () => {
     renderTab(params, [false]);
 
     expect(screen.queryByText(/Necesita una GPU/)).toBeNull();
+  });
+});
+
+describe('OptimizeTab: ajustes exclusivos de Proton', () => {
+  // Regla del producto: en un juego nativo sin «Probar con Proton», estas tarjetas NO se
+  // enseñan. Antes se pintaban bloqueadas, que era la otra cara del mismo fallo: parecían
+  // aplicables. Reducir el ruido es el objetivo; el aviso solo aparece cuando hay algo que
+  // avisar (el ajuste ya está en el comando).
+  it('oculta los ajustes de Proton de un juego nativo sin modo Proton', () => {
+    renderTab([param({ value: 'PROTON_USE_NTSYNC=1', proton_only: true })], [false], {
+      // Juego CON versión nativa: es donde aplica la regla.
+      info: { name: 'Juego', native: true, errors: [] },
+    });
+    expect(screen.queryByText('PROTON_USE_NTSYNC=1')).toBeNull();
+    expect(screen.queryByText(/Ajustes específicos de Proton/)).toBeNull();
+  });
+
+  it('al activar «Probar con Proton» aparecen, en su propia sección', () => {
+    renderTab([param({ value: 'PROTON_USE_NTSYNC=1', proton_only: true })], [false], {
+      forceProton: true,
+      info: { name: 'Juego', native: true, errors: [] },
+    });
+    expect(screen.getByText('Ajustes específicos de Proton')).toBeTruthy();
+    expect(screen.getByText('PROTON_USE_NTSYNC=1')).toBeTruthy();
+    // Y ya no se dice que no se pueda usar: se puede.
+    expect(screen.queryByText(/Solo se aplica con Proton/)).toBeNull();
+  });
+
+  it('con «Probar con Proton» el toggle no está deshabilitado', () => {
+    const { container } = renderTab(
+      [param({ value: 'PROTON_LOCAL_SHADER_CACHE=1', proton_only: true })],
+      [false],
+      { forceProton: true, info: { name: 'Juego', native: true, errors: [] } },
+    );
+    const toggle = container.querySelector('button[role="switch"][aria-label*="PROTON_LOCAL_SHADER_CACHE"]');
+    expect(toggle).toBeTruthy();
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('un ajuste normal no lleva el aviso de Proton', () => {
+    renderTab([param({ value: 'MANGOHUD=1', proton_only: false })], [false]);
+    expect(screen.queryByText(/Solo se aplica con Proton/)).toBeNull();
+  });
+
+  // Si el comando importado ya lo trae no se esconde ni se quita solo: se explica que
+  // puede no surtir efecto y se deja decidir. Quitarlo por nuestra cuenta cambiaría su
+  // comando sin avisar.
+  it('si ya está puesto se enseña y se avisa de que puede no surtir efecto', () => {
+    renderTab([param({ value: 'PROTON_USE_NTSYNC=1', proton_only: true })], [true], {
+      info: { name: 'Juego', native: true, errors: [] },
+      estadosMotor: [
+        { indice: 0, estado: 'activo', valor: 'PROTON_USE_NTSYNC=1', kind: 'env' },
+      ] as never,
+    });
+    expect(screen.getByText('PROTON_USE_NTSYNC=1')).toBeTruthy();
+    expect(screen.getByText(/probablemente no surta efecto/)).toBeTruthy();
+  });
+
+  it('las recomendaciones de motor de Proton también se ocultan sin modo Proton', () => {
+    renderTab([param()], [], {
+      engineRecommendations: ['PROTON_LOCAL_SHADER_CACHE=1'],
+      engine: { name: 'Unreal', id: 'unreal' } as never,
+      showUnavailable: true,
+      info: { name: 'Juego', native: true, errors: [] },
+    });
+    expect(screen.queryByText('PROTON_LOCAL_SHADER_CACHE=1')).toBeNull();
+  });
+
+  it('al activarlo, la recomendación de motor se muda a la sección de Proton', () => {
+    renderTab([param()], [], {
+      engineRecommendations: ['PROTON_LOCAL_SHADER_CACHE=1'],
+      engine: { name: 'Unreal', id: 'unreal' } as never,
+      showUnavailable: true,
+      forceProton: true,
+      info: { name: 'Juego', native: true, errors: [] },
+    });
+    expect(screen.getByText('Ajustes específicos de Proton')).toBeTruthy();
+    expect(screen.getByText('PROTON_LOCAL_SHADER_CACHE=1')).toBeTruthy();
+  });
+
+  // `WINE_FULLSCREEN_FSR=1` es una recomendación de hardware. Se quedaba fuera de
+  // `esSoloProton` (el regex solo miraba PROTON|DXVK|VKD3D), así que se pintaba como
+  // aplicable en un juego nativo y el motor la rechazaba al pulsar.
+  it('trata WINE_FULLSCREEN_FSR como solo-Proton', () => {
+    renderTab([param()], [], {
+      communityRecommendations: [
+        {
+          parameter: 'WINE_FULLSCREEN_FSR=1',
+          description: 'Escalado FSR en pantalla completa.',
+          optimized_for: ['all'],
+          recommended: true,
+          proton_only: true,
+        },
+      ] as never,
+      showUnavailable: true,
+      info: { name: 'Juego', native: true, errors: [] },
+    });
+    expect(screen.queryByText('WINE_FULLSCREEN_FSR=1')).toBeNull();
+  });
+
+  it('con modo Proton, WINE_FULLSCREEN_FSR aparece y es accionable', () => {
+    const { container } = renderTab([param()], [], {
+      communityRecommendations: [
+        {
+          parameter: 'WINE_FULLSCREEN_FSR=1',
+          description: 'Escalado FSR en pantalla completa.',
+          optimized_for: ['all'],
+          recommended: true,
+          proton_only: true,
+        },
+      ] as never,
+      showUnavailable: true,
+      forceProton: true,
+      info: { name: 'Juego', native: true, errors: [] },
+    });
+    // Aparece dos veces dentro de la misma tarjeta (título y argumento técnico).
+    expect(screen.getAllByText('WINE_FULLSCREEN_FSR=1').length).toBeGreaterThan(0);
+    const toggle = container.querySelector('button[role="switch"][aria-label*="WINE_FULLSCREEN_FSR"]');
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('no duplica un ajuste que es parámetro del juego y recomendación a la vez', () => {
+    const { container } = renderTab(
+      [param({ value: 'PROTON_LOCAL_SHADER_CACHE=1', proton_only: true })],
+      [false],
+      {
+        communityRecommendations: [
+          {
+            parameter: 'PROTON_LOCAL_SHADER_CACHE=1',
+            description: 'Caché de shaders por juego.',
+            optimized_for: ['all'],
+            recommended: true,
+            proton_only: true,
+          },
+        ] as never,
+        forceProton: true,
+        showUnavailable: true,
+        info: { name: 'Juego', native: true, errors: [] },
+      },
+    );
+    expect(container.querySelectorAll('button[role="switch"][aria-label*="PROTON_LOCAL_SHADER_CACHE"]').length).toBe(1);
+  });
+});
+
+describe('OptimizeTab: ajustes de diagnóstico y riesgo', () => {
+  it('un ajuste de riesgo (RADV_DEBUG) se lista, no se esconde', () => {
+    // Antes se descartaba con `impact !== 'evitar'` y el usuario no podía elegirlo.
+    renderTab(
+      [param({ title: 'Desactivar fast clears (debug)', value: 'RADV_DEBUG=nofastclears', impact: 'evitar' })],
+      [false]
+    );
+
+    expect(screen.getByText('Desactivar fast clears (debug)')).toBeTruthy();
+  });
+
+  it('su tarjeta lleva la etiqueta «Riesgo»', () => {
+    renderTab(
+      [param({ title: 'Desactivar fast clears (debug)', value: 'RADV_DEBUG=nofastclears', impact: 'evitar' })],
+      [false]
+    );
+
+    expect(document.querySelector('[data-clase="riesgo"]')).toBeTruthy();
+  });
+
+  it('su advertencia de rendimiento se ve', () => {
+    renderTab(
+      [
+        param({
+          title: 'Desactivar fast clears (debug)',
+          value: 'RADV_DEBUG=nofastclears',
+          impact: 'evitar',
+          warn: 'No es una optimización: reduce el rendimiento.',
+        }),
+      ],
+      [false]
+    );
+
+    expect(screen.getByText(/reduce el rendimiento/i)).toBeTruthy();
+  });
+
+  it('un ajuste de medición se etiqueta «Diagnóstico»', () => {
+    renderTab([param({ title: 'Medir', value: 'MIDE=1', impact: 'medicion' })], [false]);
+
+    expect(document.querySelector('[data-clase="diagnostico"]')).toBeTruthy();
+  });
+
+  it('un ajuste normal no lleva etiqueta: no se etiqueta todo', () => {
+    renderTab([param({ title: 'Normal', value: 'NORMAL=1', impact: 'alto' })], [false]);
+
+    expect(document.querySelector('[data-clase="diagnostico"]')).toBeNull();
+    expect(document.querySelector('[data-clase="riesgo"]')).toBeNull();
+    expect(document.querySelector('[data-clase="experimental"]')).toBeNull();
   });
 });

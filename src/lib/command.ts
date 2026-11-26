@@ -76,6 +76,11 @@ export function joinCommand({ envVars, wrappers, args }: CommandParts): string {
 const ALLOWED_COMMANDS = new Set([
   // Envoltorios y capturadores (misma lista que arriba, sin duplicar el origen)
   ...KNOWN_WRAPPERS,
+  // `env` es un lanzador (ejecuta el comando que le sigue) aunque no sea un envoltorio de
+  // juegos que `preflight.rs` compruebe: no hay binario que revisar, es del sistema. Tiene
+  // que estar aquí porque el validador de Rust (`launch_command::LANZADORES_PERMITIDOS`)
+  // lo acepta, y si el frontend no, "Editar manualmente" rechazaría un comando válido.
+  'env',
   'WINEDLLOVERRIDES',
   // Lanzadores de Steam
   'steam',

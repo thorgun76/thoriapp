@@ -73,6 +73,7 @@
         ],
         "title": "Desactivar fast clears (debug)",
         "why": "Parámetro de depuración que baja el rendimiento.",
+        "warn": "No es una optimización: desactiva las fast clears del driver RADV a propósito y reduce el rendimiento. Solo sirve para reproducir o descartar artefactos gráficos.",
         "evidence": "heuristica"
       }
     ],

@@ -73,7 +73,7 @@ export function summarizeImpacts(params: Param[], enabled: boolean[]): ImpactSum
 /**
  * Filtra parámetros por texto (título, valor o por qué) y por nivel de impacto.
  *
- * En modo experto la lista es larga; buscar «FSR» a mano es tedioso. Se compara
+ * La lista es larga; buscar «FSR» a mano es tedioso. Se compara
  * sin acentos ni mayúsculas, igual que el buscador de la biblioteca.
  */
 export function filterParams(
@@ -161,6 +161,18 @@ export interface ProfileSnapshot {
   forceProton: boolean;
   manualCommand: string;
   useManualCommand: boolean;
+  /**
+   * Comando literal confirmado.
+   *
+   * Se compara además de los toggles porque dos configuraciones pueden tener los mismos
+   * ajustes y un comando distinto: los argumentos que Thoriapp no reconoce no aparecen en
+   * ningún toggle. Sin este campo, editar el comando a mano y volver a los mismos ajustes
+   * se leía como «sin cambios» y se podía perder el texto al cambiar de perfil.
+   *
+   * Opcional para no romper las instantáneas que se construyan sin él (tests, llamadas
+   * antiguas): ausente = no se compara.
+   */
+  comando?: string;
 }
 
 /**
@@ -176,6 +188,8 @@ export function snapshotOf(input: {
   forceProton: boolean;
   manualCommand: string;
   useManualCommand: boolean;
+  /** Comando confirmado por el motor, si se conoce. */
+  comando?: string;
 }): ProfileSnapshot {
   return {
     enabledParams: input.enabled.map((v) => v === true),
@@ -184,6 +198,7 @@ export function snapshotOf(input: {
     forceProton: input.forceProton,
     manualCommand: input.manualCommand.trim(),
     useManualCommand: input.useManualCommand,
+    comando: input.comando,
   };
 }
 
@@ -202,6 +217,9 @@ const signature = (s: ProfileSnapshot) =>
     s.forceProton,
     s.manualCommand,
     s.useManualCommand,
+    // Sin comando conocido no se compara: se prefiere no avisar a avisar de un cambio
+    // que no se puede demostrar.
+    s.comando ?? null,
   ]);
 
 // ==================== COMANDO RÁPIDO DESDE LA BIBLIOTECA ====================
@@ -231,3 +249,43 @@ export function quickCommandFor(
   }
   return null;
 }
+
+// ==================== CLASIFICACIÓN DE AJUSTES ====================
+
+/**
+ * Qué tipo de ajuste es, para la etiqueta de la tarjeta.
+ *
+ * Se deriva **solo de metadatos que ya existen** (`impact`, `experimental`, `warn`):
+ * no hay una taxonomía nueva ni campos añadidos a `games.json`. Cada valor responde a
+ * una pregunta distinta:
+ *
+ * - `diagnostico`: la herramienta sirve para **medir**, no para mejorar (`impact:
+ *   'medicion'`). MangoHud es el caso claro: enseña FPS, no los sube.
+ * - `riesgo`: se sabe que puede ir mal (`impact: 'evitar'`). `RADV_DEBUG=nofastclears`
+ *   entra aquí: baja el rendimiento a propósito, es una herramienta de depuración.
+ * - `experimental`: la evidencia es limitada o depende del entorno (`experimental: true`,
+ *   o un `warn` que lo dice con esas palabras).
+ * - `null`: ajuste normal. No lleva etiqueta: la mayoría no necesita una y llenar todas
+ *   las tarjetas de chips es justo el ruido que se quiere quitar.
+ */
+export type ClaseAjuste = 'diagnostico' | 'riesgo' | 'experimental' | null;
+
+export function claseDeAjuste(param: {
+  impact?: string | null;
+  experimental?: boolean;
+  warn?: string | null;
+}): ClaseAjuste {
+  // El orden importa: un `evitar` es riesgo aunque también diga «experimental».
+  if (param.impact === 'evitar') return 'riesgo';
+  if (param.impact === 'medicion') return 'diagnostico';
+  if (param.experimental === true) return 'experimental';
+  if (param.warn && /^\s*experimental/i.test(param.warn)) return 'experimental';
+  return null;
+}
+
+/** Etiqueta corta de cada clase. Solo se pinta cuando no es `null`. */
+export const ETIQUETA_CLASE: Record<Exclude<ClaseAjuste, null>, string> = {
+  diagnostico: 'Diagnóstico',
+  riesgo: 'Riesgo',
+  experimental: 'Experimental',
+};

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { RecordedSetup, Benchmark, BenchmarkComparison, GroupComparison } from '../lib/types';
 import { api } from '../lib/api';
 import { useMangoHud } from '../hooks/useMangoHud';
-import { useBenchmarks } from '../hooks/useBenchmarks';
+import { useBenchmarks, MismoJuego } from '../hooks/useBenchmarks';
 import { useShaderCache } from '../hooks/useShaderCache';
 import { ShaderStutterCard } from './ShaderStutterCard';
 import { useComparison } from '../hooks/useComparison';
@@ -24,10 +24,11 @@ import { Toggle } from './Toggle';
 import { openExternal } from '../lib/links';
 import { sufijoOrigen, textoComando } from '../lib/pruebaLabel';
 import { PruebaN } from './PruebaN';
+import { InstantaneaCard } from './InstantaneaCard';
 import {
   Upload, Trash2, BarChart3, AlertCircle, Zap, FileText, Search,
   Clock, Gamepad2, Gauge, Activity, ChevronDown, Timer, ThumbsUp, ThumbsDown,
-  Scale, Info, Save, Check, ExternalLink,
+  Scale, Info, Save, Check, ExternalLink, AlertTriangle,
 } from 'lucide-react';
 
 /* ── Documentación que se enlaza desde esta pantalla ── */
@@ -69,6 +70,30 @@ interface BenchmarksViewProps {
    * juego abierto no se sabe qué comando había, y guardar `%command%` sería inventárselo.
    */
   hayJuegoAbierto?: boolean;
+  /**
+   * Revisión del motor para la instantánea (subfase 5.2).
+   *
+   * Sirve para saber si dos datos de la instantánea salieron de la misma versión del
+   * comando. Opcional: sin él se guarda la instantánea sin ese dato.
+   */
+  revisionMotor?: number | null;
+  /** ¿El comando actual tiene cambios sin guardar respecto al perfil cargado? */
+  cambiosSinGuardar?: boolean;
+  /**
+   * Lo que la interfaz sabe de la configuración **del juego abierto**.
+   *
+   * Se pide por juego para no atribuir a la grabación el perfil o el comando de otro. Si
+   * el juego de la grabación no es el abierto, el contexto resultante lleva
+   * `correspondeAlJuego: false` y el backend lo registra como desconocido.
+   */
+  contextoDelJuegoAbierto?: {
+    appid: number;
+    gameName: string;
+    perfilId: string | null;
+    perfilNombre: string | null;
+    comando: string;
+    modoProton: boolean;
+  } | null;
 }
 
 /* ─────────────────────── Constantes y utilidades ─────────────────────── */
@@ -658,7 +683,18 @@ function sinEvidenciaDeGrupo(rows?: GroupComparison[] | null): boolean {
 export { sufijoOrigen, textoComando };
 
 /* ─────────────────────────────── Vista principal ─────────────────────────────── */
-export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCommand, currentProfileName, mangohudLogPath, onLogPathChange, hayJuegoAbierto = true }: BenchmarksViewProps) {
+export function BenchmarksView({
+  currentAppid,
+  currentGameName,
+  currentLaunchCommand,
+  currentProfileName,
+  mangohudLogPath,
+  onLogPathChange,
+  hayJuegoAbierto = true,
+  revisionMotor = null,
+  cambiosSinGuardar = false,
+  contextoDelJuegoAbierto = null,
+}: BenchmarksViewProps) {
   const [logPath, setLogPath] = useState(mangohudLogPath || '/tmp/MangoHud');
   const [notes, setNotes] = useState('');
   // Segundos iniciales que se descartan al analizar. Se recuerda entre sesiones.
@@ -698,6 +734,8 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     analyze,
     remove: deleteBenchmark,
     removeAll: deleteAllBenchmarks,
+    removeAllForGame: deleteAllForGame,
+    error: errorHistorial,
   } = useBenchmarks({
     currentAppid,
     currentGameName,
@@ -709,6 +747,34 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
     // Se manda el nombre porque el AppID del CSV es 0: el backend resuelve por nombre.
     steamParaJuego: (juego) =>
       api.steamLaunchOptionsParaJuego(juego).then((o) => o?.opciones ?? null),
+    // Instantánea: solo se atribuye la configuración al juego de la grabación cuando es el
+    // mismo que está abierto. Si el CSV es de otro juego (o no hay ninguno abierto), el
+    // contexto va marcado como ajeno y el backend guarda la configuración como
+    // desconocida, en lugar de apuntarle el perfil de otro juego.
+    contextoParaJuego: async ({ appid, gameName }) => {
+      const abierto = contextoDelJuegoAbierto;
+      if (!abierto || !hayJuegoAbierto) return null;
+      const mismaAppid =
+        appid !== 0 && abierto.appid !== 0 && appid === abierto.appid;
+      // El CSV puede venir sin AppID: el nombre es entonces la única identidad.
+      const mismoNombre =
+        !!gameName &&
+        !!abierto.gameName &&
+        MismoJuego(gameName, abierto.gameName);
+      const corresponde = mismaAppid || (appid === 0 && mismoNombre);
+
+      return {
+        appidReal: corresponde ? abierto.appid || null : appid !== 0 ? appid : null,
+        comandoConfirmado: abierto.comando,
+        revisionMotor,
+        opcionesSteam: null,
+        perfilId: corresponde ? abierto.perfilId : null,
+        perfilNombre: corresponde ? abierto.perfilNombre : null,
+        cambiosSinGuardar,
+        modoProton: corresponde ? abierto.modoProton : null,
+        correspondeAlJuego: corresponde,
+      };
+    },
     onNotify: notify,
   });
 
@@ -718,6 +784,31 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   // La lista llega de Rust en orden de guardado (la más antigua primero). Aquí se
   // muestra al revés: lo más reciente arriba, que es lo que interesa al entrar.
   const shown: Benchmark[] = [...benchmarks].reverse();
+
+  /**
+   * Qué está enseñando esta vista, y por tanto qué alcance tienen sus textos y sus acciones.
+   *
+   * La pestaña general **no** es «el historial de un juego»: carga todos los juegos cuando no
+   * hay ninguno abierto y se limita a uno cuando lo hay (`useBenchmarks` decide por
+   * `currentAppid`). El encabezado y el botón de borrar
+   * estaban escritos como si siempre fuera un solo juego, así que con ocho pruebas de dos
+   * juegos la cabecera decía «Historial de este juego» y el borrado se anunciaba como «Las
+   * pruebas de otros juegos no se tocan» mientras se ofrecía a borrar el archivo entero.
+   *
+   * Se deriva una sola vez y lo consumen el título, el borrado y su confirmación: si cada
+   * sitio lo dedujera por su cuenta, volverían a discrepar.
+   */
+  const alcance =
+    currentAppid || currentGameName
+      ? { tipo: 'juego' as const, nombre: currentGameName ?? 'este juego' }
+      : { tipo: 'general' as const, nombre: null };
+
+  // Cuántos juegos distintos hay de verdad en lo que se enseña. Sirve para no afirmar
+  // «todos los juegos» cuando en realidad solo hay uno guardado.
+  const juegosEnPantalla = new Set(
+    shown.map((b) => (b.appid ? `appid:${b.appid}` : `nombre:${b.game_name.trim().toLowerCase()}`))
+  ).size;
+
   // Se compara siempre la más reciente contra la siguiente más antigua del mismo juego.
   const antesId = shown[1]?.id;
   const despuesId = shown[0]?.id;
@@ -820,9 +911,18 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
   const askDeleteAll = () =>
     ask({
       title: 'Borrar el historial',
-      message: `Se eliminarán las ${shown.length} grabaciones de este juego. Los demás juegos no se tocan. Esta acción no se puede deshacer.`,
+      // El alcance de la confirmación tiene que ser el mismo que el de la vista. Antes decía
+      // siempre «de este juego… los demás no se tocan», también cuando la vista enseñaba
+      // varios juegos y el botón borraba **todo**.
+      message:
+        alcance.tipo === 'juego'
+          ? `Se eliminarán las ${shown.length} grabaciones de ${alcance.nombre}. Los demás juegos no se tocan. Esta acción no se puede deshacer.`
+          : `Se eliminarán las ${shown.length} grabaciones de ${juegosEnPantalla === 1 ? '1 juego' : `los ${juegosEnPantalla} juegos`} del historial. Se borrarán todas las pruebas guardadas. Esta acción no se puede deshacer.`,
       confirmLabel: 'Borrar historial',
-      onConfirm: deleteAllBenchmarks,
+      // **Alcance real del borrado.** Antes llamaba siempre a `deleteAllBenchmarks`, que vacía
+      // el archivo entero. Desde la ficha de un juego eso se llevaba por delante las pruebas
+      // de todos los demás, justo lo contrario de lo que la confirmación prometía.
+      onConfirm: alcance.tipo === 'juego' ? deleteAllForGame : deleteAllBenchmarks,
     });
 
   const askDeleteBenchmark = (id: string) =>
@@ -1127,6 +1227,23 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
         </div>
       </article>
 
+      {/* Subfase 5.1: si el historial no se pudo leer, se dice. Sin esto la lista
+          simplemente no aparecía y parecía que no había grabaciones. */}
+      {errorHistorial && (
+        <article
+          role="alert"
+          className="p-4 rounded-xl bg-[var(--caution-bg)] border border-caution/50"
+        >
+          <p className="flex items-center gap-2 text-sm font-semibold text-[var(--caution)] mb-1">
+            <AlertTriangle className="w-4 h-4" />
+            No se pudo leer el historial de benchmarks
+          </p>
+          <p className="text-xs text-[var(--text-muted)] leading-relaxed break-words">
+            {errorHistorial}
+          </p>
+        </article>
+      )}
+
       {/* Diagnóstico del arranque: shaders compilándose al principio */}
       {shown.length > 0 && (
         <ShaderStutterCard benchmark={shown[0]} cache={shaderCache} loadingCache={shaderCache === null && !!currentAppid} />
@@ -1134,13 +1251,19 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
 
       {/* Clasificación: con varias grabaciones, decir cuál gana de un vistazo */}
 
+      {/* Configuración histórica de la prueba más reciente (subfase 5.2). Plegada por
+          defecto; se despliega para auditar con qué se hizo. */}
+      {shown.length > 0 && (
+        <InstantaneaCard bench={shown[0]} onCopy={copiarComando} />
+      )}
+
       {/* Lista de Benchmarks */}
       {shown.length > 0 && (
         <article className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-base font-bold text-[var(--text)] flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-[var(--action)]" />
-              Historial de este juego
+              {alcance.tipo === 'juego' ? 'Historial de este juego' : 'Historial de todos los juegos'}
               <span className="text-xs font-normal text-[var(--text-muted)] bg-[var(--bg)] px-2 py-0.5 rounded-full">
                 {shown.length}
               </span>
@@ -1148,10 +1271,14 @@ export function BenchmarksView({ currentAppid, currentGameName, currentLaunchCom
             <button
               onClick={askDeleteAll}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-error/10 text-[var(--error)] border border-error/30 hover:bg-error/20 hover:border-error/50 hover:scale-105 transition-all duration-200 flex items-center gap-1.5 group"
-              title="Borrar todo el historial de este juego"
+              title={
+                alcance.tipo === 'juego'
+                  ? `Borrar todo el historial de ${alcance.nombre}`
+                  : 'Borrar el historial de todos los juegos'
+              }
             >
               <Trash2 className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
-              Borrar historial
+              {alcance.tipo === 'juego' ? 'Borrar historial' : 'Borrar todo el historial'}
             </button>
           </div>
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { BarChart3, Trash2, ChevronRight } from 'lucide-react';
+import { AlertTriangle, BarChart3, Trash2, ChevronRight } from 'lucide-react';
 import { interpretar, nombreLegible, etiquetasDe, titularDelCambio } from '../lib/interpretacion';
 import { formatTimestamp } from '../lib/format';
 import { PruebaN } from './PruebaN';
@@ -31,7 +31,7 @@ const ESTADO_TEXTO: Record<ReturnType<typeof interpretar>['estado'], string> = {
 export function DashboardView() {
   const { toast, setToast } = useToast();
   const { confirmState, ask, close } = useConfirm();
-  const { items, loading, remove, removeAll } = useSavedComparisons(setToast);
+  const { items, loading, remove, removeAll, error } = useSavedComparisons(setToast);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const copyText = async (text: string) => {
@@ -119,6 +119,34 @@ export function DashboardView() {
         />
         {overlays}
       </>
+    );
+  }
+
+  /* ───────────────────────────── No se pudo leer ───────────────────────────── */
+  // Antes de decir «no hay pruebas»: si la lectura falló, no sabemos cuántas hay. El
+  // archivo sigue en disco; decir «no hay ninguna» sería una afirmación falsa sobre datos
+  // que probablemente existen.
+  if (error) {
+    return (
+      <div className="max-w-4xl mx-auto p-8">
+        <div
+          role="alert"
+          className="p-5 rounded-xl bg-[var(--caution-bg)] border border-caution/50"
+        >
+          <h2 className="flex items-center gap-2 text-lg font-bold text-[var(--caution)] mb-2">
+            <AlertTriangle className="w-5 h-5" />
+            No se pudieron leer tus pruebas guardadas
+          </h2>
+          <p className="text-sm text-[var(--text-muted)] leading-relaxed break-words">{error}</p>
+          <p className="text-xs text-[var(--text-dim)] mt-3">
+            Las pruebas que tenías no se han borrado: siguen en
+            <code className="mx-1 px-1.5 py-0.5 rounded bg-[var(--bg)] text-[var(--text)]">
+              ~/.config/thoriapp/benchmarks/saved_comparisons.json
+            </code>
+            Thoriapp solo ha dejado de mostrarlas hasta que se pueda leer el archivo.
+          </p>
+        </div>
+      </div>
     );
   }
 

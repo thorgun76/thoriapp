@@ -160,3 +160,29 @@ describe('describeTag: los motivos se leen en castellano', () => {
     }
   });
 });
+
+describe('missingReason: un ajuste que pide AMD en un equipo sin GPU AMD', () => {
+  const radv: Param = {
+    kind: 'env',
+    value: 'RADV_DEBUG=nofastclears',
+    title: 'Desactivar fast clears (debug)',
+    why: 'Parámetro de depuración que baja el rendimiento.',
+    impact: 'evitar',
+    requires: ['amd'],
+    default_on: false,
+    evidence: 'heuristica',
+    proton_only: false,
+  };
+
+  it('se oculta con motivo, no desaparece sin explicación', () => {
+    // Este es el motivo de que RADV_DEBUG no salga en un equipo sin GPU AMD detectada
+    // (por ejemplo, un contenedor). En un equipo con Radeon sí aparece.
+    expect(missingReason(radv, { isNative: false, hwTags: [], forceProton: false })).toBe(
+      'Necesita una GPU AMD'
+    );
+  });
+
+  it('con GPU AMD detectada sí se ofrece', () => {
+    expect(missingReason(radv, { isNative: false, hwTags: ['amd'], forceProton: false })).toBeNull();
+  });
+});

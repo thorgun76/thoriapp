@@ -22,6 +22,7 @@ describe('payload de save_profile', () => {
     manualCommand: null,
     useManualCommand: false,
     notes: null,
+    command: null,
   });
 
   it('un array disperso se serializa con null (el bug original)', () => {

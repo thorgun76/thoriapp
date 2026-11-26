@@ -33,3 +33,13 @@ desktop.ini
 *.swp
 *.swo
 src-tauri/src/Copias/
+
+# Grabaciones reales de MangoHud usadas como fixtures de pruebas. Se versionan a propósito
+# (`*.log` de arriba no las cubre): son la única evidencia reproducible del formato real.
+# Solo contienen modelo de CPU/GPU, kernel y métricas: sin rutas ni nombres de usuario.
+!tests/fixtures/mangohud/*.csv
+
+# Prototipo de diseño del comparador de benchmarks. Es una referencia visual autocontenida
+# (HTML + JS inline, datos simulados) que no importa el proyecto ni se carga en tiempo de
+# ejecución. Se conserva en disco, fuera del control de versiones.
+/thoriapp-benchmark-prototipo-v2.html

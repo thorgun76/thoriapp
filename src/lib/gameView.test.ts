@@ -196,6 +196,22 @@ describe('isDirty', () => {
     expect(isDirty(current, saved)).toBe(false);
   });
 
+  it('un comando distinto con los mismos ajustes sí son cambios', () => {
+    // Los argumentos que Thoriapp no reconoce no salen en ningún toggle: sin comparar el
+    // texto, quitar `--mi-flag` a mano se leería como «sin cambios» y podría perderse.
+    const saved = snapshotOf({ ...base, comando: 'AMD_VULKAN_ICD=RADV --mi-flag %command%' });
+    const current = snapshotOf({ ...base, comando: 'AMD_VULKAN_ICD=RADV %command%' });
+
+    expect(isDirty(current, saved)).toBe(true);
+  });
+
+  it('el mismo comando exacto no son cambios', () => {
+    const saved = snapshotOf({ ...base, comando: 'AMD_VULKAN_ICD=RADV %command%' });
+    const current = snapshotOf({ ...base, comando: 'AMD_VULKAN_ICD=RADV %command%' });
+
+    expect(isDirty(current, saved)).toBe(false);
+  });
+
   it('los espacios sobrantes del comando manual no cuentan', () => {
     const saved = snapshotOf({ ...base, useManualCommand: true, manualCommand: '%command%' });
     const current = snapshotOf({ ...base, useManualCommand: true, manualCommand: '  %command%  ' });

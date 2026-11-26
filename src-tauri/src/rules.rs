@@ -54,8 +54,23 @@ pub struct Game {
     pub has_rules: bool,
 }
 
-fn is_proton_only(v: &str) -> bool {
-    ["PROTON_", "DXVK_", "VKD3D_", "STAGING_", "WINE"].iter().any(|p| v.starts_with(p))
+/// Prefijos de variables que solo tienen efecto bajo Proton/Wine.
+///
+/// Es la **única** lista de aplicabilidad: la usan el catálogo (`proton_only` en cada
+/// `Param`), el catálogo efectivo de las recomendaciones y, por IPC, la interfaz.
+/// Mantener una copia en TypeScript fue justo lo que dejó `WINE_FULLSCREEN_FSR=1` fuera:
+/// el regex del cliente solo miraba `PROTON|DXVK|VKD3D`, así que la tarjeta se pintaba
+/// como si fuera aplicable y el motor la rechazaba al pulsarla.
+const PREFIJOS_SOLO_PROTON: [&str; 6] = ["PROTON_", "DXVK_", "VKD3D_", "STAGING_", "WINE", "WINE_"];
+
+/// ¿Esta variable solo hace algo bajo Proton/Wine?
+///
+/// Acepta el valor completo (`WINE_FULLSCREEN_FSR=1`) o solo la clave. Se compara por
+/// prefijo de la **clave**, nunca por subcadena: `WINEDLLOVERRIDES` es de Wine, pero
+/// `SWINE_MODE` no.
+pub fn is_proton_only(valor_o_clave: &str) -> bool {
+    let clave = valor_o_clave.split('=').next().unwrap_or(valor_o_clave).trim();
+    PREFIJOS_SOLO_PROTON.iter().any(|p| clave.starts_with(p))
 }
 
 pub fn for_appid(appid: u32) -> Game {
@@ -182,6 +197,56 @@ mod tests {
         let g = for_appid(999999);
         for p in &g.params {
             assert_eq!(p.proton_only, is_proton_only(&p.value), "{} mal marcado", p.value);
+        }
+    }
+
+    /// `WINE_*` es solo-Proton. Faltaba en el regex de la interfaz, así que
+    /// `WINE_FULLSCREEN_FSR=1` se pintaba como aplicable en un juego nativo y el motor la
+    /// rechazaba al pulsar el toggle («el toggle no hace nada»).
+    #[test]
+    fn las_variables_de_wine_son_solo_proton() {
+        assert!(is_proton_only("WINE_FULLSCREEN_FSR=1"));
+        assert!(is_proton_only("WINE_FULLSCREEN_FSR"));
+        assert!(is_proton_only("WINE_FULLSCREEN_FSR_STRENGTH=2"));
+        assert!(is_proton_only("WINEDLLOVERRIDES=foo=n,b"));
+        assert!(is_proton_only("PROTON_LOCAL_SHADER_CACHE=1"));
+        // No se confunde con una variable que solo *contiene* el prefijo.
+        assert!(!is_proton_only("SWINE_MODE=1"));
+        assert!(!is_proton_only("mangohud"));
+    }
+
+    /// La lista de prefijos es la MISMA que la de TypeScript (`PREFIJOS_SOLO_PROTON` en
+    /// `src/lib/preflight.ts`). Se comprueba leyendo el fichero: si alguien añade un
+    /// prefijo en un lado y no en el otro, el test falla en vez de reaparecer el toggle
+    /// que parece aplicable y el motor rechaza.
+    #[test]
+    fn los_prefijos_solo_proton_coinciden_con_la_interfaz() {
+        let ts = include_str!("../../src/lib/preflight.ts");
+        let inicio = ts
+            .find("export const PREFIJOS_SOLO_PROTON")
+            .expect("falta la lista en preflight.ts");
+        let bloque = &ts[inicio..inicio + 400];
+
+        for prefijo in PREFIJOS_SOLO_PROTON {
+            assert!(
+                bloque.contains(&format!("'{prefijo}'")),
+                "el prefijo `{prefijo}` está en Rust pero no en preflight.ts"
+            );
+        }
+
+        // Al revés: cualquier literal `'XXX_'` de la lista de TS tiene que existir en Rust.
+        for trozo in bloque.split('\'').skip(1) {
+            let cand = trozo.split('\'').next().unwrap_or("");
+            if cand.is_empty() || !cand.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                continue;
+            }
+            if cand == "WINE" {
+                continue;
+            }
+            assert!(
+                PREFIJOS_SOLO_PROTON.contains(&cand),
+                "el prefijo `{cand}` está en preflight.ts pero no en Rust"
+            );
         }
     }
 }

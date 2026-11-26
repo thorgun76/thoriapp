@@ -7,7 +7,18 @@ interface SaveProfileModalProps {
   onNameChange: (value: string) => void;
   onNotesChange: (value: string) => void;
   onCancel: () => void;
+  /**
+   * Crea un perfil nuevo con el nombre escrito. Nunca sobrescribe: si ya existe uno con
+   * ese nombre, lo dice `onSaveError`.
+   */
   onSave: () => void;
+  /**
+   * Perfil cargado, si lo hay. Con él se ofrece actualizarlo en el sitio en vez de crear
+   * otro, que es lo que se quiere el 90 % de las veces.
+   */
+  perfilCargado?: string | null;
+  /** Actualiza el perfil cargado. Solo se ofrece si hay uno. */
+  onUpdate?: () => void;
 }
 
 /** Modal para nombrar y guardar la configuración actual como perfil. */
@@ -19,6 +30,8 @@ export function SaveProfileModal({
   onNotesChange,
   onCancel,
   onSave,
+  perfilCargado = null,
+  onUpdate,
 }: SaveProfileModalProps) {
   return (
     <AnimatePresence>
@@ -38,6 +51,12 @@ export function SaveProfileModal({
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-lg font-bold mb-4">Guardar perfil</h3>
+            {perfilCargado && (
+              <p className="text-xs text-[var(--text-muted)] mb-4 -mt-2 leading-snug">
+                Hay un perfil cargado: <strong>{perfilCargado}</strong>. Puedes actualizarlo o
+                guardar esta configuración como uno nuevo.
+              </p>
+            )}
             <div className="space-y-4">
               <div>
                 <label className="text-sm font-semibold text-[var(--text)] mb-2 block">
@@ -71,12 +90,27 @@ export function SaveProfileModal({
                 >
                   Cancelar
                 </button>
+                {/* «Actualizar» solo aparece con un perfil cargado: sin él no hay nada que
+                    actualizar, y crearlo a espaldas del usuario es justo lo que no debe
+                    pasar. */}
+                {perfilCargado && onUpdate && (
+                  <button
+                    onClick={onUpdate}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-colors"
+                  >
+                    Actualizar «{perfilCargado}»
+                  </button>
+                )}
                 <button
                   onClick={onSave}
                   disabled={!name.trim()}
-                  className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    perfilCargado
+                      ? 'bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)]'
+                      : 'bg-[var(--action)] text-white hover:bg-[var(--action-hover)]'
+                  }`}
                 >
-                  Guardar
+                  {perfilCargado ? 'Guardar como nuevo' : 'Guardar'}
                 </button>
               </div>
             </div>

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import type { ContextoDeCaptura } from '../lib/api';
 import type { Benchmark, OrigenComando, RecordedSetup } from '../lib/types';
+import { notifyComparisonsChanged } from './useSavedComparisons';
 
 /**
  * ¿Son el mismo juego dos nombres?
@@ -52,6 +54,21 @@ interface UseBenchmarksOptions {
    * resuelve el juego por nombre contra la biblioteca de Steam.
    */
   steamParaJuego?: (juego: { appid: number; gameName: string }) => Promise<string | null>;
+  /**
+   * Contexto de captura para la instantánea histórica (subfase 5.2).
+   *
+   * Se pide **por juego de la grabación**, no «lo que haya abierto»: el CSV puede ser de un
+   * juego distinto del que el usuario está configurando. Si la interfaz no puede decir que
+   * el contexto es de ESE juego, devuelve `correspondeAlJuego: false` y la configuración se
+   * registra como desconocida.
+   *
+   * Si no se pasa, la instantánea se guarda igual pero sin configuración: el hueco queda
+   * visible como «desconocido», nunca relleno con datos de otro sitio.
+   */
+  contextoParaJuego?: (juego: {
+    appid: number;
+    gameName: string;
+  }) => Promise<ContextoDeCaptura | null>;
   onNotify?: (message: string) => void;
 }
 
@@ -68,19 +85,36 @@ export function useBenchmarks({
   currentLaunchCommand,
   comandoParaJuego,
   steamParaJuego,
+  contextoParaJuego,
   onNotify,
 }: UseBenchmarksOptions) {
   const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
+  /**
+   * Motivo por el que no se pudo leer el historial, o `null`.
+   *
+   * «No hay pruebas» y «no se pudieron leer las pruebas» son afirmaciones distintas: la
+   * primera se pinta como una pantalla vacía; la segunda tiene que verse, porque debajo
+   * hay un archivo con datos que no se han perdido.
+   */
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const list = currentAppid
+      // `0` **no** es «no hay juego»: es un juego sin AppID de Steam, que es el caso de
+      // todas las grabaciones de MangoHud (`analyze_log` deja `appid` a 0 porque el CSV no
+      // lo trae). Con `!currentAppid` la ventana de un juego sin AppID pedía el historial
+      // **completo** y luego lo enseñaba sin filtrar; lo correcto es filtrar por nombre.
+      // Solo `undefined` significa «no hay ningún juego abierto».
+      const hayJuego = currentAppid !== undefined && currentAppid !== null;
+      const list = hayJuego
         ? await api.loadBenchmarksForGame({ appid: currentAppid, gameName: currentGameName })
         : await api.loadBenchmarks();
       setBenchmarks(list);
+      setError(null);
     } catch (e) {
       console.error('Error al cargar benchmarks:', e);
+      setError(String(e));
     }
   }, [currentAppid, currentGameName]);
 
@@ -209,6 +243,28 @@ export function useBenchmarks({
           steamCommand = null;
         }
 
+        // Contexto de configuración para la instantánea. Un fallo aquí no impide
+        // la prueba: la instantánea queda con la configuración en desconocido, que es un
+        // estado que la interfaz sabe mostrar.
+        let contexto: ContextoDeCaptura | null = null;
+        try {
+          contexto = contextoParaJuego
+            ? await contextoParaJuego({ appid: appidGrabacion, gameName: benchmark.game_name })
+            : null;
+        } catch {
+          contexto = null;
+        }
+
+        // Pista para el observador de sesiones: el juego del que trata esta grabación. No
+        // es evidencia de identidad —el AppID del CSV no existe—, solo dice qué juego
+        // acaba de grabarse, para poder ponerle nombre a una sesión sin identificar.
+        // Un fallo aquí no puede impedir guardar la prueba.
+        try {
+          await api.fijarPistaDeJuego(benchmark.game_name ?? gameName ?? null);
+        } catch {
+          // Sin pista el backend sigue funcionando; solo pierde ese desempate.
+        }
+
         await api.saveBenchmark({
           benchmark,
           profileId: '',
@@ -218,6 +274,7 @@ export function useBenchmarks({
           origenComando,
           steamCommand,
           notes: notes || null,
+          contexto,
         });
 
         // Aviso cuando el comando no vino de la instantánea de la grabación: el usuario
@@ -283,6 +340,9 @@ export function useBenchmarks({
       await api.deleteAllBenchmarks();
       onNotify?.(`✓ Se eliminaron ${benchmarks.length} benchmarks`);
       await load();
+      // El backend purga las comparaciones guardadas que usaban estas pruebas. Sin esto,
+      // «Mis pruebas» seguiría enseñando informes que ya no están en disco.
+      notifyComparisonsChanged();
     } catch (e) {
       onNotify?.(`❌ Error al eliminar: ${e}`);
     }
@@ -305,10 +365,12 @@ export function useBenchmarks({
         borradas ? `✓ Se eliminaron ${borradas} pruebas de este juego` : 'No había pruebas que borrar'
       );
       await load();
+      // Igual que arriba: la purga de comparaciones huérfanas ocurre en el backend.
+      if (borradas) notifyComparisonsChanged();
     } catch (e) {
       onNotify?.(`❌ Error al eliminar: ${e}`);
     }
   }, [currentAppid, currentGameName, load, onNotify]);
 
-  return { benchmarks, analyzing, load, analyze, remove, removeAll, removeAllForGame };
+  return { benchmarks, analyzing, load, analyze, remove, removeAll, removeAllForGame, error };
 }

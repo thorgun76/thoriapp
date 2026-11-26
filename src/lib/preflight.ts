@@ -63,8 +63,28 @@ const WRAPPER_HINTS: Record<string, string> = {
   scx_lavd: 'Viene con los schedulers `scx` (paquete scx-scheds).',
 };
 
-/** Variables que solo tienen efecto cuando el juego corre bajo Proton/Wine. */
-const PROTON_ONLY_ENV = /^(PROTON|DXVK|VKD3D)_[A-Z0-9_]+$/;
+/**
+ * Prefijos de variables que solo tienen efecto bajo Proton/Wine.
+ *
+ * **Copia exacta** de `PREFIJOS_SOLO_PROTON` en `src-tauri/src/rules.rs`. La copia anterior
+ * solo tenía `PROTON|DXVK|VKD3D` y se dejaba fuera `WINE_*`: `WINE_FULLSCREEN_FSR=1` se
+ * pintaba como aplicable en un juego nativo y el motor la rechazaba al pulsar el toggle.
+ * Hay un test (`preflight` vs. `rules`) que compara las dos listas para que no vuelvan a
+ * separarse.
+ */
+export const PREFIJOS_SOLO_PROTON = ['PROTON_', 'DXVK_', 'VKD3D_', 'STAGING_', 'WINE', 'WINE_'] as const;
+
+/**
+ * ¿Este ajuste solo hace algo bajo Proton/Wine?
+ *
+ * Se compara el **prefijo de la clave**, nunca una subcadena: `WINEDLLOVERRIDES` es de
+ * Wine, pero `SWINE_MODE` no. Cuando se dispone del `Param` del motor (`proton_only`), esa
+ * es la fuente buena; esta función existe para las recomendaciones, que llegan como texto.
+ */
+export function esSoloProton(texto: string): boolean {
+  const clave = texto.split('=')[0].trim();
+  return PREFIJOS_SOLO_PROTON.some((p) => clave.startsWith(p));
+}
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -140,7 +160,7 @@ export function preflight(
 
   // 3) Variables de Proton en un juego que no usa Proton.
   if (ctx.native === true) {
-    const protonVars = vars.filter((v) => PROTON_ONLY_ENV.test(v));
+    const protonVars = vars.filter((v) => esSoloProton(v));
     if (protonVars.length > 0) {
       checks.push({
         id: 'proton-en-nativo',

@@ -15,6 +15,22 @@ export interface ConfirmRequest {
   };
   /** Color del botón principal: rojo para acciones destructivas (por defecto). */
   tone?: 'danger' | 'primary';
+  /**
+   * Botones adicionales, a la izquierda de «Cancelar».
+   *
+   * Existe porque descartar trabajo tiene tres salidas razonables, no dos: guardar lo que
+   * hay y seguir, perderlo y seguir, o no hacer nada. Con solo «Cancelar / Aceptar» el
+   * usuario tenía que elegir entre abortar o perder los cambios, y el caso «guárdalos antes
+   * de continuar» no se podía ni expresar.
+   *
+   * Se pintan en orden; «Cancelar» va siempre al final y nunca ejecuta nada.
+   */
+  accionesExtra?: {
+    label: string;
+    /** `primary` para la recomendada (guardar), `danger` para la destructiva. */
+    tone?: 'danger' | 'primary' | 'neutral';
+    onSelect: () => void;
+  }[];
 }
 
 /**

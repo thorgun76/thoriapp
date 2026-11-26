@@ -20,13 +20,25 @@ export const notifyComparisonsChanged = () =>
 export function useSavedComparisons(onNotify?: (message: string) => void) {
   const [items, setItems] = useState<SavedComparison[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * Por qué no se pudieron leer las pruebas guardadas.
+   *
+   * Distingue «no tienes ninguna» de «no se pudo leer el archivo». Sin esto, un
+   * `saved_comparisons.json` dañado se pintaba como una pantalla vacía y el usuario
+   * creía haber perdido sus pruebas sin motivo.
+   */
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const list = await api.loadComparisons();
       setItems(list);
+      setError(null);
     } catch (e) {
       console.error('Error al cargar las pruebas guardadas:', e);
+      setError(String(e));
+      // Se dejan los items anteriores: mostrar una lista vacía aquí afirmaría que no
+      // hay ninguna, que es justo lo contrario de lo que sabemos.
     } finally {
       setLoading(false);
     }
@@ -64,5 +76,5 @@ export function useSavedComparisons(onNotify?: (message: string) => void) {
     }
   }, [onNotify]);
 
-  return { items, loading, load, remove, removeAll };
+  return { items, loading, load, remove, removeAll, error };
 }

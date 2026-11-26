@@ -56,6 +56,19 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
       /** Un solo aviso por appid aunque haya varios perfiles del mismo juego. */
       deniedCache?: Map<number, string | null>
     ): Promise<string> => {
+      // Lo primero: el comando que se guardó, literal.
+      //
+      // Reconstruirlo a partir de `enabled_params` no puede dar lo mismo: los argumentos que
+      // Thoriapp no conoce no están en el catálogo, así que no hay de dónde sacarlos, y el
+      // orden lo decide el motor al serializar. Por eso se guarda el texto.
+      //
+      // Se valida igual que un manual: un archivo importado puede traer cualquier cosa y
+      // esta es la puerta por la que ese texto llegaría a la caja del comando.
+      if (profile.command && profile.command.trim()) {
+        const guardado = profile.command.trim();
+        if (checkManualCommand(guardado).safe) return guardado;
+      }
+
       if (profile.use_manual_command && profile.manual_command) {
         // Mismo criterio que `buildProfileCommand`: un comando manual que no pasa la
         // comprobación se ignora y el perfil se reconstruye normal. Si no se hiciera
@@ -153,6 +166,21 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
     [getHwTags, rebuildOne, onNotify]
   );
 
+  /**
+   * Perfiles de un juego, derivados de la colección única.
+   *
+   * Es una derivación, no una segunda colección: si hubiera dos listas habría dos verdades
+   * y la biblioteca global y la del juego podrían discrepar. `load_profiles_for_game`
+   * existe en Rust, pero llamarlo aquí duplicaría la fuente, así que no se usa.
+   *
+   * @param appid Juego. Se compara exacto: un perfil de 251570 no aparece en 251571.
+   */
+  const profilesForGame = useCallback(
+    (appid: number | undefined): Profile[] =>
+      appid === undefined ? [] : profiles.filter((p) => p.appid === appid),
+    [profiles]
+  );
+
   /** Guarda el perfil del juego abierto y recarga la lista. */
   const save = useCallback(
     async (payload: Parameters<typeof api.saveProfile>[0], name: string) => {
@@ -167,6 +195,30 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
         const detalle = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e);
         console.error('Error al guardar perfil:', e);
         onNotify?.(`Error al guardar perfil: ${detalle}`);
+        return false;
+      }
+    },
+    [loadAll, onNotify]
+  );
+
+  /**
+   * Actualiza un perfil existente conservando su identidad.
+   *
+   * No crea un perfil nuevo ni toca `created_at`: lo hace Rust (`update_profile`). Si el id
+   * no existe, se informa y **no** se crea nada, para que un id perdido no acabe en un
+   * duplicado silencioso.
+   */
+  const update = useCallback(
+    async (profileId: string, payload: Parameters<typeof api.updateProfile>[1], name: string) => {
+      try {
+        await api.updateProfile(profileId, payload);
+        onNotify?.(`Perfil "${name}" actualizado`);
+        await loadAll();
+        return true;
+      } catch (e) {
+        const detalle = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e);
+        console.error('Error al actualizar perfil:', e);
+        onNotify?.(`Error al actualizar perfil: ${detalle}`);
         return false;
       }
     },
@@ -270,6 +322,7 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
     loadAll,
     copyCommand,
     save,
+    update,
     remove,
     reorder,
     importFromText,
@@ -278,5 +331,6 @@ export function useProfiles({ getHwTags, getGpuName, onNotify }: UseProfilesOpti
     pendingImport,
     exportAll,
     exportOne,
+    profilesForGame,
   };
 }

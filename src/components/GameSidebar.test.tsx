@@ -23,10 +23,23 @@ const hardware: Hardware = {
   tags: [],
 };
 
+/** Props de perfiles por defecto: el sidebar siempre los recibe, aunque no haya ninguno. */
+const perfilesVacios = {
+  perfiles: [],
+  cargadoId: null,
+  cargadoNombre: null,
+  sinGuardar: false,
+  ocupado: false,
+  onCargar: vi.fn(),
+  onRestaurarCargado: vi.fn(),
+  onGestionar: vi.fn(),
+};
+
 describe('GameSidebar', () => {
   it('titula el bloque como «Tu hardware», sin el «perfil de»', () => {
     render(
       <GameSidebar
+        perfiles={perfilesVacios}
         hardware={hardware}
         onMeasurePerformance={vi.fn()}
         onShowGameTests={vi.fn()}
@@ -40,6 +53,7 @@ describe('GameSidebar', () => {
   it('no ofrece «Ajustar optimización»: ya se está en la vista del juego', () => {
     render(
       <GameSidebar
+        perfiles={perfilesVacios}
         hardware={hardware}
         onMeasurePerformance={vi.fn()}
         onShowGameTests={vi.fn()}
@@ -52,6 +66,7 @@ describe('GameSidebar', () => {
   it('no muestra el bloque de fuentes verificables', () => {
     render(
       <GameSidebar
+        perfiles={perfilesVacios}
         hardware={hardware}
         onMeasurePerformance={vi.fn()}
         onShowGameTests={vi.fn()}
@@ -66,6 +81,7 @@ describe('GameSidebar', () => {
     // desde dentro está «Medir una prueba nueva».
     render(
       <GameSidebar
+        perfiles={perfilesVacios}
         hardware={hardware}
         onMeasurePerformance={vi.fn()}
         onShowGameTests={vi.fn()}
@@ -82,6 +98,7 @@ describe('GameSidebar', () => {
     const onShowGameTests = vi.fn();
     render(
       <GameSidebar
+        perfiles={perfilesVacios}
         hardware={hardware}
         onMeasurePerformance={vi.fn()}
         onShowGameTests={onShowGameTests}
@@ -95,7 +112,12 @@ describe('GameSidebar', () => {
 
   it('«Pruebas del juego» es la única acción rápida', () => {
     render(
-      <GameSidebar hardware={hardware} onMeasurePerformance={vi.fn()} onShowGameTests={vi.fn()} />
+      <GameSidebar
+        perfiles={perfilesVacios}
+        hardware={hardware}
+        onMeasurePerformance={vi.fn()}
+        onShowGameTests={vi.fn()}
+      />
     );
 
     // Un solo botón dentro del bloque de acciones rápidas.

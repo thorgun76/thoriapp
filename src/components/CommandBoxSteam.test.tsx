@@ -32,7 +32,6 @@ function renderBox(props: {
       launchCommand={props.launchCommand ?? '%command%'}
       activeCount={0}
       copied={false}
-      expertMode={false}
       manualEditing={false}
       manualCommand=""
       info={info}
@@ -43,8 +42,8 @@ function renderBox(props: {
       onCopy={vi.fn()}
       onSaveProfile={vi.fn()}
       onReset={vi.fn()}
-      onToggleManualEditing={vi.fn()}
-      onManualCommandChange={vi.fn()}
+
+      onConfirmarEdicion={vi.fn()}
       steamOpciones={props.steamOpciones ?? null}
       onImportarDeSteam={props.onImportarDeSteam}
     />

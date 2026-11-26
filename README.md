@@ -1,208 +1,149 @@
-# 🎮 Thoriapp - Optimizador de Juegos para Linux
+# 🎮 Thoriapp — Optimizador de juegos para Linux
 
-## 📦 Instalación Rápida
+Aplicación de escritorio (Tauri 2 + React/TypeScript + Rust) para preparar, registrar y
+comparar configuraciones de ejecución de juegos en Linux.
 
-### 1. Descargar todos los archivos
+> **Versión**: 1.2.0
+> **Estado**: fases 1–5.3 cerradas; 5.4, 6 y 7 pendientes. El observador de ejecución es
+> **experimental, opcional y apagado por defecto**.
+> Ver [Limitaciones conocidas](#-limitaciones-conocidas).
 
-Descarga TODOS los archivos desde el enlace arriba a la derecha.
-
-### 2. Instalar dependencias
+## 📦 Instalación
 
 ```bash
 cd tauri-app
 chmod +x install.sh
 ./install.sh
-```
-
-### 3. Ejecutar la aplicación
-
-```bash
 npm run tauri dev
 ```
 
-## 🎯 Características
+Para compilar el paquete distribuible:
 
-### ✅ 6 Fases Completadas
-
-1. **Interfaz moderna** 
-2. **Separación de conceptos** - Compatibilidad y Optimización (dos pestañas, sin duplicar)
-3. **Recomendaciones inteligentes** - Filtrado por hardware, toggle Proton
-4. **Dos modos** - Guiado (simple) y Experto (detallado)
-5. **Perfiles guardados** - Drag & drop, exportar/importar
-6. **Benchmarks** - Análisis de MangoHud, historial de las 10 últimas grabaciones por juego
-
-### 🎨 Funcionalidades Principales
-
-- Detección automática de hardware (CPU, GPU, RAM, kernel)
-- Búsqueda en Steam Store (todos los juegos)
-- Recomendaciones honestas con niveles de evidencia
-- Sistema de perfiles para guardar configuraciones
-- Drag & drop para reordenar perfiles
-- Exportar/importar perfiles como JSON
-- Análisis de benchmarks con logs de MangoHud
-- Historial por juego: las 10 grabaciones más recientes, las viejas se borran solas
-- Diagnóstico de stutter de shaders: primeros segundos frente al resto + estado de la caché en disco
-- Comparación de rendimiento antes/después con margen de ruido
-- Modo experto con detalles técnicos completos
-- Toggle "Probar con Proton" para juegos nativos
-- Revisión previa del comando: avisa si falta un wrapper, si MangoHud no es visible desde Steam Flatpak o si una variable de Proton no aplica al juego
-- Benchmarks con control de ruido: descarta el arranque y muestra el margen de error de cada grabación
-- Aviso de anti-cheat por juego (datos de AreWeAntiCheatYet): dice si el juego funciona, funciona sin soporte oficial o está bloqueado
-
-## 🚀 Uso Básico
-
-### 1. Abrir la app
 ```bash
-npm run tauri dev
+npm run tauri build
 ```
 
-### 2. Buscar un juego
-- Usa el buscador en la parte superior
-- Escribe el nombre del juego
-- Selecciona de los resultados
+## ✨ Qué hace
 
-### 3. Ver recomendaciones
-- Ve a la pestaña "Optimización"
-- Activa/desactiva parámetros
-- Copia el comando de lanzamiento
+### Motor de comandos en Rust
 
-### 4. Guardar perfil
-- Configura un juego
-- Haz clic en "Guardar perfil"
-- Dale un nombre y notas opcionales
+El comando de lanzamiento lo compone **Rust**, no el frontend: precedencia de envoltorios,
+marcador `%command%`, validación de argumentos y revisión del motor. La interfaz muestra el
+comando resultante junto a la procedencia de cada parte, para que siempre se sepa qué se va a
+ejecutar y por qué.
 
-### 5. Medir rendimiento
-- Graba un log con MangoHud (Shift+F2)
-- Ve a la pestaña "Benchmarks"
-- Analiza el log
-- Compara antes/después
+**Conservación de argumentos desconocidos**: los argumentos que Thoriapp no interpreta se
+conservan literalmente y en su orden. Nada se descarta de forma silenciosa al reconstruir el
+comando.
 
-## 📋 Estructura del Proyecto
+### Perfiles y restauración
 
-```
-tauri-app/
-├── src/                          # Frontend React
-│   ├── App.tsx                   # Componente principal
-│   ├── main.tsx                  # Entry point
-│   ├── index.css                 # Estilos
-│   └── components/
-│       └── BenchmarksView.tsx    # Vista de benchmarks
-│
-├── src-tauri/                    # Backend Rust
-│   ├── src/
-│   │   ├── main.rs              # Comandos Tauri
-│   │   ├── hw.rs                # Detección de hardware
-│   │   ├── preflight.rs         # Estado real del sistema (wrappers, capa Vulkan, sandbox)
-│   │   ├── anticheat.rs         # Avisos de anti-cheat (AreWeAntiCheatYet, caché 24 h)
-│   │   ├── steam.rs             # API de Steam
-│   │   ├── rules.rs             # Sistema de reglas
-│   │   ├── engine.rs            # Detección de motor
-│   │   ├── profiles.rs          # Sistema de perfiles
-│   │   ├── benchmarks.rs        # Análisis de benchmarks
-│   │   ├── net.rs               # Descargas con límite de tamaño
-│   │   └── log.rs               # Análisis de logs
-│   ├── games.json               # Reglas por juego
-│   ├── Cargo.toml               # Dependencias Rust
-│   ├── SEGURIDAD-DEPENDENCIAS.md # Avisos de seguridad y por qué aplican
-│   ├── tauri.conf.json          # Configuración Tauri
-│   └── capabilities/
-│       └── default.json         # Permisos
-│
-├── package.json                  # Dependencias Node
-├── vite.config.ts               # Configuración Vite
-├── tsconfig.json                # Configuración TypeScript
-├── tailwind.config.js           # Configuración Tailwind
-├── install.sh                   # Script de instalación
-└── generate-icons.py            # Generador de iconos
-```
+Perfiles por juego con guardado, aplicación y **restauración** al estado anterior. Se comprueba
+la integridad antes de aplicar; un dato ilegible se trata como ausente, nunca como un valor
+inventado.
+
+### Benchmarks e instantáneas de configuración
+
+- Importación de grabaciones de **MangoHud** (CSV y resumen) con ventana temporal.
+- **Instantáneas de configuración**: al guardar una prueba se congela la configuración con la
+  que se hizo, con la procedencia de cada dato. A partir de ahí la prueba es histórica:
+  renombrar un perfil o cambiar Steam **no** la modifica.
+- Historial y comparaciones **aislados por juego**: no se mezclan juegos distintos.
+- `ejecucion_verificada` queda vacío a propósito: tener Proton configurado no demuestra que la
+  prueba se hiciera con Proton.
+
+### Observador de ejecución — experimental y opcional
+
+Detecta qué juego está corriendo leyendo `/proc` y correlacionándolo con el catálogo de
+lanzadores. **Está apagado por defecto**: mientras no se active, no se lee `/proc`.
+
+- Identidad **observada** y **comercial** por separado. Sin evidencia suficiente el resultado
+  es «identidad desconocida», no una suposición.
+- Asociación de grabaciones a sesiones con niveles de confianza, y **asignación manual** con
+  prioridad sobre cualquier inferencia.
+- No es necesario para registrar, importar, guardar o comparar benchmarks.
+
+## 🎮 Compatibilidad de lanzadores
+
+Comprobada **en el equipo real** (CachyOS), no solo con fixtures:
+
+| Lanzador | Juego | Resultado |
+|---|---|---|
+| Steam | Deskrawl, Palworld | Detección individual correcta |
+| Heroic | Tattoo Tycoon | Detección individual correcta |
+| Heronite | Eslabong | Detección individual correcta |
+| Lutris (nativo) | Starsector | Nombre comercial correcto, estable 120 s |
+| Lutris (Wine) | Star Valor | Detección individual correcta |
+
+- **Simultaneidad validada**: Steam + Steam (Palworld + Deskrawl) y Lutris + Steam
+  (Starsector + Deskrawl).
+- Cierre de los seis juegos correcto; reiniciar Thoriapp no deja sesiones fantasma.
+
+## ⚠️ Limitaciones conocidas
+
+- **Eslabong (Heronite) + Tattoo Tycoon (Heroic) simultáneos**: la detección es **incompleta**
+  en ambos órdenes de lanzamiento. La causa exacta no está demostrada y la incidencia queda
+  aplazada; no bloquea la fase 5.4. Reabrirla exige una captura nueva del diagnóstico con el
+  observador activo en ese escenario: los registros existentes no bastan.
+- El observador es **experimental**. La fase 5.3 se cerró con esta limitación declarada.
+- La detección depende del catálogo de lanzadores: un juego que no esté en él y no aporte
+  evidencia propia se queda como identidad desconocida.
+- Una sesión observada **no acredita** la configuración realmente ejecutada.
+
+## 🚀 Uso básico
+
+1. Abre la app y elige juego.
+2. Revisa las recomendaciones (compatibilidad y optimización están separadas).
+3. Guarda un perfil con el comando que quieras usar.
+4. Lanza el juego y graba con MangoHud.
+5. Importa la grabación, guarda la prueba y compárala con las anteriores.
+
+## 📋 Estructura del proyecto
+
+- `src-tauri/` — backend Rust: motor de comandos, perfiles, benchmarks, observador.
+  - `src/engine.rs`, `src/rules.rs` — motor y reglas.
+  - `src/benchmarks.rs`, `src/mangohud.rs` — pruebas e importación.
+  - `src/sessions*.rs`, `src/proceso_linux.rs`, `src/evidencia_proceso.rs` — observador.
+  - `src/fixtures_procesos.rs` — topologías reales usadas por las pruebas.
+- `src/` — frontend React/TypeScript.
+- `tests/fixtures/mangohud/` — grabaciones reales usadas como fixtures (sin datos personales).
+- `docs/` — documentación de arquitectura, decisiones y planificación.
 
 ## 🧪 Comprobar el proyecto
 
 ```bash
-npm run check        # tipos + tests del frontend + tests de Rust
-npm run lint:rust    # clippy con los avisos como errores
-npm run audit        # vulnerabilidades de JS (producción) y de Rust
-```
+# Tipos y tests del frontend
+npx tsc --noEmit
+npx vitest run
 
-`npm run audit` usa `cargo audit` (instálalo con `cargo install cargo-audit`).
-Los avisos que no se pueden arreglar desde aquí están explicados uno a uno en
-`src-tauri/SEGURIDAD-DEPENDENCIAS.md`.
-
-El mismo conjunto corre en CI (`.github/workflows/verify.yml`) en cada push.
-
-## 🐛 Solución de Problemas
-
-### Error: "Cannot find module '@dnd-kit'"
-```bash
-npm install @dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities
-```
-
-### Error: "tauri.conf.json not found"
-Verifica que el archivo está en `src-tauri/tauri.conf.json`
-
-### Error de compilación de Rust
-```bash
+# Rust
 cd src-tauri
-cargo clean
-cargo build
+export PATH="$HOME/.cargo/bin:$PATH"   # el cargo de apt es antiguo para Tauri 2
+cargo test --bins
+cargo clippy --bins
 ```
 
-### La app no abre
-Instala las dependencias del sistema:
+Los tests de `tests/live_api.rs` tocan la API real de pathofexile.com y van con `--ignored`.
 
-**Ubuntu/Debian:**
-```bash
-sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-```
+## 📚 Documentación
 
-**Fedora:**
-```bash
-sudo dnf install webkit2gtk4.1-devel gcc gcc-c++ make pkgconf openssl-devel curl wget file
-```
+- `STATUS.md` — estado por fase, decisiones y correcciones con su evidencia.
+- `docs/sesiones-de-ejecucion.md` — contrato del observador y qué está garantizado.
+- `docs/planificacion-fases.md` — frontera entre fases.
+- `CHANGELOG.md` — cambios acumulados desde `v1.1.0`.
 
-**Arch:**
-```bash
-sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl
-```
+## 🗺️ Roadmap
 
-## 📊 Requisitos del Sistema
-
-- **Node.js** 18+
-- **Rust** 1.70+
-- **Python 3** (para generar iconos, opcional)
-- **Dependencias del sistema** (webkit2gtk, etc.)
-
-## 📚 Documentación Adicional
-
-- `INSTALACION_SIMPLE.md` - Guía de instalación simplificada
-- `FASE_1_2_COMPLETADAS.md` - Reestructuración visual
-- `FASE_3_IMPLEMENTADA.md` - Motor de recomendaciones
-- `FASE_4_IMPLEMENTADA.md` - Dos modos de experiencia
-- `FASE_5_IMPLEMENTADA.md` - Sistema de perfiles
-- `FASE_6_IMPLEMENTACION_COMPLETA.md` - Comparador de benchmarks
-
-## 🤝 Contribuir
-
-Las contribuciones son bienvenidas:
-1. Fork el repositorio
-2. Crea una rama para tu feature
-3. Commit tus cambios
-4. Push a la rama
-5. Abre un Pull Request
+| Fase | Estado |
+|---|---|
+| 1–4 — Motor, catálogo, perfiles, integridad | Cerradas |
+| 5.1 — Almacenamiento e integridad | Cerrada |
+| 5.2 — Instantáneas de configuración | Cerrada |
+| 5.3 — Captura temprana y evidencias de ejecución | **Cerrada** con la limitación de arriba |
+| 5.4 — Calidad de comparación | Pendiente |
+| 6 — Rediseño de la experiencia de usuario | Pendiente |
+| 7 — Posterior a la fase 6 | Pendiente |
 
 ## 📄 Licencia
 
-MIT License - Usa, modifica y distribuye libremente.
-
-## 🙏 Créditos
-
-- **Tauri** - Framework para apps de escritorio
-- **React** - Frontend library
-- **Steam API** - Datos de juegos
-- **ProtonDB** - Ratings de compatibilidad
-- **MangoHud** - Análisis de rendimiento
-- **Comunidad Linux Gaming** - Feedback y testing
-
----
-
-**Hecho con ❤️ para la comunidad gaming de Linux** 🐧🎮
+Ver `LICENSE`.

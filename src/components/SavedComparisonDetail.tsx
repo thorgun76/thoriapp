@@ -13,6 +13,7 @@ import {
 import { estabilidadDe, estabilidadLabel } from '../lib/estabilidad';
 import { GraficoTemporal } from './GraficoTemporal';
 import { PruebaN } from './PruebaN';
+import { InstantaneaCard } from './InstantaneaCard';
 
 /* ─────────────────────────────── Estilos ─────────────────────────────── */
 
@@ -873,6 +874,12 @@ export function SavedComparisonDetail({
           </div>
         )}
       </section>
+
+      {/* 4b. Instantáneas históricas de cada prueba (subfase 5.2). Van aquí, después de la
+          configuración comparada, porque responden a la misma pregunta con más detalle: con
+          qué se hizo cada una. Cada una se pliega por separado. */}
+      <InstantaneaCard bench={comparison.baseline} onCopy={onCopy} />
+      <InstantaneaCard bench={comparison.test} onCopy={onCopy} />
 
       {/* 5. Detalles técnicos */}
       <section>

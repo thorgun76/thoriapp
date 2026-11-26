@@ -501,18 +501,20 @@ mod tests {
     }
 }
 
-/// Nombre comparable: minúsculas y sin extensión de ejecutable.
+/// Nombre comparable: minúsculas, sin extensión ni sufijo técnico, y **sin separadores**.
 ///
 /// MangoHud nombra el CSV con el **ejecutable** (`Palworld-Win64-Shipping`, `Game.exe`),
 /// mientras que Steam guarda el nombre comercial ("Palworld"). Tienen que poder compararse.
+///
+/// Los separadores se quitan porque unos sitios escriben `7 Days to Die`, otros
+/// `7DaysToDie` y otros `7-days-to-die`, y los tres son el mismo juego. Antes se
+/// conservaban y por eso `7DaysToDie` no encontraba su AppID en la biblioteca: el nombre
+/// comercial lleva espacios y el del ejecutable no.
 fn norm_nombre(n: &str) -> String {
-    let lower = n.trim().to_lowercase();
-    for sufijo in [".x86_64", ".x86", ".exe", ".bin"] {
-        if let Some(sin) = lower.strip_suffix(sufijo) {
-            return sin.trim().to_string();
-        }
-    }
-    lower
+    // La normalización vive en `sessions` desde la subfase 5.3, para que la identidad del
+    // juego use una sola regla en todo el programa. Se mantiene esta función porque es la
+    // que usa este módulo y así el cambio queda en un solo sitio.
+    crate::sessions::normalizar_nombre(n)
 }
 
 /// AppID de un juego por su nombre, buscando en la biblioteca instalada de Steam.
@@ -534,17 +536,28 @@ pub fn appid_por_nombre(nombre: &str) -> Option<u32> {
     // guarda el título completo y el fichero el corto. Se exige que el nombre más corto
     // sea **prefijo** del largo y que empiece en el mismo sitio, para no casar por una
     // palabra suelta que aparezca en medio.
-    let candidatos: Vec<u32> = crate::steam::scan_library()
+    let coincidencias: Vec<crate::steam::LibGame> = crate::steam::scan_library()
         .into_iter()
         .filter(|g| {
             let n = norm_nombre(&g.name);
-            !n.is_empty()
-                && (objetivo.starts_with(&n) || n.starts_with(&objetivo))
+            !n.is_empty() && (objetivo.starts_with(&n) || n.starts_with(&objetivo))
         })
-        .map(|g| g.appid)
         .collect();
-    match candidatos.as_slice() {
-        [unico] => Some(*unico),
+    if coincidencias.len() == 1 {
+        return Some(coincidencias[0].appid);
+    }
+    // Varias coincidencias: si **una** es mucho más específica que el resto, gana sin
+    // ambigüedad. El caso real: "Palworld" y "Palworld-Win64" instalados a la vez; el CSV
+    // dice "Palworld-Win64-Shipping", que solo puede ser el segundo. Si dos empatan en
+    // especificidad, no se adivina.
+    let mut ordenadas: Vec<(usize, u32)> = coincidencias
+        .iter()
+        .map(|g| (norm_nombre(&g.name).len(), g.appid))
+        .filter(|(len, _)| *len > 0 && objetivo.len() >= *len)
+        .collect();
+    ordenadas.sort_by_key(|(len, _)| std::cmp::Reverse(*len));
+    match ordenadas.as_slice() {
+        [(len_a, a), (len_b, _), ..] if len_a > len_b => Some(*a),
         _ => None,
     }
 }
@@ -563,4 +576,3 @@ pub fn leer_opciones_juego(appid: Option<u32>, nombre: Option<&str>) -> Option<O
     let id = appid_por_nombre(nombre?)?;
     leer_opciones(id)
 }
-

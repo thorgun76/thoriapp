@@ -47,6 +47,42 @@ function mockApi() {
   vi.spyOn(api, 'detectEngine').mockResolvedValue(null);
 }
 
+describe('useProfiles: el perfil enseña el comando que se guardó', () => {
+  /**
+   * Regresión del P0 «guardo un comando y en Perfiles sale otro».
+   *
+   * El perfil guardado lleva el texto exacto que confirmó el motor, con argumentos que
+   * Thoriapp no conoce y comillas. Antes se reconstruía desde `enabled_params`, y todo lo
+   * que no estaba en el catálogo (`--mi-flag`, el orden…) se perdía.
+   */
+  it('copia literal el comando guardado, con desconocidos y comillas', async () => {
+    mockApi();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    const guardado = 'RADV_PERFTEST=sam gamemoderun mangohud %command% --mi-flag="a b"';
+    const { result } = renderHook(() => useProfiles({ getHwTags: () => [] }));
+    await result.current.copyCommand({ ...perfil(''), command: guardado } as Profile);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(guardado));
+  });
+
+  it('un comando guardado inseguro no se cuela: cae a la reconstrucción', async () => {
+    mockApi();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    const { result } = renderHook(() => useProfiles({ getHwTags: () => [] }));
+    await result.current.copyCommand({
+      ...perfil(''),
+      command: 'mangohud %command% ; rm -rf ~',
+    } as Profile);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    expect(writeText).not.toHaveBeenCalledWith('mangohud %command% ; rm -rf ~');
+  });
+});
+
 describe('useProfiles: un perfil guardado no cuela un comando manual inseguro', () => {
   it('copia el comando manual si es seguro', async () => {
     mockApi();

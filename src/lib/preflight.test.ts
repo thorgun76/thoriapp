@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { envVarsIn, hasBlockingIssues, preflight, wrappersIn } from './preflight';
+import { envVarsIn, esSoloProton, hasBlockingIssues, preflight, wrappersIn } from './preflight';
 import type { RuntimeEnv } from './types';
 
 /** Entorno mínimo: qué wrappers hay instalados y poco más. */
@@ -140,5 +140,32 @@ describe('preflight: MANGOHUD=1', () => {
   it('no avisa si la capa Vulkan está presente (caso Goverlay)', () => {
     const env = makeEnv({ mangohud_vulkan_layer: '/usr/share/vulkan/implicit_layer.d/MangoHud.x86_64.json' });
     expect(preflight('MANGOHUD=1 %command%', env)).toEqual([]);
+  });
+});
+
+describe('esSoloProton', () => {
+  // Un juego nativo de Linux no lee estas variables. Ofrecerlas como si fueran a mejorar
+  // algo es prometer un efecto que no existe.
+  it.each([
+    'PROTON_USE_NTSYNC=1',
+    'PROTON_LOCAL_SHADER_CACHE=1',
+    'DXVK_ASYNC=1',
+    'VKD3D_FEATURE_LEVEL=12_1',
+  ])('reconoce %s', (texto) => {
+    expect(esSoloProton(texto)).toBe(true);
+  });
+
+  // La forma es `<PREFlJO>_<ALGO>`: `PROTON` a secas no es una variable y `MANGOHUD=1` sí
+  // funciona en nativo.
+  it.each(['MANGOHUD=1', 'RADV_PERFTEST=sam', 'gamemoderun', 'PROTON', 'PROTONX=1'])(
+    'no marca %s',
+    (texto) => {
+      expect(esSoloProton(texto)).toBe(false);
+    },
+  );
+
+  // Se ignora el valor: lo que decide es el nombre de la variable.
+  it('mira solo la clave, no el valor', () => {
+    expect(esSoloProton('PROTON_USE_NTSYNC=')).toBe(true);
   });
 });

@@ -1,8 +1,15 @@
 import { ListChecks } from 'lucide-react';
 import type { Hardware } from '../lib/types';
+import type { PerfilesDelJuegoProps } from './PerfilesDelJuego';
+import { PerfilesDelJuego } from './PerfilesDelJuego';
 
 interface GameSidebarProps {
   hardware: Hardware | null;
+  /**
+   * Perfiles de este juego. Va **arriba** de todo: es lo primero con lo que se interactúa
+   * al abrir un juego que ya tiene configuraciones guardadas.
+   */
+  perfiles: Omit<PerfilesDelJuegoProps, 'onGestionar'> & { onGestionar: () => void };
   /** Ya no se pinta: «Pruebas del juego» lleva a Benchmarks con el juego abierto. */
   onMeasurePerformance?: () => void;
   /**
@@ -15,14 +22,23 @@ interface GameSidebarProps {
   onShowGameTests: () => void;
 }
 
-/** Columna derecha de la vista de juego: hardware del equipo y acciones rápidas. */
+/**
+ * Columna derecha de la vista de juego.
+ *
+ * Orden: perfiles del juego, hardware, acciones rápidas. Los perfiles van primero porque
+ * son lo accionable; el hardware es informativo y las acciones son el final natural.
+ */
 export function GameSidebar({
   hardware,
+  perfiles,
   onMeasurePerformance: _onMeasurePerformance,
   onShowGameTests,
 }: GameSidebarProps) {
   return (
     <div className="space-y-4">
+      {/* Perfiles del juego */}
+      <PerfilesDelJuego {...perfiles} />
+
       {/* Hardware Profile */}
       {hardware && (
         <aside className="p-5 rounded-xl bg-[var(--surface)] border border-[var(--border)]">

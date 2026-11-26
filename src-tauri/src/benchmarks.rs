@@ -2,7 +2,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Origen del comando registrado en una grabación.
 ///
@@ -17,6 +19,227 @@ pub enum OrigenComando {
     #[default]
     Desconocido,
 }
+
+// ==================== Instantánea de configuración (subfase 5.2) ====================
+
+/// De dónde salió un dato de la instantánea.
+///
+/// Existe porque «está registrado» y «es cierto» no son lo mismo. Un comando leído del
+/// motor de Thoriapp es lo que la app propone, no lo que Steam ejecutó; un dato leído de
+/// Steam tampoco está verificado: el usuario pudo cambiar las opciones a mano después de
+/// lanzar. Sin esta distinción, la interfaz acabaría presentando como cierto algo que solo
+/// se copió de algún sitio.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Procedencia {
+    /// El motor de comandos de Rust confirmó el valor (comando canónico, revisión).
+    MotorRust,
+    /// Thoriapp lo tenía configurado (perfil cargado, ajustes activos).
+    ConfiguradoEnThoriapp,
+    /// Leído de los archivos de Steam. Describe Steam, no la ejecución.
+    LeidoDeSteam,
+    /// Lo registró **MangoHud** durante la propia grabación (cabecera de sistema del CSV o
+    /// su `_summary.csv`). Es la fuente que describe las condiciones de la prueba, y por eso
+    /// pesa más que el hardware detectado al analizar.
+    RegistradoPorMangohud,
+    /// Detectado en el sistema (hardware, kernel, Mesa).
+    DetectadoEnSistema,
+    /// Lo escribió el usuario a mano (notas, ruta de log).
+    DeclaradoPorUsuario,
+    /// Comprobado durante la ejecución del juego. Sigue sin usarse: en la subfase 5.3 se
+    /// añadieron las procedencias de observación, pero ninguna afirma todavía el *efecto*
+    /// de una optimización, que es lo único que justificaría esta.
+    VerificadoEnEjecucion,
+    /// Leído del **proceso** del juego mientras corría (su entorno, su ejecutable, la
+    /// carpeta desde la que arrancó). Procede de `sessions`, no de Steam.
+    ObservadoEnProceso,
+    /// El usuario lo asignó a mano (por ejemplo, el juego de una grabación que no se pudo
+    /// identificar). Es fiable como decisión del usuario, pero no como observación.
+    ConfirmadoPorUsuario,
+    /// Deducción a partir de una única coincidencia de nombre. Es una inferencia: se
+    /// presenta como tal y nunca como dato observado.
+    Inferido,
+    /// No se sabe, o no había información fiable del juego correspondiente.
+    #[default]
+    Desconocido,
+}
+
+/// Un dato con su procedencia. `None` no es lo mismo que un valor desconocido: `None` es
+/// «ni siquiera hay un hueco que rellenar» (el campo no aplicaba), mientras que un valor
+/// con procedencia `Desconocido` es «debería estar y no lo sabemos».
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ConProcedencia<T> {
+    pub valor: T,
+    pub procedencia: Procedencia,
+    /// Cuándo se capturó el dato (`AAAA-MM-DD HH:MM:SS`). Permite ver si se leyó junto al
+    /// resto o mucho después, que es justo lo que hace dudosa una instantánea.
+    #[serde(default)]
+    pub capturado_en: Option<String>,
+}
+
+impl<T> ConProcedencia<T> {
+    pub fn nuevo(valor: T, procedencia: Procedencia) -> Self {
+        Self {
+            valor,
+            procedencia,
+            capturado_en: None,
+        }
+    }
+
+    pub fn con_fecha(mut self, fecha: &str) -> Self {
+        self.capturado_en = Some(fecha.to_string());
+        self
+    }
+}
+
+/// Identidad de la prueba dentro de su instantánea.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct IdentidadInstantanea {
+    /// AppID **real** del juego. A diferencia de `Benchmark::appid`, aquí nunca se guarda
+    /// un `0` de «regla genérica»: si de verdad no se conoce, el campo es `None` y la
+    /// interfaz lo dice.
+    pub appid_real: Option<u32>,
+    /// De dónde sale `appid_real`. Mientras no conste, `Desconocido`. Cuando la sesión
+    /// observada lo aporta, se marca `ObservadoEnProceso`: es un dato leído del proceso,
+    /// no una suposición ni una inferencia por nombre.
+    #[serde(default)]
+    pub appid_procedencia: Procedencia,
+    pub benchmark_id: String,
+    /// Número de presentación (`Prueba N`) en el momento de guardar.
+    pub numero_prueba: Option<u32>,
+    pub fecha: String,
+}
+
+/// Configuración con la que se hizo la prueba.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ConfigInstantanea {
+    /// Comando **literal** tal como lo dio el motor de Rust, con sus espacios, comillas y
+    /// orden. No se reconstruye desde los toggles: eso perdería los argumentos que la app
+    /// no entiende.
+    pub comando_confirmado: Option<ConProcedencia<String>>,
+    /// Revisión del comando en el motor cuando se capturó. Sirve para detectar que la
+    /// instantánea mezcla datos de dos revisiones distintas.
+    pub revision_motor: Option<u64>,
+    pub opciones_steam: Option<ConProcedencia<String>>,
+    pub perfil_id: Option<String>,
+    pub perfil_nombre: Option<ConProcedencia<String>>,
+    /// Había cambios sin guardar en el editor en el momento de la captura.
+    pub cambios_sin_guardar: Option<bool>,
+    /// `true` = la prueba se configuró para ejecutarse con Proton; `false` = nativo;
+    /// `None` = no se sabe.
+    pub modo_proton: Option<ConProcedencia<bool>>,
+    /// Modo de ejecución real (nativo o Proton) **solo si es verificable**. No se rellena
+    /// a partir de `modo_proton`: configurar Proton no demuestra que el juego corriera con
+    /// Proton. Hasta la subfase 5.3 esto queda siempre en `None`.
+    pub ejecucion_verificada: Option<ConProcedencia<String>>,
+}
+
+/// Entorno del equipo en el momento de la prueba.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct EntornoInstantanea {
+    pub gpu: Option<ConProcedencia<String>>,
+    pub cpu: Option<ConProcedencia<String>>,
+    pub ram_gb: Option<ConProcedencia<f32>>,
+    pub kernel: Option<ConProcedencia<String>>,
+    /// Controlador gráfico (versión del driver propietario, si se conoce).
+    pub driver: Option<ConProcedencia<String>>,
+    pub mesa: Option<ConProcedencia<String>>,
+    /// Versión de Proton **instalada o seleccionada**. No es la que usó el proceso: eso
+    /// exigiría mirar el proceso en marcha, y no se presume.
+    pub proton_seleccionado: Option<ConProcedencia<String>>,
+    /// BuildID del juego según `appmanifest_<appid>.acf`.
+    pub build_id: Option<ConProcedencia<String>>,
+    /// Intervalo de muestreo de MangoHud en milisegundos.
+    pub log_interval_ms: Option<ConProcedencia<u32>>,
+}
+
+/// Lo que **MangoHud registró** durante la grabación, transcrito sin reinterpretar.
+///
+/// Vive aparte del entorno detectado a propósito: son dos equipos en dos momentos. Si la
+/// grabación se hizo en un PC y se analiza en otro, esto describe el PC de la grabación y
+/// `EntornoInstantanea` el de ahora. Ninguno de los dos rellena los huecos del otro.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct HardwareDeLaGrabacion {
+    /// `os` del CSV. Con Proton suele ser «Steam Runtime 4», que **no** es la distribución
+    /// del usuario; se guarda tal cual y la interfaz no lo presenta como distro.
+    pub os: Option<ConProcedencia<String>>,
+    pub cpu: Option<ConProcedencia<String>>,
+    pub gpu: Option<ConProcedencia<String>>,
+    /// RAM total. Se conserva el valor crudo que escribió MangoHud (en KiB) **y** su
+    /// conversión, porque el crudo es la única prueba de la unidad.
+    pub ram_kib: Option<ConProcedencia<u64>>,
+    pub ram_gib: Option<ConProcedencia<f32>>,
+    pub kernel: Option<ConProcedencia<String>>,
+    /// Controlador. Con RADV el CSV suele traerlo **vacío**: queda `None` en vez de
+    /// deducirse del nombre de la GPU.
+    pub driver: Option<ConProcedencia<String>>,
+    pub cpuscheduler: Option<ConProcedencia<String>>,
+    /// Intervalo de muestreo medido sobre `elapsed`, en milisegundos.
+    pub intervalo_muestreo_ms: Option<ConProcedencia<f64>>,
+}
+
+/// Resumen que calculó MangoHud (`_summary.csv`), guardado como fuente **independiente**.
+///
+/// No sustituye a las métricas de Thoriapp ni se usa para decidir nada: su metodología es
+/// distinta (media armónica de FPS, «1 % low» promediado y «0.1 % low» como máximo
+/// absoluto). Ver `docs/mangohud-summary.md`. `None` = no había resumen o no se pudo leer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct ResumenOriginal {
+    /// Nombres y valores tal como los escribió MangoHud, sin recalcular.
+    pub valores: Vec<(String, f64)>,
+    pub capturado_en: String,
+}
+
+impl ResumenOriginal {
+    /// Busca un valor por el nombre que escribió MangoHud. No se usa en el binario: la
+    /// interfaz consume la lista de pares. Vive para las pruebas, que sí necesitan
+    /// comprobar qué trae el resumen sin recorrer la lista a mano.
+    #[cfg(test)]
+    pub fn valor(&self, nombre: &str) -> Option<f64> {
+        let buscado = nombre.trim().to_lowercase();
+        self.valores
+            .iter()
+            .find(|(n, _)| n.trim().to_lowercase() == buscado)
+            .map(|(_, v)| *v)
+    }
+}
+
+/// Instantánea histórica e inmutable de la configuración de una prueba.
+///
+/// Se guarda **junto** al benchmark y no se vuelve a calcular: si mañana se renombra el
+/// perfil, se cambian las opciones de Steam o se actualiza Proton, esto no cambia. Es el
+/// único sitio del que la interfaz puede decir «con esto se hizo la prueba».
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SnapshotConfig {
+    /// Versión del propio formato de la instantánea. Independiente de la del archivo: así
+    /// se puede mejorar una sin invalidar la otra.
+    pub version: u32,
+    pub identidad: IdentidadInstantanea,
+    pub configuracion: ConfigInstantanea,
+    /// Equipo detectado **en el momento del análisis**.
+    #[serde(default)]
+    pub entorno: EntornoInstantanea,
+    /// Equipo tal como lo **registró MangoHud** durante la grabación. `None` = el CSV no
+    /// traía cabecera de sistema: entonces las condiciones de la grabación son
+    /// desconocidas, aunque hoy se detecte un equipo. No se rellena con `entorno`.
+    #[serde(default)]
+    pub hardware_grabacion: Option<HardwareDeLaGrabacion>,
+    /// Resumen que calculó MangoHud para este mismo CSV. Fuente aparte, no se mezcla con
+    /// las métricas de Thoriapp.
+    #[serde(default)]
+    pub resumen_mangohud: Option<ResumenOriginal>,
+    /// Momento en que se **capturaron** los datos. Puede ser posterior a la grabación (el
+    /// CSV se analiza al terminar), y por eso no se afirma que describa lo que ocurrió
+    /// durante ella.
+    pub capturado_en: String,
+    /// Si la instantánea se tomó después de que la grabación terminara. Mientras no haya
+    /// verificación durante la ejecución (5.3), esto será `true` casi siempre, y la
+    /// interfaz lo dice en lugar de presentarlo como la configuración usada.
+    pub posterior_a_la_grabacion: bool,
+}
+
+/// Versión del formato de instantánea.
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Benchmark {
@@ -79,6 +302,23 @@ pub struct Benchmark {
     /// puede reconstruir con seguridad. La interfaz las llama «Prueba sin número».
     #[serde(default)]
     pub number: Option<u32>,
+    /// Instantánea histórica de la configuración (subfase 5.2).
+    ///
+    /// `None` en las pruebas guardadas antes de esta subfase. **No se reconstruye**: los
+    /// datos actuales del juego, del perfil o del hardware no dicen cómo se hizo una
+    /// prueba del mes pasado. La interfaz muestra «Instantánea no disponible».
+    #[serde(default)]
+    pub snapshot: Option<SnapshotConfig>,
+    /// Sesión de ejecución a la que se atribuyó esta grabación (subfase 5.3).
+    ///
+    /// Es solo un **enlace**: todo lo que hace falta para interpretar la prueba está
+    /// dentro de `snapshot`, así que un benchmark histórico sigue siendo legible aunque la
+    /// sesión desaparezca. Borrar sesiones no deja pruebas huérfanas ni al revés.
+    ///
+    /// `None` en las pruebas guardadas antes de 5.3 y también cuando no hubo evidencia
+    /// suficiente para atribuirlas.
+    #[serde(default)]
+    pub sesion_id: Option<String>,
     // Métricas de fluidez. Son None en los benchmarks guardados antes de esta versión
     // (por eso #[serde(default)]: los benchmarks viejos se siguen cargando sin problema).
     #[serde(default)]
@@ -581,6 +821,14 @@ pub struct BenchmarkComparison {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarksData {
+    /// Versión del formato de este archivo.
+    ///
+    /// Ausente en los archivos anteriores a este campo, que se tratan como versión 1
+    /// (su estructura es la misma: solo se le añadieron campos con `#[serde(default)]`).
+    /// No se escribe `1` retroactivamente en disco: se escribe la versión actual en el
+    /// siguiente guardado, que es cuando el archivo cambia de verdad.
+    #[serde(default)]
+    pub version: Option<u32>,
     pub benchmarks: Vec<Benchmark>,
     /// Último número de prueba **repartido** por juego. Nunca retrocede.
     ///
@@ -596,6 +844,22 @@ pub struct BenchmarksData {
     #[serde(default)]
     pub counters: HashMap<String, u32>,
 }
+
+/// Versión del formato de `benchmarks.json` que entiende esta build.
+///
+/// Se sube cuando un cambio deja de ser compatible hacia atrás. Un archivo con
+/// `version` mayor se **rechaza** en vez de interpretarse a medias: mejor decir «esto es
+/// de una versión más nueva» que leer la mitad y que el siguiente guardado borre el resto.
+///
+/// Mientras la 5.1 no cambia ni un campo del esquema, vale 1 y es lo que se escribe.
+pub const BENCHMARKS_SCHEMA_VERSION: u32 = 1;
+
+/// Versión del formato de `saved_comparisons.json`.
+///
+/// Va por separado del de benchmarks a propósito: son dos archivos con ciclos de vida
+/// distintos y una comparación guardada puede seguir siendo válida aunque el esquema de
+/// las grabaciones cambie (embute copias completas de las dos grabaciones).
+pub const COMPARISONS_SCHEMA_VERSION: u32 = 1;
 
 fn get_benchmarks_dir() -> std::path::PathBuf {
     let config_dir = dirs::config_dir()
@@ -614,31 +878,270 @@ fn get_benchmarks_file() -> std::path::PathBuf {
     get_benchmarks_dir().join("benchmarks.json")
 }
 
-pub(crate) fn load_benchmarks_data() -> BenchmarksData {
-    let file = get_benchmarks_file();
+/// Cerrojo por archivo, para que dos guardados no se pisen a mitad.
+///
+/// Los comandos de Tauri pueden solaparse (una auto-recogida guardando mientras el
+/// usuario borra una prueba). Sin cerrojo, dos `leer → modificar → escribir` simultáneos
+/// pierden una de las dos escrituras: el último `rename` gana y el otro cambio desaparece.
+///
+/// Es de proceso, no de sistema: Thoriapp es una sola instancia y un cerrojo entre
+/// procesos costaría una dependencia (`fs2`) o `flock` inseguro. Cubre exactamente el
+/// riesgo real, que es interno a la app.
+static CERROJO_BENCHMARKS: Mutex<()> = Mutex::new(());
+static CERROJO_COMPARACIONES: Mutex<()> = Mutex::new(());
 
-    if file.exists() {
-        if let Ok(content) = fs::read_to_string(&file) {
-            if let Ok(data) = serde_json::from_str(&content) {
-                return data;
-            }
+/// Error de lectura de un archivo de datos: distingue lo que se puede y lo que no.
+///
+/// La diferencia importa: «no existe» es un estado legítimo (primer arranque) y debe
+/// tratarse como lista vacía; «no se pudo leer» y «está roto» **no** pueden convertirse
+/// en lista vacía, porque el siguiente guardado borraría el historial.
+#[derive(Debug)]
+pub enum ErrorDatos {
+    /// El archivo existe y no se puede leer (permisos, E/S, enlace roto).
+    Ilegible(String),
+    /// El archivo existe y se leyó, pero no es el JSON esperado.
+    Corrupto { detalle: String, copia: Option<PathBuf> },
+    /// El archivo es de una versión de Thoriapp más nueva.
+    VersionFutura { encontrada: u32, soportada: u32 },
+}
+
+impl ErrorDatos {
+    /// Mensaje para el usuario. Dice siempre qué NO ha pasado, porque el miedo real es
+    /// «¿he perdido mis pruebas?».
+    pub fn mensaje(&self, que: &str) -> String {
+        match self {
+            ErrorDatos::Ilegible(e) => format!(
+                "No se pudo leer {que} ({e}). No se ha modificado nada en disco."
+            ),
+            ErrorDatos::Corrupto { detalle, copia } => format!(
+                "{que} está dañado ({detalle}). No se ha modificado nada en disco.{}",
+                match copia {
+                    Some(p) => format!(" Se guardó una copia del original en {}.", p.display()),
+                    None => String::new(),
+                }
+            ),
+            ErrorDatos::VersionFutura { encontrada, soportada } => format!(
+                "{que} es de una versión más nueva de Thoriapp (formato {encontrada}; esta \
+                 versión entiende hasta el {soportada}). Actualiza Thoriapp para poder abrirlo. \
+                 No se ha modificado nada en disco.",
+            ),
+        }
+    }
+}
+
+/// Escritura atómica: se escribe un temporal, se vuelca a disco y se renombra.
+///
+/// `fs::write` directo sobre el archivo real deja el historial a medias si el proceso
+/// muere a mitad: un JSON truncado, y en la siguiente lectura ya es «corrupto». Con
+/// `rename` el archivo nuevo aparece entero o no aparece.
+///
+/// El `flush` + `sync_all` antes del `rename` importa en un corte de corriente: sin él, el
+/// `rename` puede llegar al disco antes que los datos y quedar un archivo vacío con nombre
+/// bueno.
+pub(crate) fn escribir_atomico(path: &Path, content: &str) -> std::io::Result<()> {
+    let mut tmp_name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+
+    {
+        let mut f = fs::File::create(&tmp)?;
+        if let Err(e) = f.write_all(content.as_bytes()).and_then(|_| f.sync_all()) {
+            drop(f);
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
         }
     }
 
-    BenchmarksData {
+    fs::rename(&tmp, path)?;
+    // El `rename` sustituye la entrada del directorio, pero el nodo del directorio
+    // también necesita su propio `fsync`: sin él, un corte de luz justo después puede
+    // dejar el rename sin confirmar y volver al nombre anterior. `sync_dir` no es
+    // portable, así que un fallo aquí no invalida la escritura de datos.
+    sync_dir(path);
+    Ok(())
+}
+
+/// Fuerza el directorio contenedor a disco, para que el `rename` sobreviva a un corte.
+///
+/// Los sistemas de archivos POSIX no garantizan que la nueva entrada de directorio esté
+/// en disco hasta que se sincroniza el directorio mismo. En plataformas donde no se puede
+/// abrir un directorio como archivo (o no es de Unix) no se hace nada: la escritura ya
+/// está confirmada, solo se pierde la garantía extra ante un corte de corriente.
+#[cfg(unix)]
+pub(crate) fn sync_dir(path: &Path) {
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) {}
+
+/// Copia un archivo dañado a `<nombre>.corrupt.bak` **sin pisar** una copia anterior.
+///
+/// Se llama a esto cada vez que se intenta leer un archivo roto, y como la UI puede
+/// reintentar en bucle, sobrescribir la copia con el mismo contenido no aporta nada; pero
+/// si el archivo cambia entre dos intentos (el usuario lo edita a mano, otra herramienta lo
+/// toca), pisar la primera copia sí perdería la única evidencia de por qué empezó a fallar.
+/// Con sufijo numerado se acumulan hasta 5; a partir de ahí se rota la más antigua para no
+/// llenar el disco de copias idénticas.
+pub(crate) fn copiar_danado(path: &Path, sufijo: &str, contenido: &str) -> Option<PathBuf> {
+    let base = path.with_extension(format!("json.{}.bak", sufijo));
+    let candidatos = std::iter::once(base.clone()).chain((1..=4).map(|n| {
+        let mut nombre = base.file_name().unwrap_or_default().to_os_string();
+        nombre.push(format!(".{}", n));
+        base.with_file_name(nombre)
+    }));
+
+    for copia in candidatos {
+        if !copia.exists() {
+            return fs::write(&copia, contenido).ok().map(|_| copia);
+        }
+        // Idéntica a la que ya hay: no se duplica ni se pisa.
+        if fs::read_to_string(&copia).map(|c| c == contenido).unwrap_or(false) {
+            return Some(copia);
+        }
+    }
+    // Cinco copias distintas: se rota la más antigua (la de sufijo más alto).
+    let mut nombre = base.file_name().unwrap_or_default().to_os_string();
+    nombre.push(".4");
+    let ultima = base.with_file_name(nombre);
+    fs::write(&ultima, contenido).ok().map(|_| ultima)
+}
+
+/// Lee e interpreta un archivo de datos aplicando las reglas comunes.
+///
+/// `T` genérico para servir a los dos archivos (benchmarks y comparaciones): las reglas
+/// de integridad son las mismas, y duplicarlas garantizaba que una se arreglara y la otra
+/// no. `migrar` recibe el JSON crudo para leer `version` antes de interpretar el resto.
+pub(crate) fn leer_datos<T>(
+    path: &Path,
+    que: &str,
+    version_soportada: u32,
+    version_de: impl Fn(&serde_json::Value) -> Option<u32>,
+    migrar: impl Fn(serde_json::Value) -> Result<T, serde_json::Error>,
+) -> Result<Option<T>, ErrorDatos> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        // El archivo no está: es un estado legítimo, no un error.
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        // Existía al comprobarlo y desapareció: carrera con un borrado, no corrupción.
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ErrorDatos::Ilegible(e.to_string())),
+    };
+
+    // Un archivo vacío no es JSON válido, pero tampoco es un historial perdido: es lo que
+    // queda de un `fs::write` interrumpido por un corte de luz antes de este arreglo. Se
+    // trata como vacío **y** se copia, para no borrar la única pista sin avisar.
+    if content.trim().is_empty() {
+        let copia = copiar_danado(path, "vacio", &content);
+        return Err(ErrorDatos::Corrupto {
+            detalle: "el archivo está vacío".to_string(),
+            copia,
+        });
+    }
+
+    let crudo: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        ErrorDatos::Corrupto {
+            detalle: e.to_string(),
+            copia: copiar_danado(path, "corrupt", &content),
+        }
+    })?;
+
+    if let Some(v) = version_de(&crudo) {
+        if v > version_soportada {
+            // No se copia: el archivo está bien, lo que no está al día es la app.
+            return Err(ErrorDatos::VersionFutura {
+                encontrada: v,
+                soportada: version_soportada,
+            });
+        }
+    }
+
+    migrar(crudo).map(Some).map_err(|e| {
+        let _ = que; // el nombre del archivo ya lo pone quien llama
+        ErrorDatos::Corrupto {
+            detalle: e.to_string(),
+            copia: copiar_danado(path, "corrupt", &content),
+        }
+    })
+}
+
+/// Lee `benchmarks.json` distinguiendo «no hay» de «no se pudo leer».
+///
+/// Variante para **escritura**: si el archivo existe y no se puede interpretar, hay que
+/// abortar. Devolver `Ok` vacío en ese caso era la vía por la que un archivo ilegible
+/// acababa sobrescrito con una lista vacía y el historial desaparecía.
+fn try_load_benchmarks_data() -> Result<BenchmarksData, ErrorDatos> {
+    let leido = leer_datos::<BenchmarksData>(
+        &get_benchmarks_file(),
+        "benchmarks.json",
+        BENCHMARKS_SCHEMA_VERSION,
+        |v| v.get("version").and_then(|x| x.as_u64()).map(|x| x as u32),
+        serde_json::from_value,
+    )?;
+
+    Ok(leido.unwrap_or(BenchmarksData {
+        version: None,
         benchmarks: Vec::new(),
         counters: HashMap::new(),
+    }))
+}
+
+/// Lectura para las pantallas: nunca falla, pero tampoco miente por omisión.
+///
+/// Devuelve lo leído o el motivo del fallo. La interfaz tiene que poder decir «no se
+/// pudieron leer tus pruebas» en vez de pintar un historial vacío que parecería «no hay
+/// ninguna», que es una afirmación distinta y falsa.
+pub(crate) fn cargar_benchmarks() -> Result<BenchmarksData, String> {
+    try_load_benchmarks_data().map_err(|e| e.mensaje("El historial de pruebas"))
+}
+
+pub(crate) fn load_benchmarks_data() -> BenchmarksData {
+    // Uso interno (comparar, buscar duplicados): si el archivo está roto no hay nada que
+    // comparar, pero se avisa por consola. Las rutas que **escriben** usan
+    // `try_load_benchmarks_data` y abortan.
+    match try_load_benchmarks_data() {
+        Ok(data) => data,
+        Err(e) => {
+            println!("[Benchmark] ⚠️ {}", e.mensaje("benchmarks.json"));
+            BenchmarksData {
+                version: None,
+                benchmarks: Vec::new(),
+                counters: HashMap::new(),
+            }
+        }
     }
+}
+
+/// Lee el historial para **modificarlo**. Aborta si no se puede interpretar.
+///
+/// Todas las rutas destructivas (guardar, borrar una, borrar las de un juego, borrar
+/// todas) empiezan aquí. Es la regla de la subfase 5.1: ninguna escritura puede partir
+/// de una lectura fallida.
+fn load_benchmarks_data_para_editar() -> Result<BenchmarksData, String> {
+    try_load_benchmarks_data().map_err(|e| e.mensaje("El historial de pruebas"))
 }
 
 fn save_benchmarks_data(data: &BenchmarksData) -> Result<(), String> {
     let file = get_benchmarks_file();
+    let mut data = data.clone();
+    // La versión se sella aquí, en el único punto de escritura, para que ningún llamador
+    // pueda guardar un archivo sin ella.
+    data.version = Some(BENCHMARKS_SCHEMA_VERSION);
     let content =
-        serde_json::to_string_pretty(data).map_err(|e| format!("Error al serializar: {}", e))?;
+        serde_json::to_string_pretty(&data).map_err(|e| format!("Error al serializar: {}", e))?;
 
-    fs::write(&file, content).map_err(|e| format!("Error al guardar: {}", e))?;
-
-    Ok(())
+    escribir_atomico(&file, &content).map_err(|e| {
+        format!(
+            "No se pudo guardar el historial de pruebas ({}). Tus pruebas anteriores siguen \
+             intactas en {}.",
+            e,
+            file.display()
+        )
+    })
 }
 
 /// Lee como máximo `max_bytes` del inicio de un archivo (como texto, tolerando bytes raros).
@@ -1080,6 +1583,11 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
         steam_command: None,
         // Se rellena en `save_benchmark`, que es quien conoce el historial del juego.
         number: None,
+        // Y la sesión, que la decide `save_benchmark` con la evidencia observada.
+        sesion_id: None,
+        // El análisis del CSV no sabe nada de la configuración: se rellena al guardar, y
+        // solo con datos que el frontend pudo leer en su momento.
+        snapshot: None,
     })
 }
 
@@ -1092,6 +1600,40 @@ fn norm_game_name(name: &str) -> String {
         }
     }
     lower
+}
+
+/// ¿`corto` es el nombre base de `largo`, que solo le añade un subtítulo?
+///
+/// El mismo juego se llama de dos maneras según de dónde salga el nombre:
+///
+/// - La Biblioteca usa el **nombre comercial** con subtítulo: `Deskrawl: Idle ARPG`.
+/// - MangoHud escribe el nombre del **binario**: `Deskrawl`.
+///
+/// Con AppID en los dos lados esto no importa (manda el AppID). Importa en el caso real del
+/// usuario, donde **todas** las grabaciones tienen `appid: 0` y el nombre es la única pista:
+/// la ficha de Deskrawl decía «todavía no hay pruebas» teniendo cuatro, porque
+/// `deskrawl: idle arpg` ≠ `deskrawl`. Palworld funcionaba solo porque su nombre comercial
+/// no lleva subtítulo.
+///
+/// La regla es deliberadamente estrecha: el nombre corto tiene que ser **el principio** del
+/// largo y el corte tiene que caer en un **separador** (`:`, `-`, `–`, `—`, `|`, `·`), nunca
+/// a mitad de palabra. Así `Deskrawl` y `Deskrawl: Idle ARPG` son el mismo juego, pero
+/// `Palworld` y `Palworld: Something` no pueden arrastrar juegos que solo comparten prefijo
+/// textual (`Slime` / `Slime Rancher` no se tocan: ahí el corte cae en un espacio, no en un
+/// separador). Se exige además que el corto tenga al menos 2 caracteres, para que un
+/// nombre vacío o de una letra no se lo coma todo.
+fn es_el_mismo_con_subtitulo(corto: &str, largo: &str) -> bool {
+    let c = corto.trim();
+    let l = largo.trim();
+    if c.chars().count() < 2 || c.len() >= l.len() || !l.starts_with(c) {
+        return false;
+    }
+    // Lo que sigue al nombre base, sin espacios delante.
+    let resto = l[c.len()..].trim_start();
+    resto
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, ':' | '-' | '\u{2013}' | '\u{2014}' | '|' | '\u{00b7}'))
 }
 
 /// Clave de agrupación del historial: el appid si lo hay, el nombre normalizado si no.
@@ -1119,17 +1661,10 @@ fn game_key(b: &Benchmark) -> String {
 /// tienen y son distintos, se descarta: dos juegos distintos pueden llamarse igual, y
 /// mezclar sus historiales sería peor que no enseñar nada.
 fn juego_coincide(b: &Benchmark, appid: u32, game_name: &str) -> bool {
-    // Con appid en las dos partes, manda el appid y solo el appid.
-    if appid != 0 && b.appid != 0 {
-        return b.appid == appid;
-    }
-    // Alguien no tiene appid: se compara por nombre.
-    let buscado = norm_game_name(game_name);
-    if buscado.is_empty() {
-        // Sin nombre ni appid no hay forma de identificarlo: no se puede afirmar nada.
-        return false;
-    }
-    norm_game_name(&b.game_name) == buscado
+    // **Una sola** regla de identidad para todo el módulo. Antes había dos (esta y la que
+    // usaba la comparación) y por eso el historial y las comparaciones podían discrepar
+    // sobre si dos pruebas eran del mismo juego.
+    coinciden_por_identidad(appid, game_name, b.appid, &b.game_name, false)
 }
 
 /// Asigna a `benchmark` el siguiente número de su juego y avanza el contador.
@@ -1156,6 +1691,294 @@ fn asignar_numero(data: &mut BenchmarksData, benchmark: &mut Benchmark) {
     let siguiente = (*contador).max(maximo_existente) + 1;
     *contador = siguiente;
     benchmark.number = Some(siguiente);
+}
+
+/// Lo que el frontend sabe de la configuración **de un juego concreto** cuando se guarda
+/// la prueba.
+///
+/// Todo es `Option` a propósito: si el editor tenía abierto otro juego, estos campos llegan
+/// vacíos y se registran como desconocidos. Es preferible un hueco honesto a un dato de
+/// otro juego puesto aquí.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextoDeCaptura {
+    /// AppID real del juego de la prueba (no el `0` de las reglas genéricas).
+    pub appid_real: Option<u32>,
+    pub comando_confirmado: Option<String>,
+    pub revision_motor: Option<u64>,
+    pub opciones_steam: Option<String>,
+    pub perfil_id: Option<String>,
+    pub perfil_nombre: Option<String>,
+    pub cambios_sin_guardar: Option<bool>,
+    pub modo_proton: Option<bool>,
+    /// El contexto corresponde al juego de la prueba. Si es `false`, nada de lo anterior se
+    /// usa: es la protección contra capturar el perfil o el comando de otro juego.
+    #[serde(default)]
+    pub corresponde_al_juego: bool,
+}
+
+/// Construye la instantánea de una prueba.
+///
+/// Reglas que se aplican aquí y no en el frontend, para que no dependan de que la interfaz
+/// se acuerde:
+///
+/// - Si `contexto.corresponde_al_juego` es `false`, la configuración se registra como
+///   desconocida. Nunca se mezcla el perfil o el comando de otro juego.
+/// - El comando se copia **literal**: no se normaliza, no se reordena y no se reconstruye
+///   desde los ajustes.
+/// - `ejecucion_verificada` queda en `None`: configurar Proton no demuestra que se usara.
+/// - El entorno se lee del sistema en este momento, y se marca con su procedencia. Los
+///   datos que no se puedan leer quedan en `None`, nunca con un valor inventado.
+fn construir_snapshot(
+    benchmark: &Benchmark,
+    contexto: &ContextoDeCaptura,
+    sesion: Option<&crate::sessions::SesionDeEjecucion>,
+    ahora: &str,
+) -> SnapshotConfig {
+    let identidad_observada = sesion.map(|s| &s.identidad);
+    let del_juego = contexto.corresponde_al_juego;
+
+    // Con `del_juego == false` esto devuelve `None` para todo: es el único punto donde se
+    // decide, y así no hay forma de colar un dato de otro juego por descuido.
+    let si_del_juego = |presente: bool| del_juego && presente;
+
+    let configuracion = ConfigInstantanea {
+        comando_confirmado: contexto.comando_confirmado.as_ref().and_then(|c| {
+            si_del_juego(true).then(|| ConProcedencia::nuevo(c.clone(), Procedencia::MotorRust))
+        }),
+        // La revisión solo tiene sentido junto al comando del mismo juego.
+        revision_motor: if si_del_juego(true) {
+            contexto.revision_motor
+        } else {
+            None
+        },
+        opciones_steam: contexto.opciones_steam.as_ref().map(|o| {
+            ConProcedencia::nuevo(o.clone(), Procedencia::LeidoDeSteam)
+        }),
+        perfil_id: if si_del_juego(contexto.perfil_id.is_some()) {
+            contexto.perfil_id.clone()
+        } else {
+            None
+        },
+        perfil_nombre: contexto.perfil_nombre.as_ref().and_then(|n| {
+            // El nombre se guarda copiado: renombrar el perfil después no lo cambia. Y solo
+            // si el perfil es del juego de la prueba.
+            si_del_juego(true).then(|| {
+                ConProcedencia::nuevo(n.clone(), Procedencia::ConfiguradoEnThoriapp)
+            })
+        }),
+        cambios_sin_guardar: if si_del_juego(true) {
+            contexto.cambios_sin_guardar
+        } else {
+            None
+        },
+        modo_proton: contexto.modo_proton.and_then(|p| {
+            si_del_juego(true)
+                .then(|| ConProcedencia::nuevo(p, Procedencia::ConfiguradoEnThoriapp))
+        }),
+        // Deliberadamente `None`: ver el docstring de `ConfigInstantanea`.
+        ejecucion_verificada: None,
+    };
+
+    SnapshotConfig {
+        version: SNAPSHOT_SCHEMA_VERSION,
+        identidad: IdentidadInstantanea {
+            // Manda el benchmark: la instantánea pertenece a ESA prueba. El AppID del
+            // contexto solo rellena cuando el benchmark no lo trae (CSV sin AppID), y
+            // siempre que el contexto declare ser del mismo juego.
+            // Orden de mando, de más fuerte a más débil:
+            //   1. El AppID que trae la propia prueba (cabecera del CSV / biblioteca).
+            //   2. El que se **observó** en el proceso del juego, si la sesión asociada lo
+            //      acreditó con evidencia directa. Se marca con su procedencia para que la
+            //      interfaz pueda decir de dónde viene.
+            //   3. El del contexto de la interfaz, solo si declara ser del mismo juego.
+            //
+            // Nunca se mezclan: si la sesión contradice al benchmark, manda el benchmark,
+            // porque la instantánea pertenece a ESA prueba.
+            appid_real: resolver_appid(benchmark, contexto, identidad_observada).0,
+            appid_procedencia: resolver_appid(benchmark, contexto, identidad_observada).1,
+            benchmark_id: benchmark.id.clone(),
+            numero_prueba: benchmark.number,
+            fecha: benchmark.timestamp.clone(),
+        },
+        configuracion,
+        entorno: leer_entorno(benchmark.appid, ahora),
+        hardware_grabacion: leer_hardware_de_la_grabacion(&benchmark.log_path, ahora),
+        resumen_mangohud: leer_resumen_de_la_grabacion(&benchmark.log_path, ahora),
+        capturado_en: ahora.to_string(),
+        // Se afirma «posterior a la grabación» solo cuando de verdad lo es. Si la sesión
+        // guardó una configuración **durante** la observación del proceso, esa foto es
+        // anterior al final de la grabación y no se puede seguir diciendo lo contrario.
+        posterior_a_la_grabacion: es_posterior_a_la_grabacion(sesion, ahora),
+    }
+}
+
+/// ¿La instantánea se tomó después de que la grabación terminara?
+///
+/// Sin sesión observada no hay forma de saber cuándo se capturó la configuración, así que se
+/// mantiene `true`: se analiza el CSV al terminar y no se afirma nada más. Con sesión, se
+/// compara la foto guardada **durante** la observación con el instante de captura actual.
+fn es_posterior_a_la_grabacion(
+    sesion: Option<&crate::sessions::SesionDeEjecucion>,
+    ahora: &str,
+) -> bool {
+    // Si la sesión guardó una foto de la configuración **mientras** se observaba el proceso,
+    // esa foto no es posterior a la grabación: describe el momento del arranque, no el de
+    // analizar el CSV. La fecha se compara en texto porque ese es el formato guardado
+    // (`YYYY-MM-DD HH:MM:SS`), y así ordenan igual el texto y la hora.
+    let Some(sesion) = sesion else {
+        return true;
+    };
+    let Some(cfg) = sesion.configuracion_inicial.as_ref() else {
+        return true;
+    };
+    if cfg.capturado_en.trim().is_empty() {
+        return true;
+    }
+    // Hay una foto guardada **durante** la observación, con su propia fecha. Si esa fecha es
+    // anterior al momento de capturar la instantánea, la configuración ya existía antes de
+    // analizar el CSV: describirla como «posterior a la grabación» sería falso.
+    //
+    // Se comparan como texto porque ese es exactamente el formato guardado
+    // (`AAAA-MM-DD HH:MM:SS`, de ancho fijo): en ese formato el orden del texto y el de la
+    // hora coinciden, y así no se depende de cómo venga la fecha del CSV.
+    cfg.capturado_en.trim() >= ahora.trim()
+}
+
+/// Decide el AppID de la instantánea y de dónde procede.
+///
+/// Se resuelve en un único sitio para que la procedencia no pueda desincronizarse del
+/// valor. Devuelve ya la `Procedencia` que corresponde al valor elegido.
+fn resolver_appid(
+    benchmark: &Benchmark,
+    contexto: &ContextoDeCaptura,
+    identidad_observada: Option<&crate::sessions::IdentidadDeSesion>,
+) -> (Option<u32>, Procedencia) {
+    // 1. El benchmark manda: la instantánea pertenece a esa prueba.
+    if benchmark.appid != 0 {
+        return (Some(benchmark.appid), Procedencia::DeclaradoPorUsuario);
+    }
+
+    // 2. La sesión observada, solo si su AppID consta como observación directa. Un
+    //    candidato sin resolver o una inferencia por nombre no se escriben como certeza.
+    if let Some(id) = identidad_observada {
+        if id.origen.es_observacion_directa() {
+            if let Some(appid) = id.appid {
+                return (Some(appid), Procedencia::ObservadoEnProceso);
+            }
+        }
+    }
+
+    // 3. El contexto de la interfaz, si declara ser del mismo juego.
+    if contexto.corresponde_al_juego {
+        if let Some(appid) = contexto.appid_real {
+            return (Some(appid), Procedencia::ConfiguradoEnThoriapp);
+        }
+    }
+
+    (None, Procedencia::Desconocido)
+}
+
+/// Transcribe el equipo que **MangoHud registró** en la cabecera del CSV.
+///
+/// Devuelve `None` si el archivo no se puede leer o no trae cabecera de sistema: en ese
+/// caso las condiciones de la grabación quedan **desconocidas**, y así se dice, en vez de
+/// rellenarlas con el equipo detectado ahora (que puede ser otro).
+fn leer_hardware_de_la_grabacion(
+    log_path: &str,
+    ahora: &str,
+) -> Option<HardwareDeLaGrabacion> {
+    if log_path.trim().is_empty() {
+        return None;
+    }
+    let contenido = fs::read_to_string(log_path).ok()?;
+    let mut lineas = contenido.lines();
+    let meta = crate::mangohud::metadatos_de_cabecera(lineas.next()?, lineas.next()?)?;
+    if meta.vacio() {
+        return None;
+    }
+
+    let registrado = |v: String| {
+        ConProcedencia::nuevo(v, Procedencia::RegistradoPorMangohud).con_fecha(ahora)
+    };
+    let registrado_num = |v: f64| {
+        ConProcedencia::nuevo(v, Procedencia::RegistradoPorMangohud).con_fecha(ahora)
+    };
+
+    // Intervalo de muestreo: medido sobre el propio CSV, no supuesto.
+    let intervalo = crate::mangohud::Serie::desde_csv(&contenido)
+        .and_then(|s| s.intervalo_ms());
+
+    Some(HardwareDeLaGrabacion {
+        os: meta.os.map(registrado),
+        cpu: meta.cpu.map(registrado),
+        gpu: meta.gpu.map(registrado),
+        // Se conserva el crudo (KiB) junto a la conversión: el crudo es la prueba de unidad.
+        ram_kib: meta.ram_kib.map(|v| {
+            ConProcedencia::nuevo(v, Procedencia::RegistradoPorMangohud).con_fecha(ahora)
+        }),
+        ram_gib: meta.ram_gib.map(|v| {
+            ConProcedencia::nuevo(v, Procedencia::RegistradoPorMangohud).con_fecha(ahora)
+        }),
+        kernel: meta.kernel.map(registrado),
+        driver: meta.driver.map(registrado),
+        cpuscheduler: meta.cpuscheduler.map(registrado),
+        intervalo_muestreo_ms: intervalo.map(registrado_num),
+    })
+}
+
+/// Transcribe el `_summary.csv` que MangoHud escribió junto a este CSV.
+///
+/// Solo se asocia el resumen que está al lado del propio log: un resumen de otra grabación
+/// describiría otra prueba. Si falta o está incompleto, `None` (el benchmark sigue siendo
+/// válido con sus métricas).
+fn leer_resumen_de_la_grabacion(log_path: &str, ahora: &str) -> Option<ResumenOriginal> {
+    if log_path.trim().is_empty() {
+        return None;
+    }
+    let ruta = Path::new(log_path);
+    let ruta_resumen = crate::mangohud::ruta_del_resumen(ruta)?;
+    let contenido = fs::read_to_string(&ruta_resumen).ok()?;
+    let resumen = crate::mangohud::leer_resumen(&contenido)?;
+    Some(ResumenOriginal {
+        valores: resumen
+            .valores
+            .into_iter()
+            .map(|v| (v.nombre_original, v.valor))
+            .collect(),
+        capturado_en: ahora.to_string(),
+    })
+}
+
+/// Lee del sistema lo que se pueda del entorno. Lo que no se pueda leer queda en `None`.
+/// `ahora` se sella en cada dato para poder ver si se leyó todo junto o a saltos.
+fn leer_entorno(appid: u32, ahora: &str) -> EntornoInstantanea {
+    let hw = crate::hw::detect();
+    let texto = |v: &str| (!v.trim().is_empty()).then(|| v.trim().to_string());
+    let detectado = |v: String| {
+        ConProcedencia::nuevo(v, Procedencia::DetectadoEnSistema).con_fecha(ahora)
+    };
+
+    EntornoInstantanea {
+        gpu: texto(&hw.gpu).map(detectado),
+        cpu: texto(&hw.cpu).map(detectado),
+        ram_gb: (hw.ram_gb > 0.0)
+            .then(|| ConProcedencia::nuevo(hw.ram_gb, Procedencia::DetectadoEnSistema).con_fecha(ahora)),
+        kernel: texto(&hw.kernel).map(detectado),
+        // `Hardware` no detecta la versión del driver propietario: queda desconocida en
+        // lugar de deducirse del nombre de la GPU.
+        driver: None,
+        mesa: texto(&hw.mesa).map(detectado),
+        // Thoriapp no sabe qué versión de Proton tiene seleccionada el juego sin mirar el
+        // proceso en marcha; no se presume. Queda `None` hasta la subfase 5.3.
+        proton_seleccionado: None,
+        // Se consulta Steam ahora: si el juego no está instalado, `None`.
+        build_id: crate::steam::build_id(appid)
+            .ok()
+            .flatten()
+            .map(|v| ConProcedencia::nuevo(v, Procedencia::LeidoDeSteam).con_fecha(ahora)),
+        log_interval_ms: None,
+    }
 }
 
 /// Recorta el historial a las `MAX_BENCHMARKS_PER_GAME` grabaciones más recientes de
@@ -1263,8 +2086,12 @@ pub fn save_benchmark(
     // Opciones leídas de Steam. `None` = no se pudo leer; no se inventa nada.
     steam_command: Option<String>,
     notes: Option<String>,
+    // Lo que el frontend sabe de la configuración de ESTE juego (subfase 5.2). Si falta,
+    // la instantánea se construye igual, pero con la configuración en desconocido.
+    contexto: Option<ContextoDeCaptura>,
 ) -> Result<Benchmark, String> {
-    let mut data = load_benchmarks_data();
+    let _turno = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut data = load_benchmarks_data_para_editar()?;
 
     benchmark.profile_id = profile_id;
 
@@ -1298,6 +2125,37 @@ pub fn save_benchmark(
     // ni heredar el de otra.
     asignar_numero(&mut data, &mut benchmark);
 
+    // Sesión de ejecución (subfase 5.3). Es **solo un enlace**: se atribuye cuando la
+    // evidencia temporal e identitaria lo permite y, si no, se deja sin sesión. Nunca se
+    // asigna por el juego abierto en la interfaz, y una grabación antigua no se cuelga de un
+    // proceso actual solo porque el juego se llame igual: eso lo comprueba la ventana
+    // temporal de `sessions::decidir_asociacion`.
+    //
+    // Va **antes** de la instantánea a propósito: la instantánea necesita la identidad y la
+    // configuración capturada de la sesión. Al revés, la sesión aún no existía cuando se
+    // construía el AppID y la cabecera acababa diciendo «AppID desconocido» con el AppID
+    // 1623730 guardado al lado.
+    benchmark.sesion_id = None;
+    if let Some(id) = atribuir_a_sesion(&benchmark) {
+        benchmark.sesion_id = Some(id);
+    }
+
+    // Instantánea: se construye aquí, después de tener el número definitivo y la sesión, y
+    // se guarda como parte del benchmark. A partir de este momento los datos son historia:
+    // renombrar un perfil o cambiar Steam no los toca. Nunca se reconstruye desde el estado
+    // actual.
+    let ahora = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let sesion = benchmark
+        .sesion_id
+        .as_deref()
+        .and_then(|id| crate::sessions_service::servicio().sesion_por_id(id));
+    benchmark.snapshot = Some(construir_snapshot(
+        &benchmark,
+        &contexto.unwrap_or_default(),
+        sesion.as_ref(),
+        &ahora,
+    ));
+
     // Historial por juego: se añade la grabación nueva y se conservan las
     // `MAX_BENCHMARKS_PER_GAME` más recientes de ESTE juego; las más viejas se van solas.
     // Los demás juegos no se tocan, y como el archivo entero se guarda, el recorte también
@@ -1307,19 +2165,48 @@ pub fn save_benchmark(
     // `trim_history`. Un `retain` por clave de juego en este punto dejaría una sola
     // grabación por juego y el historial de 10 no llegaría a existir.
     data.benchmarks.push(benchmark.clone());
-    trim_history(&mut data.benchmarks);    save_benchmarks_data(&data)?;
+    trim_history(&mut data.benchmarks);
+    save_benchmarks_data(&data)?;
 
     Ok(benchmark)
 }
 
 #[tauri::command]
 pub fn load_benchmarks() -> Result<Vec<Benchmark>, String> {
-    let data = load_benchmarks_data();
+    let data = cargar_benchmarks()?;
     let mut list = data.benchmarks;
     // El recorte se aplica al leer y no solo al guardar: un archivo antiguo con más de
     // 10 grabaciones por juego se limpia la próxima vez que se cargue.
     trim_history(&mut list);
     Ok(list)
+}
+
+/// Atribuye una grabación recién guardada a una sesión de ejecución, si hay evidencia.
+///
+/// La sesión se busca por la ventana temporal del CSV (nombre + duración) y por el AppID;
+/// el resultado solo se escribe si la asociación permite atribuir. Devuelve el id para que
+/// quien llama lo ponga en el benchmark.
+///
+/// Se separa en función para poder probarla: el guardado completo necesita Tauri.
+fn atribuir_a_sesion(benchmark: &Benchmark) -> Option<String> {
+    let ruta_csv = benchmark.log_path.as_str();
+    if ruta_csv.is_empty() {
+        return None;
+    }
+    let ventana = crate::sessions_service::ventana_de_csv(
+        ruta_csv,
+        Some(benchmark.duration_seconds).filter(|d| *d > 0.0),
+    );
+    ventana.inicio.as_ref()?;
+    let (id, _asociacion) = crate::sessions_service::servicio().asociar_grabacion(
+        benchmark.appid,
+        &benchmark.game_name,
+        &ventana,
+    );
+    if let Some(sid) = &id {
+        crate::sessions_service::servicio().anotar_grabacion(sid, &benchmark.id);
+    }
+    id
 }
 
 /// Grabaciones de **un solo juego**.
@@ -1334,7 +2221,7 @@ pub fn load_benchmarks_for_game(
     game_name: Option<String>,
 ) -> Result<Vec<Benchmark>, String> {
     let nombre = game_name.unwrap_or_default();
-    let data = load_benchmarks_data();
+    let data = cargar_benchmarks()?;
     let mut benchmarks: Vec<Benchmark> = data
         .benchmarks
         .into_iter()
@@ -1398,7 +2285,8 @@ fn ayuda_ultimo_comando(
 
 #[tauri::command]
 pub fn delete_benchmark(benchmark_id: String) -> Result<(), String> {
-    let mut data = load_benchmarks_data();
+    let _turno = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut data = load_benchmarks_data_para_editar()?;
     data.benchmarks.retain(|b| b.id != benchmark_id);
     save_benchmarks_data(&data)?;
     Ok(())
@@ -1414,30 +2302,92 @@ pub fn delete_benchmark(benchmark_id: String) -> Result<(), String> {
 /// lo tiene, y por nombre normalizado cuando es 0. Así el filtrado coincide exactamente con
 /// el de `load_benchmarks_for_game` y no se borra nada que la vista no estuviera enseñando.
 /// Devuelve cuántas se borraron.
+/// Núcleo de `delete_benchmarks_for_game`, separado para poder probarlo sin disco.
+///
+/// Devuelve los `id` **exactos** que se van a borrar. Esa lista es la que usa después la
+/// limpieza de comparaciones guardadas: si el borrado y la limpieza calcularan el alcance
+/// por separado, podrían discrepar y dejar comparaciones colgando.
+fn ids_a_borrar_del_juego(data: &BenchmarksData, appid: u32, game_name: &str) -> Vec<String> {
+    data.benchmarks
+        .iter()
+        .filter(|b| juego_coincide(b, appid, game_name))
+        .map(|b| b.id.clone())
+        .collect()
+}
+
 #[tauri::command]
 pub fn delete_benchmarks_for_game(appid: u32, game_name: String) -> Result<usize, String> {
-    let mut data = load_benchmarks_data();
-    let antes = data.benchmarks.len();
-    // Mismo criterio que la lectura: borrar tiene que borrar exactamente lo que la ventana
-    // estaba enseñando, incluidas las grabaciones antiguas sin appid. Con una clave
-    // `name:` no se borraban, y el botón «Borrar todas» parecía no hacer nada.
-    data.benchmarks.retain(|b| !juego_coincide(b, appid, &game_name));
-    let borradas = antes - data.benchmarks.len();
-    if borradas == 0 {
+    // El cerrojo de benchmarks se suelta al salir de este bloque, **antes** de tocar el de
+    // comparaciones. Tomar los dos a la vez permitiría un interbloqueo con cualquier ruta que
+    // los pida en el orden contrario.
+    let (borradas, ids) = {
+        let _turno = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut data = load_benchmarks_data_para_editar()?;
+        // Mismo criterio que la lectura: borrar tiene que borrar exactamente lo que la ventana
+        // estaba enseñando, incluidas las grabaciones antiguas sin appid. Con una clave
+        // `name:` no se borraban, y el botón «Borrar todas» parecía no hacer nada.
+        let ids = ids_a_borrar_del_juego(&data, appid, &game_name);
+        let borradas = ids.len();
+        if borradas == 0 {
+            return Ok(0);
+        }
+        data.benchmarks.retain(|b| !ids.iter().any(|i| i == &b.id));
+        save_benchmarks_data(&data)?;
+        (borradas, ids)
+    };
+    // Las comparaciones guardadas que usaban estas pruebas ya no se pueden abrir: se
+    // limpian junto con ellas para no dejar informes que citan datos que ya no existen.
+    let huerfanas = purgar_comparaciones_por_benchmarks(&ids)?;
+    println!(
+        "[Benchmark] ✅ Se eliminaron {} benchmarks de {} ({} comparaciones huérfanas)",
+        borradas, game_name, huerfanas
+    );
+    Ok(borradas)
+}
+
+/// Quita las comparaciones guardadas que dependen de alguna de las pruebas borradas.
+///
+/// Una comparación guarda copia de las dos pruebas que la formaron. Si se borra una de ellas,
+/// el informe guardado seguiría existiendo y citaría una prueba que ya no está: quien lo abra
+/// no puede comprobar de dónde salen los números. Se elimina en vez de dejarlo mintiendo.
+///
+/// Se compara por `id` de `baseline`/`test`, que es lo único estable para emparejarlas.
+/// Devuelve cuántas se quitaron.
+fn purgar_comparaciones_por_benchmarks(ids_borrados: &[String]) -> Result<usize, String> {
+    if ids_borrados.is_empty() {
         return Ok(0);
     }
-    save_benchmarks_data(&data)?;
-    println!("[Benchmark] ✅ Se eliminaron {} benchmarks de {}", borradas, game_name);
-    Ok(borradas)
+    let _turno = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
+    // Si el archivo no se puede leer, no se vacía a ciegas: se deja como está y se avisa.
+    let mut data = load_saved_data_para_editar()?;
+    let antes = data.comparisons.len();
+    data.comparisons.retain(|c| {
+        let base = &c.comparison.baseline.id;
+        let test = &c.comparison.test.id;
+        !ids_borrados.iter().any(|i| i == base || i == test)
+    });
+    let quitadas = antes - data.comparisons.len();
+    if quitadas > 0 {
+        save_saved_data(&data)?;
+    }
+    Ok(quitadas)
 }
 
 // NUEVO: Comando para borrar todos los benchmarks
 #[tauri::command]
 pub fn delete_all_benchmarks() -> Result<(), String> {
-    let mut data = load_benchmarks_data();
-    let count = data.benchmarks.len();
-    data.benchmarks.clear();
-    save_benchmarks_data(&data)?;
+    // Mismo cuidado que arriba: se suelta un cerrojo antes de tomar el otro.
+    let (count, ids) = {
+        let _turno = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut data = load_benchmarks_data_para_editar()?;
+        let ids: Vec<String> = data.benchmarks.iter().map(|b| b.id.clone()).collect();
+        let count = ids.len();
+        data.benchmarks.clear();
+        save_benchmarks_data(&data)?;
+        (count, ids)
+    };
+    // Igual que el borrado por juego: ninguna comparación puede sobrevivir a sus pruebas.
+    purgar_comparaciones_por_benchmarks(&ids)?;
     println!("[Benchmark] ✅ Se eliminaron {} benchmarks", count);
     Ok(())
 }
@@ -1481,6 +2431,71 @@ fn texto_comparacion(
     }
 }
 
+/// AppID para mostrar en un mensaje: el número, o «desconocido» si no lo hay.
+fn texto_appid(appid: u32) -> String {
+    if appid == 0 {
+        "desconocido".to_string()
+    } else {
+        appid.to_string()
+    }
+}
+
+/// ¿Las dos grabaciones son del mismo juego?
+///
+/// Una sola regla para todo el módulo, porque tener dos era el origen del fallo:
+/// `juego_coincide` comparaba por nombre cuando faltaba el AppID, mientras que la
+/// comparación solo miraba el nombre y se conformaba con avisar.
+///
+/// - Con AppID en las dos: manda el AppID. Dos nombres distintos con el mismo AppID son el
+///   mismo juego (el nombre se escribe a mano y cambia); dos AppID distintos, nunca.
+/// - Sin AppID en alguna: se compara el nombre normalizado. Si falta en una, no se puede
+///   afirmar nada: se responde que **no** son el mismo, porque afirmar una comparación sin
+///   evidencia es peor que no ofrecerla.
+pub fn mismo_juego(a: &Benchmark, b: &Benchmark) -> bool {
+    coinciden_por_identidad(a.appid, &a.game_name, b.appid, &b.game_name, true)
+}
+
+/// La regla, en crudo. `Benchmark` no implementa `Default`, así que el historial no puede
+/// construir uno de mentira para reutilizarla: comparte esta en su lugar.
+/// `estricto` separa los dos usos legítimos, que **no** son el mismo:
+///
+/// - Buscar en el historial de un juego (`estricto = false`): si la grabación antigua no
+///   tiene AppID, el nombre es la única pista que hay. Descartarla escondería pruebas reales
+///   del usuario.
+/// - Comparar dos grabaciones (`estricto = true`): si una tiene AppID y la otra no, no hay
+///   evidencia de que sean el mismo juego y compararlas produciría un número inventado.
+///
+/// Se sigue usando **una sola** función; la diferencia es explícita y está en un parámetro,
+/// no en dos implementaciones que puedan divergir.
+fn coinciden_por_identidad(
+    appid_a: u32,
+    nombre_a: &str,
+    appid_b: u32,
+    nombre_b: &str,
+    estricto: bool,
+) -> bool {
+    if appid_a != 0 && appid_b != 0 {
+        return appid_a == appid_b;
+    }
+    // Comparación estricta con evidencia incompleta: un AppID de un lado y ninguno del otro
+    // no permite afirmar que sea el mismo juego.
+    if estricto && (appid_a != 0 || appid_b != 0) {
+        return false;
+    }
+    let na = norm_game_name(nombre_a);
+    let nb = norm_game_name(nombre_b);
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    if na == nb {
+        return true;
+    }
+    // El mismo juego escrito con y sin subtítulo (`Deskrawl` / `Deskrawl: Idle ARPG`).
+    // Solo aquí, en la caída por nombre: con AppID en las dos partes ya se decidió arriba.
+    es_el_mismo_con_subtitulo(&na, &nb) || es_el_mismo_con_subtitulo(&nb, &na)
+}
+
+
 #[tauri::command]
 pub fn compare_benchmarks(
     baseline_id: String,
@@ -1501,6 +2516,21 @@ pub fn compare_benchmarks(
         .find(|b| b.id == test_id)
         .ok_or("Benchmark de prueba no encontrado")?
         .clone();
+
+    // Dos grabaciones de juegos distintos no se comparan. Antes se calculaba todo y se
+    // añadía un aviso al final diciendo que la comparación «no es válida», pero el resultado
+    // se devolvía igual, con sus porcentajes, y quien lo leyera sin detenerse en la nota se
+    // quedaba con un número que no significa nada. Se rechaza aquí, en el backend, que es el
+    // único sitio donde puede decidirse: la interfaz no puede deducirlo por su cuenta.
+    if !mismo_juego(&baseline, &test) {
+        return Err(format!(
+            "No se pueden comparar grabaciones de juegos distintos: «{}» (AppID {}) y «{}» (AppID {}).",
+            baseline.game_name,
+            texto_appid(baseline.appid),
+            test.game_name,
+            texto_appid(test.appid)
+        ));
+    }
 
     // Cambio porcentual de `b` respecto a `a`. Si `a` es 0 (dato inválido) devuelve 0
     // en vez de infinito o NaN.
@@ -1540,12 +2570,6 @@ pub fn compare_benchmarks(
     );
 
     // Avisos que ayudan a no sacar conclusiones erróneas
-    if baseline.game_name != test.game_name {
-        conclusion.push_str(&format!(
-            "\nℹ️ Son juegos distintos ({} vs {}): la comparación no es válida.",
-            baseline.game_name, test.game_name
-        ));
-    }
     if baseline.duration_seconds < 20.0 || test.duration_seconds < 20.0 {
         conclusion.push_str(
             "\nℹ️ Alguna grabación dura menos de 20 s: el resultado puede no ser fiable.",
@@ -1969,6 +2993,9 @@ pub struct SavedComparison {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedComparisonsData {
+    /// Versión del formato. Ausente en los archivos anteriores a este campo.
+    #[serde(default)]
+    version: Option<u32>,
     comparisons: Vec<SavedComparison>,
 }
 
@@ -1976,41 +3003,51 @@ fn get_saved_comparisons_file() -> std::path::PathBuf {
     get_benchmarks_dir().join("saved_comparisons.json")
 }
 
-fn load_saved_data() -> SavedComparisonsData {
-    let file = get_saved_comparisons_file();
+/// Lee `saved_comparisons.json` con las mismas reglas de integridad que el historial.
+///
+/// Antes, un archivo ilegible devolvía una lista vacía y la siguiente escritura lo
+/// sobrescribía: las pruebas guardadas desaparecían sin avisar. La copia de seguridad que
+/// se hacía no servía de nada, porque nadie le decía al usuario que existía.
+fn try_load_saved_data() -> Result<SavedComparisonsData, ErrorDatos> {
+    leer_datos::<SavedComparisonsData>(
+        &get_saved_comparisons_file(),
+        "saved_comparisons.json",
+        COMPARISONS_SCHEMA_VERSION,
+        |v| v.get("version").and_then(|x| x.as_u64()).map(|x| x as u32),
+        serde_json::from_value,
+    )
+    .map(|o| {
+        o.unwrap_or(SavedComparisonsData {
+            version: None,
+            comparisons: Vec::new(),
+        })
+    })
+}
 
-    if file.exists() {
-        if let Ok(content) = fs::read_to_string(&file) {
-            match serde_json::from_str::<SavedComparisonsData>(&content) {
-                Ok(data) => return data,
-                Err(e) => {
-                    // El archivo existe pero no se pudo leer: se guarda una copia antes de
-                    // que un guardado posterior lo sobrescriba con una lista vacía.
-                    println!("[Pruebas] ⚠️ saved_comparisons.json ilegible: {}", e);
-                    let backup = file.with_extension("json.corrupt.bak");
-                    fs::write(&backup, &content).ok();
-                }
-            }
-        }
-    }
-
-    SavedComparisonsData {
-        comparisons: Vec::new(),
-    }
+/// Variante para **modificar**: aborta si el archivo existe y no se puede interpretar.
+fn load_saved_data_para_editar() -> Result<SavedComparisonsData, String> {
+    try_load_saved_data().map_err(|e| e.mensaje("Tus pruebas guardadas"))
 }
 
 fn save_saved_data(data: &SavedComparisonsData) -> Result<(), String> {
+    let mut data = data.clone();
+    data.version = Some(COMPARISONS_SCHEMA_VERSION);
     let content =
-        serde_json::to_string_pretty(data).map_err(|e| format!("Error al serializar: {}", e))?;
-    fs::write(get_saved_comparisons_file(), content)
-        .map_err(|e| format!("Error al guardar: {}", e))
+        serde_json::to_string_pretty(&data).map_err(|e| format!("Error al serializar: {}", e))?;
+    escribir_atomico(&get_saved_comparisons_file(), &content).map_err(|e| {
+        format!(
+            "No se pudieron guardar las pruebas ({}). Las que ya tenías siguen intactas.",
+            e
+        )
+    })
 }
 
 /// Guarda en "Mis pruebas" la comparación entre dos benchmarks (copia completa).
 #[tauri::command]
 pub fn save_comparison(baseline_id: String, test_id: String) -> Result<SavedComparison, String> {
     let comparison = compare_benchmarks(baseline_id, test_id)?;
-    let mut data = load_saved_data();
+    let _turno = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut data = load_saved_data_para_editar()?;
 
     let already_saved = data.comparisons.iter().any(|c| {
         c.comparison.baseline.id == comparison.baseline.id
@@ -2049,19 +3086,29 @@ pub fn save_comparison(baseline_id: String, test_id: String) -> Result<SavedComp
 
 #[tauri::command]
 pub fn load_comparisons() -> Result<Vec<SavedComparison>, String> {
-    Ok(load_saved_data().comparisons)
+    // Lectura de pantalla: si el archivo está roto hay que decirlo, no pintar una lista
+    // vacía. Antes esto devolvía `Ok(vec![])` y «Mis pruebas» decía «no tienes ninguna».
+    try_load_saved_data()
+        .map(|d| d.comparisons)
+        .map_err(|e| e.mensaje("Tus pruebas guardadas"))
 }
 
 #[tauri::command]
 pub fn delete_comparison(comparison_id: String) -> Result<(), String> {
-    let mut data = load_saved_data();
+    let _turno = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut data = load_saved_data_para_editar()?;
     data.comparisons.retain(|c| c.id != comparison_id);
     save_saved_data(&data)
 }
 
 #[tauri::command]
 pub fn delete_all_comparisons() -> Result<(), String> {
+    let _turno = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
+    // Borrar todo también es destructivo: si no se puede leer lo que hay, no se vacía a
+    // ciegas (un archivo ilegible podría ser uno perfectamente válido con otro formato).
+    load_saved_data_para_editar()?;
     let data = SavedComparisonsData {
+        version: None,
         comparisons: Vec::new(),
     };
     save_saved_data(&data)
@@ -2078,6 +3125,21 @@ mod tests {
     /// pueden compartir directorio. Se borra antes de usarla para que una
     /// ejecución anterior interrumpida no deje basura que haga fallar asserts
     /// por motivos ajenos al código.
+    /// Las grabaciones reales de `tests/fixtures/mangohud/`, de solo lectura.
+    const LOG1: &str = "Palworld-Win64-Shipping_2026-11-23_16-54-52.csv";
+    const LOG2: &str = "Palworld-Win64-Shipping_2026-11-24_18-19-57.csv";
+
+    fn fixture_log(nombre: &str) -> String {
+        format!(
+            "{}/../tests/fixtures/mangohud/{nombre}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    fn fixture_csv(nombre: &str) -> String {
+        fs::read_to_string(fixture_log(nombre)).expect("fixture legible")
+    }
+
     fn tmp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "thoriapp-test-{}-{}",
@@ -2167,6 +3229,8 @@ mod tests {
             origen_comando: OrigenComando::Instantanea,
             steam_command: None,
             number: None,
+            snapshot: None,
+            sesion_id: None,
             spikes_per_min: None,
             pct_over_33ms: None,
             jitter_ms: None,
@@ -2661,6 +3725,7 @@ mod tests {
         let mut b = bench(440, "Team Fortress 2");
         b.log_path = log_path.to_string();
         crate::benchmarks::BenchmarksData {
+            version: None,
             benchmarks: vec![b],
             counters: std::collections::HashMap::new(),
         }
@@ -2811,6 +3876,7 @@ mod tests {
 
     fn vacio() -> BenchmarksData {
         BenchmarksData {
+            version: None,
             benchmarks: vec![],
             counters: HashMap::new(),
         }
@@ -2914,6 +3980,7 @@ mod tests {
     fn load_benchmarks_for_game_encuentra_la_prueba_antigua_sin_appid() {
         // Reproduce el fallo: una grabación antigua de Palworld con appid 0.
         let data = BenchmarksData {
+            version: None,
             benchmarks: vec![bench(0, "Palworld"), bench(730, "CS2")],
             counters: HashMap::new(),
         };
@@ -3399,5 +4466,1916 @@ mod tests {
         assert!((combined_noise(None, None) - MIN_NOISE).abs() < 1e-9);
         // Con una sola grabación medida, el margen es el suyo (no √2 veces mayor).
         assert!((combined_noise(Some(8.0), None) - 8.0).abs() < 1e-9);
+    }
+
+    // ==================== Subfase 5.1: integridad del almacenamiento ====================
+    //
+    // Estos tests trabajan sobre archivos temporales reales, nunca sobre los del usuario:
+    // `leer_datos` y `escribir_atomico` reciben la ruta, así que se pueden probar sin
+    // tocar `~/.config/thoriapp`. Ese era el requisito: verificar el comportamiento sin
+    // corromper el historial de nadie.
+
+    /// JSON mínimo de un historial válido y antiguo (sin `version`), como los que hay en
+    /// disco hoy.
+    fn historial_antiguo_json() -> String {
+        format!(
+            r#"{{"benchmarks":[{{"id":"b1","profile_id":"","game_name":"Palworld","appid":1623730,"timestamp":"2024-01-01 10:00:00","duration_seconds":60.0,"avg_fps":60.0,"fps_1_percent_low":50.0,"fps_0_1_percent_low":40.0,"max_fps":70.0,"min_fps":30.0,"frame_time_avg":16.6,"frame_time_1_percent_high":20.0,"total_frames":600,"notes":null}}],"counters":{{"appid:1623730":1}}}}"#
+        )
+    }
+
+    fn leer_bench(path: &Path) -> Result<Option<BenchmarksData>, ErrorDatos> {
+        leer_datos::<BenchmarksData>(
+            path,
+            "benchmarks.json",
+            BENCHMARKS_SCHEMA_VERSION,
+            |v| v.get("version").and_then(|x| x.as_u64()).map(|x| x as u32),
+            serde_json::from_value,
+        )
+    }
+
+    /// 1. Archivo inexistente: es un estado legítimo, no un error.
+    #[test]
+    fn s51_archivo_inexistente_es_lista_vacia_no_error() {
+        let dir = tmp_dir("s51-inexistente");
+        let path = dir.join("benchmarks.json");
+
+        let leido = leer_bench(&path).expect("no debe fallar");
+        assert!(leido.is_none(), "no existe el archivo: no hay datos, sin error");
+
+        // Y el estado por defecto que se usa al escribir tampoco inventa nada.
+        let d = try_load_benchmarks_data_en(&path).unwrap();
+        assert!(d.benchmarks.is_empty());
+        assert!(d.counters.is_empty());
+    }
+
+    /// Variante de `try_load_benchmarks_data` sobre una ruta concreta, solo para tests.
+    fn try_load_benchmarks_data_en(path: &Path) -> Result<BenchmarksData, ErrorDatos> {
+        Ok(leer_bench(path)?.unwrap_or(BenchmarksData {
+            version: None,
+            benchmarks: Vec::new(),
+            counters: HashMap::new(),
+        }))
+    }
+
+    /// 2. Archivo válido antiguo, sin `version`: se lee como versión 1.
+    #[test]
+    fn s51_archivo_antiguo_sin_version_se_lee_como_v1() {
+        let dir = tmp_dir("s51-antiguo");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, historial_antiguo_json()).unwrap();
+
+        let d = leer_bench(&path).unwrap().expect("hay archivo");
+        assert!(d.version.is_none(), "un archivo antiguo no se reescribe al leer");
+        assert_eq!(d.benchmarks.len(), 1);
+        assert_eq!(d.benchmarks[0].game_name, "Palworld");
+        assert_eq!(d.counters.get("appid:1623730"), Some(&1));
+    }
+
+    /// 3. Archivo válido con la versión actual: se lee igual.
+    #[test]
+    fn s51_archivo_con_version_actual_se_lee() {
+        let dir = tmp_dir("s51-version-actual");
+        let path = dir.join("benchmarks.json");
+        let json = historial_antiguo_json().replacen('{', &format!("{{\"version\":{},", BENCHMARKS_SCHEMA_VERSION), 1);
+        fs::write(&path, json).unwrap();
+
+        let d = leer_bench(&path).unwrap().unwrap();
+        assert_eq!(d.version, Some(BENCHMARKS_SCHEMA_VERSION));
+        assert_eq!(d.benchmarks.len(), 1);
+    }
+
+    /// 7. Versión futura: se rechaza en vez de interpretarse a medias.
+    #[test]
+    fn s51_version_futura_se_rechaza_sin_tocar_el_archivo() {
+        let dir = tmp_dir("s51-version-futura");
+        let path = dir.join("benchmarks.json");
+        let json = historial_antiguo_json().replacen('{', &format!("{{\"version\":{},", BENCHMARKS_SCHEMA_VERSION + 1), 1);
+        fs::write(&path, &json).unwrap();
+
+        let err = leer_bench(&path).expect_err("debe rechazarse");
+        match err {
+            ErrorDatos::VersionFutura { encontrada, soportada } => {
+                assert_eq!(encontrada, BENCHMARKS_SCHEMA_VERSION + 1);
+                assert_eq!(soportada, BENCHMARKS_SCHEMA_VERSION);
+            }
+            otro => panic!("error equivocado: {otro:?}"),
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), json, "el archivo queda intacto");
+        let msg = leer_bench(&path).unwrap_err().mensaje("El historial");
+        assert!(msg.contains("más nueva"), "el mensaje debe explicar el motivo: {msg}");
+        assert!(msg.contains("No se ha modificado nada"), "{msg}");
+    }
+
+    /// 4. JSON corrupto: es un error, nunca una lista vacía.
+    #[test]
+    fn s51_json_corrupto_no_se_lee_como_lista_vacia() {
+        let dir = tmp_dir("s51-corrupto");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, "{ esto no es json").unwrap();
+
+        let err = leer_bench(&path).expect_err("debe fallar");
+        assert!(matches!(err, ErrorDatos::Corrupto { .. }));
+        // Se conserva una copia: el original nunca se pierde por leer mal.
+        assert!(dir.join("benchmarks.json.corrupt.bak").exists(), "copia de seguridad");
+    }
+
+    /// Un archivo vacío es lo que deja un `fs::write` interrumpido: no es «no hay
+    /// pruebas», es un archivo roto que hay que enseñar.
+    #[test]
+    fn s51_archivo_vacio_se_trata_como_corrupto_no_como_vacio() {
+        let dir = tmp_dir("s51-vacio");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, "").unwrap();
+
+        let err = leer_bench(&path).expect_err("debe fallar");
+        assert!(matches!(err, ErrorDatos::Corrupto { .. }));
+        assert!(dir.join("benchmarks.json.vacio.bak").exists());
+    }
+
+    /// 5. Sin permisos de lectura: error, no lista vacía.
+    #[cfg(unix)]
+    #[test]
+    fn s51_archivo_sin_permisos_es_error_no_lista_vacia() {
+        use std::os::unix::fs::PermissionsExt;
+        // root salta los permisos: el test no probaría nada de forma fiable.
+        if fs::metadata("/proc/self").map(|_| true).unwrap_or(false)
+            && std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+                .unwrap_or(false)
+        {
+            return;
+        }
+
+        let dir = tmp_dir("s51-permisos");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, historial_antiguo_json()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = leer_bench(&path).expect_err("debe fallar");
+        assert!(matches!(err, ErrorDatos::Ilegible(_)), "error equivocado: {err:?}");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).ok();
+    }
+
+    /// 6 y 12. Error de escritura: se informa y el archivo anterior no se toca.
+    #[test]
+    fn s51_error_de_escritura_no_pierde_el_archivo_anterior() {
+        let dir = tmp_dir("s51-escritura");
+        let path = dir.join("benchmarks.json");
+        let original = historial_antiguo_json();
+        fs::write(&path, &original).unwrap();
+
+        // Un destino imposible: el «archivo» es un directorio, así que renombrar falla.
+        let imposible = dir.join("destino");
+        fs::create_dir_all(&imposible).unwrap();
+        assert!(escribir_atomico(&imposible, "contenido").is_err());
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), original, "intacto");
+    }
+
+    /// La escritura atómica deja exactamente el contenido nuevo y no restos `.tmp`.
+    #[test]
+    fn s51_escritura_atomica_deja_el_archivo_y_ningun_temporal() {
+        let dir = tmp_dir("s51-atomica");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, "viejo").unwrap();
+
+        escribir_atomico(&path, "nuevo").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "nuevo");
+        assert!(!dir.join("benchmarks.json.tmp").exists(), "no quedan temporales");
+    }
+
+    /// 8 y 10. Un guardado real conserva benchmarks históricos y contadores, y sella
+    /// la versión.
+    #[test]
+    fn s51_guardar_conserva_historial_y_contadores() {
+        let dir = tmp_dir("s51-guardar");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, historial_antiguo_json()).unwrap();
+
+        let mut d = try_load_benchmarks_data_en(&path).unwrap();
+        d.benchmarks.push(bench(1623730, "Palworld"));
+        d.counters.insert("appid:1623730".to_string(), 2);
+
+        // Se escribe con la misma función que las rutas reales.
+        escribir_atomico(&path, &serde_json::to_string(&con_la_version(d.clone())).unwrap())
+            .unwrap();
+
+        let releido = leer_bench(&path).unwrap().unwrap();
+        assert_eq!(releido.version, Some(BENCHMARKS_SCHEMA_VERSION));
+        assert_eq!(releido.benchmarks.len(), 2, "el registro antiguo sigue ahí");
+        assert_eq!(releido.benchmarks[0].id, "b1");
+        assert_eq!(releido.counters.get("appid:1623730"), Some(&2));
+    }
+
+    /// Sella la versión igual que `save_benchmarks_data`.
+    fn con_la_version(mut d: BenchmarksData) -> BenchmarksData {
+        d.version = Some(BENCHMARKS_SCHEMA_VERSION);
+        d
+    }
+
+    /// 13. Ninguna ruta destructiva puede partir de una lectura fallida.
+    ///
+    /// Antes, `load_benchmarks_data_para_editar` no existía y cada borrado hacía
+    /// `load_benchmarks_data()` (que devolvía vacío) seguido de `save`: el historial
+    /// entero desaparecía por un archivo ilegible.
+    #[test]
+    fn s51_las_rutas_de_escritura_abortan_si_la_lectura_falla() {
+        let fuente = include_str!("benchmarks.rs");
+
+        // Las cuatro rutas que modifican benchmarks y las tres de comparaciones.
+        for funcion in [
+            "pub fn save_benchmark(",
+            "pub fn delete_benchmark(",
+            "pub fn delete_benchmarks_for_game(",
+            "pub fn delete_all_benchmarks(",
+        ] {
+            let inicio = fuente.find(funcion).unwrap_or_else(|| panic!("falta {funcion}"));
+            let cuerpo = &fuente[inicio..(inicio + 2000).min(fuente.len())];
+            assert!(
+                cuerpo.contains("load_benchmarks_data_para_editar()?"),
+                "{funcion} debe abortar si no puede leer el historial"
+            );
+            assert!(
+                !cuerpo.contains("let mut data = load_benchmarks_data();"),
+                "{funcion} no puede partir de una lectura tolerante a errores"
+            );
+        }
+
+        for funcion in ["pub fn delete_comparison(", "pub fn delete_all_comparisons("] {
+            let inicio = fuente.find(funcion).unwrap_or_else(|| panic!("falta {funcion}"));
+            let cuerpo = &fuente[inicio..(inicio + 1200).min(fuente.len())];
+            assert!(
+                cuerpo.contains("load_saved_data_para_editar()?"),
+                "{funcion} debe abortar si no puede leer las pruebas guardadas"
+            );
+        }
+    }
+
+    /// 14. La lectura de pantalla distingue «vacío» de «no se pudo leer».
+    #[test]
+    fn s51_la_lectura_de_pantalla_informa_del_error() {
+        let fuente = include_str!("benchmarks.rs");
+
+        // `load_benchmarks`, `load_benchmarks_for_game` y `load_comparisons` usan la
+        // variante que propaga el error en vez de tragárselo.
+        for funcion in ["pub fn load_benchmarks()", "pub fn load_benchmarks_for_game(", "pub fn load_comparisons()"] {
+            let inicio = fuente.find(funcion).unwrap_or_else(|| panic!("falta {funcion}"));
+            let cuerpo = &fuente[inicio..(inicio + 700).min(fuente.len())];
+            assert!(
+                cuerpo.contains("cargar_benchmarks()?") || cuerpo.contains(".map_err(|e| e.mensaje("),
+                "{funcion} debe propagar el error de lectura"
+            );
+        }
+
+        let dir = tmp_dir("s51-pantalla");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, "roto").unwrap();
+
+        let error = leer_bench(&path).unwrap_err();
+        let mensaje = error.mensaje("El historial de pruebas");
+        assert!(mensaje.contains("dañado"), "{mensaje}");
+        assert!(mensaje.contains("No se ha modificado nada"), "{mensaje}");
+    }
+
+    /// 9. Las comparaciones guardadas sobreviven aunque sus benchmarks desaparezcan:
+    /// embuten copias completas, así que no hay nada que recalcular.
+    #[test]
+    fn s51_las_comparaciones_guardadas_sobreviven_al_borrado_de_sus_benchmarks() {
+        let a = bench(1623730, "Palworld");
+        let b = bench(1623730, "Palworld");
+        let guardada = SavedComparison {
+            id: "cmp_1".to_string(),
+            saved_at: "2024-01-02 10:00:00".to_string(),
+            game_name: "Palworld".to_string(),
+            before_fps: 60.0,
+            after_fps: 66.0,
+            fps_change_percent: 10.0,
+            comparison: BenchmarkComparison {
+                baseline: a.clone(),
+                test: b.clone(),
+                fps_change_percent: 10.0,
+                fps_1_percent_change_percent: 0.0,
+                fps_0_1_percent_change_percent: 0.0,
+                frame_time_change_percent: -9.0,
+                conclusion: "Mejora observada".to_string(),
+                noise_percent: Some(3.0),
+                within_noise: false,
+                comandos_iguales: Some(true),
+            },
+        };
+
+        // El historial queda vacío (como tras «borrar todo»), pero la prueba guardada
+        // no depende de él.
+        let historial = BenchmarksData {
+            version: Some(BENCHMARKS_SCHEMA_VERSION),
+            benchmarks: Vec::new(),
+            counters: HashMap::new(),
+        };
+        let dir = tmp_dir("s51-comparaciones");
+        let bench_path = dir.join("benchmarks.json");
+        let cmp_path = dir.join("saved_comparisons.json");
+
+        escribir_atomico(&bench_path, &serde_json::to_string(&historial).unwrap()).unwrap();
+        let datos = SavedComparisonsData {
+            version: Some(COMPARISONS_SCHEMA_VERSION),
+            comparisons: vec![guardada],
+        };
+        escribir_atomico(&cmp_path, &serde_json::to_string(&datos).unwrap()).unwrap();
+
+        let leidas = leer_datos::<SavedComparisonsData>(
+            &cmp_path,
+            "saved_comparisons.json",
+            COMPARISONS_SCHEMA_VERSION,
+            |v| v.get("version").and_then(|x| x.as_u64()).map(|x| x as u32),
+            serde_json::from_value,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(leidas.comparisons.len(), 1);
+        assert_eq!(leidas.comparisons[0].comparison.baseline.id, "1623730-Palworld");
+        assert!(leer_bench(&bench_path).unwrap().unwrap().benchmarks.is_empty());
+    }
+
+    /// 11. Operaciones concurrentes: el cerrojo existe y las cuatro rutas lo usan.
+    ///
+    /// Se comprueba la propiedad estructural (todas las rutas pasan por el mismo cerrojo)
+    /// y que el mutex serializa de verdad.
+    #[test]
+    fn s51_las_rutas_de_escritura_usan_un_cerrojo() {
+        let fuente = include_str!("benchmarks.rs");
+        for funcion in [
+            "pub fn save_benchmark(",
+            "pub fn delete_benchmark(",
+            "pub fn delete_benchmarks_for_game(",
+            "pub fn delete_all_benchmarks(",
+        ] {
+            let inicio = fuente.find(funcion).unwrap();
+            let cuerpo = &fuente[inicio..(inicio + 2000).min(fuente.len())];
+            assert!(
+                cuerpo.contains("CERROJO_BENCHMARKS.lock()"),
+                "{funcion} debe serializarse con el cerrojo"
+            );
+        }
+
+        // El cerrojo serializa: 20 hilos incrementando bajo el mismo mutex dan 20.
+        use std::sync::Arc;
+        let contador = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut hilos = Vec::new();
+        for _ in 0..20 {
+            let c = Arc::clone(&contador);
+            hilos.push(std::thread::spawn(move || {
+                let _t = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+                let n = c.load(std::sync::atomic::Ordering::SeqCst);
+                std::thread::yield_now();
+                c.store(n + 1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }
+        for h in hilos {
+            h.join().unwrap();
+        }
+        assert_eq!(contador.load(std::sync::atomic::Ordering::SeqCst), 20);
+    }
+
+    /// Las comparaciones guardadas tienen su propio cerrojo y su propio esquema.
+    #[test]
+    fn s51_las_comparaciones_tienen_cerrojo_y_esquema_propios() {
+        let fuente = include_str!("benchmarks.rs");
+        for funcion in ["pub fn delete_comparison(", "pub fn delete_all_comparisons("] {
+            let inicio = fuente.find(funcion).unwrap();
+            let cuerpo = &fuente[inicio..(inicio + 1200).min(fuente.len())];
+            assert!(
+                cuerpo.contains("CERROJO_COMPARACIONES.lock()"),
+                "{funcion} debe usar su cerrojo"
+            );
+        }
+        assert_eq!(COMPARISONS_SCHEMA_VERSION, 1);
+        assert_eq!(BENCHMARKS_SCHEMA_VERSION, 1);
+    }
+
+    // ── Cierre de 5.1: concurrencia, durabilidad y copias ──
+
+    /// 1. Concurrencia **real**: 40 hilos leyendo, añadiendo y escribiendo el mismo
+    /// archivo en disco a la vez.
+    ///
+    /// Comprobar que existe un `Mutex` no demuestra nada: un cerrojo mal colocado dentro
+    /// del hilo (por ejemplo, cogido solo alrededor de la escritura y no alrededor del
+    /// ciclo completo leer-modificar-escribir) pasaría esa comprobación y aun así perdería
+    /// benchmarks, porque dos hilos leerían la misma lista y el segundo pisaría al primero.
+    /// Esta prueba ejercita el ciclo completo bajo el mismo cerrojo que usan las rutas
+    /// reales.
+    #[test]
+    fn s51_concurrencia_real_no_pierde_ni_duplica_benchmarks() {
+        let dir = tmp_dir("s51-concurrencia");
+        let path = dir.join("benchmarks.json");
+        fs::write(&path, historial_antiguo_json()).unwrap();
+        const HILOS: usize = 40;
+
+        let mut handles = Vec::new();
+        for i in 0..HILOS {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                // Mismo cerrojo que las rutas reales: todo el ciclo leer-modificar-escribir.
+                let _t = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+                let mut d = try_load_benchmarks_data_en(&path).expect("lectura");
+
+                let mut b = bench(1623730, "Palworld");
+                b.id = format!("conc-{}", i);
+                b.number = Some(i as u32 + 1);
+                d.benchmarks.push(b);
+                // El contador se incrementa en una sola entrada, como `save_benchmark`:
+                // después de 40 hilos debe valer exactamente 40 más el valor inicial.
+                let e = d.counters.entry("appid:1623730".to_string()).or_insert(0);
+                *e += 1;
+
+                let contenido =
+                    serde_json::to_string(&con_la_version(d.clone())).expect("serializar");
+                escribir_atomico(&path, &contenido).expect("escritura");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_data = leer_bench(&path).unwrap().unwrap();
+        let de_palworld: Vec<&Benchmark> = final_data
+            .benchmarks
+            .iter()
+            .filter(|b| b.game_name == "Palworld")
+            .collect();
+
+        // Los 40 nuevos + el antiguo que ya estaba. Ni uno menos: eso sería una escritura
+        // perdida por leer una versión obsoleta.
+        assert_eq!(
+            de_palworld.len(),
+            HILOS + 1,
+            "se perdieron benchmarks: el ciclo leer-modificar-escribir no está serializado"
+        );
+        assert_eq!(
+            final_data.counters.get("appid:1623730"),
+            Some(&(HILOS as u32 + 1)),
+            "el contador no es el esperado: hubo lecturas obsoletas"
+        );
+
+        // Ningún identificador repetido (lo que produciría dos «Prueba 5» iguales).
+        let mut ids: Vec<&str> = final_data.benchmarks.iter().map(|b| b.id.as_str()).collect();
+        ids.sort();
+        let antes = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), antes, "hay identificadores duplicados");
+
+        // Los números de prueba también son únicos entre los que se repartieron.
+        let mut numeros: Vec<u32> = final_data
+            .benchmarks
+            .iter()
+            .filter_map(|b| b.number)
+            .collect();
+        numeros.sort();
+        let antes = numeros.len();
+        numeros.dedup();
+        assert_eq!(numeros.len(), antes, "hay números de prueba duplicados");
+
+        // Y el archivo sigue siendo legible: ninguna escritura lo dejó a medias.
+        assert!(leer_bench(&path).unwrap().is_some());
+    }
+
+    /// 2. La escritura atómica sincroniza el directorio padre tras el `rename`.
+    ///
+    /// Sin `fsync` del directorio, el rename puede no estar en disco cuando se corta la
+    /// corriente: el archivo nuevo existe pero la entrada del directorio apunta al viejo.
+    /// No hay forma portable de *observar* el `fsync` en un test, así que se comprueba que
+    /// la ruta se llama y que la escritura produce el resultado correcto.
+    #[cfg(unix)]
+    #[test]
+    fn s51_escribir_atomico_sincroniza_el_directorio() {
+        let fuente = include_str!("benchmarks.rs");
+        let inicio = fuente.find("fn escribir_atomico(").unwrap();
+        let cuerpo = &fuente[inicio..(inicio + 900).min(fuente.len())];
+        assert!(cuerpo.contains("sync_dir(path)"), "falta el fsync del directorio");
+        assert!(cuerpo.contains("sync_all"), "el contenido debe sincronizarse antes del rename");
+
+        let inicio = fuente.find("fn sync_dir(").unwrap();
+        let cuerpo = &fuente[inicio..(inicio + 400).min(fuente.len())];
+        assert!(cuerpo.contains("File::open(dir)"), "abre el directorio");
+        assert!(cuerpo.contains("sync_all"), "lo sincroniza");
+
+        // Y escribir en un directorio recién creado funciona igual (no depende de que el
+        // padre ya existiera en caché).
+        let dir = tmp_dir("s51-syncdir");
+        let path = dir.join("sub").join("benchmarks.json");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        escribir_atomico(&path, "contenido").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "contenido");
+    }
+
+    /// 3. Una copia de un archivo dañado **no pisa** una copia anterior distinta.
+    #[test]
+    fn s51_la_copia_de_un_archivo_danado_no_pisa_la_anterior() {
+        let dir = tmp_dir("s51-copias");
+        let path = dir.join("benchmarks.json");
+
+        let primera = copiar_danado(&path, "corrupt", "primera version rota").unwrap();
+        assert!(primera.to_string_lossy().ends_with("benchmarks.json.corrupt.bak"));
+
+        // Mismo contenido otra vez (la UI reintenta en bucle): no se duplica.
+        let otra = copiar_danado(&path, "corrupt", "primera version rota").unwrap();
+        assert_eq!(otra, primera, "no debe acumular copias idénticas");
+
+        // Contenido distinto: se guarda aparte, sin tocar la primera.
+        let segunda = copiar_danado(&path, "corrupt", "segunda version rota").unwrap();
+        assert_ne!(segunda, primera);
+        assert_eq!(fs::read_to_string(&primera).unwrap(), "primera version rota");
+        assert_eq!(fs::read_to_string(&segunda).unwrap(), "segunda version rota");
+
+        // Con muchas copias distintas se rota, no se crece sin límite.
+        for i in 0..10 {
+            copiar_danado(&path, "corrupt", &format!("version {}", i));
+        }
+        let cuantas = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt.bak"))
+            .count();
+        assert!(cuantas <= 5, "se acumularon {} copias", cuantas);
+    }
+
+    /// 4. Thoriapp es de instancia única, así que el cerrojo de proceso basta.
+    ///
+    /// No se añadió `fs2` a propósito. Antes de apoyarse en eso hay que confirmar que la
+    /// app **no** puede correr dos veces: si pudiera, dos procesos con cerrojos separados
+    /// se pisarían el archivo igual que sin cerrojo.
+    #[test]
+    fn s51_la_app_declara_una_unica_instancia() {
+        let config = include_str!("../tauri.conf.json");
+        assert!(
+            !config.contains("single-instance") || config.contains("\"single-instance\""),
+            "revisar la configuración de instancia única"
+        );
+
+        // Lo que de verdad lo garantiza está en Rust: el arranque se niega a continuar si
+        // ya hay otra instancia.
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("fn tomar_cerrojo_de_instancia"),
+            "no hay protección de instancia única en main.rs; el Mutex de proceso no \
+             protegería el archivo si la app corre dos veces"
+        );
+        // Y que se ejerza de verdad al arrancar, no que solo exista la función.
+        assert!(
+            main.contains("let Some(_cerrojo) = tomar_cerrojo_de_instancia()"),
+            "el cerrojo de instancia se declara pero main() no lo toma"
+        );
+        // Se toma antes que nada: si se tomara después de arrancar la UI, la segunda
+        // ventana ya habría abierto los archivos.
+        let cuerpo_main = &main[main.find("fn main()").unwrap()..];
+        assert!(
+            cuerpo_main.find("tomar_cerrojo_de_instancia()")
+                < cuerpo_main.find("tauri::Builder::default()"),
+            "el cerrojo debe tomarse antes de arrancar la interfaz"
+        );
+    }
+
+    /// 5. Las pruebas en vivo no tocan los archivos del usuario.
+    ///
+    /// Los tests de esta subfase leen y escriben con `escribir_atomico(ruta, ...)` sobre
+    /// rutas de `tmp_dir`, nunca con las funciones que resuelven `~/.config/thoriapp`.
+    /// Se comprueba que ningún test de integridad usa `get_benchmarks_file`.
+    #[test]
+    fn s51_las_pruebas_de_integridad_no_usan_las_rutas_reales() {
+        let fuente = include_str!("benchmarks.rs");
+        let inicio = fuente.find("mod tests {").unwrap();
+        let tests = &fuente[inicio..];
+
+        // `historial_antiguo_json` es un literal en memoria; el resto debe ir por `tmp_dir`.
+        for funcion in [
+            "fn s51_archivo_inexistente_es_lista_vacia_no_error",
+            "fn s51_guardar_conserva_historial_y_contadores",
+            "fn s51_concurrencia_real_no_pierde_ni_duplica_benchmarks",
+            "fn s51_la_copia_de_un_archivo_danado_no_pisa_la_anterior",
+        ] {
+            let i = tests.find(funcion).unwrap_or_else(|| panic!("falta {funcion}"));
+            let cuerpo = &tests[i..(i + 2500).min(tests.len())];
+            assert!(
+                !cuerpo.contains("get_benchmarks_file()"),
+                "{funcion} usaría la ruta real del usuario"
+            );
+            assert!(cuerpo.contains("tmp_dir("), "{funcion} debe usar un directorio temporal");
+        }
+    }
+
+    // ==================== Subfase 5.2: instantáneas completas ====================
+
+    /// Contexto típico: el juego abierto es el de la prueba y hay perfil cargado.
+    fn contexto_de(appid: u32) -> ContextoDeCaptura {
+        ContextoDeCaptura {
+            appid_real: Some(appid),
+            comando_confirmado: Some("mangohud %command%".to_string()),
+            revision_motor: Some(7),
+            opciones_steam: Some("mangohud %command%".to_string()),
+            perfil_id: Some("perfil-1".to_string()),
+            perfil_nombre: Some("Rendimiento".to_string()),
+            cambios_sin_guardar: Some(false),
+            modo_proton: Some(false),
+            corresponde_al_juego: true,
+        }
+    }
+
+    fn snapshot_de(appid: u32, ctx: &ContextoDeCaptura) -> SnapshotConfig {
+        snapshot_con_numero(appid, 3, ctx)
+    }
+
+    fn snapshot_con_numero(appid: u32, numero: u32, ctx: &ContextoDeCaptura) -> SnapshotConfig {
+        let mut b = bench(appid, "Palworld");
+        b.number = Some(numero);
+        b.timestamp = "2026-11-24 19:20:05".to_string();
+        construir_snapshot(&b, ctx, None, "2026-11-24 19:25:00")
+    }
+
+    /// 1 y 5. Un benchmark antiguo sin `snapshot` se sigue leyendo, y la ausencia es
+    /// distinguible de una instantánea vacía.
+    #[test]
+    fn s52_benchmark_antiguo_sin_snapshot_se_lee_y_queda_sin_el() {
+        let json = r#"{"benchmarks":[{"id":"b1","profile_id":"p","game_name":"Palworld",
+            "appid":1623730,"timestamp":"2024-01-01 10:00:00","duration_seconds":60.0,
+            "avg_fps":60.0,"fps_1_percent_low":50.0,"fps_0_1_percent_low":40.0,"max_fps":70.0,
+            "min_fps":30.0,"frame_time_avg":16.6,"frame_time_1_percent_high":20.0,
+            "total_frames":600,"notes":null}],"counters":{}}"#;
+
+        let d: BenchmarksData = serde_json::from_str(json).expect("los antiguos deben cargar");
+        assert_eq!(d.benchmarks.len(), 1, "no se pierde ningún benchmark antiguo");
+        assert!(
+            d.benchmarks[0].snapshot.is_none(),
+            "sin instantánea: None, no una instantánea inventada"
+        );
+        // El campo nuevo no rompe la serialización de ida y vuelta.
+        let ida = serde_json::to_string(&d).unwrap();
+        let vuelta: BenchmarksData = serde_json::from_str(&ida).unwrap();
+        assert!(vuelta.benchmarks[0].snapshot.is_none());
+    }
+
+    /// 2. Benchmark nuevo con instantánea completa: todos los bloques rellenos.
+    #[test]
+    fn s52_snapshot_completo_tiene_identidad_configuracion_y_entorno() {
+        let snap = snapshot_de(1623730, &contexto_de(1623730));
+
+        assert_eq!(snap.version, SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(snap.identidad.appid_real, Some(1623730));
+        assert_eq!(snap.identidad.numero_prueba, Some(3));
+        assert_eq!(snap.identidad.fecha, "2026-11-24 19:20:05");
+        assert_eq!(
+            snap.configuracion.comando_confirmado.as_ref().unwrap().valor,
+            "mangohud %command%"
+        );
+        assert_eq!(snap.configuracion.revision_motor, Some(7));
+        assert_eq!(snap.configuracion.perfil_id.as_deref(), Some("perfil-1"));
+        assert_eq!(
+            snap.configuracion.perfil_nombre.as_ref().unwrap().valor,
+            "Rendimiento"
+        );
+        // El comando viene del motor, no de un ajuste reconstruido.
+        assert_eq!(
+            snap.configuracion.comando_confirmado.as_ref().unwrap().procedencia,
+            Procedencia::MotorRust
+        );
+        assert_eq!(
+            snap.configuracion.opciones_steam.as_ref().unwrap().procedencia,
+            Procedencia::LeidoDeSteam
+        );
+        assert!(snap.posterior_a_la_grabacion, "se captura al guardar");
+    }
+
+    /// 3. Campos opcionales ausentes: la instantánea se construye igual y los huecos son
+    /// `None`, no cadenas vacías ni ceros.
+    #[test]
+    fn s52_campos_opcionales_ausentes_quedan_en_none() {
+        let ctx = ContextoDeCaptura {
+            corresponde_al_juego: true,
+            ..Default::default()
+        };
+        let snap = snapshot_de(1623730, &ctx);
+
+        assert!(snap.configuracion.comando_confirmado.is_none());
+        assert!(snap.configuracion.opciones_steam.is_none());
+        assert!(snap.configuracion.perfil_id.is_none());
+        assert!(snap.configuracion.perfil_nombre.is_none());
+        assert!(snap.configuracion.modo_proton.is_none());
+        assert!(snap.configuracion.cambios_sin_guardar.is_none());
+        // El AppID sí está: lo aporta el propio benchmark.
+        assert_eq!(snap.identidad.appid_real, Some(1623730));
+    }
+
+    /// 4. Comando complejo: se conserva literal, con comillas, espacios y orden.
+    #[test]
+    fn s52_el_comando_se_conserva_literal_no_se_normaliza() {
+        let complejo = r#"PROTON_FSR4_UPGRADE=1 DXVK_HUD=fps  gamemoderun  MANGOHUD_CONFIG=read_cfg "mangohud --dlsym" --  %command%  -dx11   --ruta="/home/u/Mis Juegos/x"#;
+        let ctx = ContextoDeCaptura {
+            comando_confirmado: Some(complejo.to_string()),
+            ..contexto_de(1623730)
+        };
+        let snap = snapshot_de(1623730, &ctx);
+
+        assert_eq!(
+            snap.configuracion.comando_confirmado.as_ref().unwrap().valor,
+            complejo,
+            "espacios dobles, comillas y orden deben sobrevivir tal cual"
+        );
+    }
+
+    /// 5, 6 y 7. Renombrar, actualizar o borrar un perfil no cambia la instantánea.
+    #[test]
+    fn s52_la_instantanea_no_depende_del_perfil_actual() {
+        let ctx = contexto_de(1623730);
+        let snap = snapshot_de(1623730, &ctx);
+        let nombre_original = snap.configuracion.perfil_nombre.clone().unwrap().valor.clone();
+        let comando_original = snap
+            .configuracion
+            .comando_confirmado
+            .clone()
+            .unwrap()
+            .valor
+            .clone();
+
+        // «Renombrar» y «actualizar» el perfil es solo cambiar el contexto que se usaría en
+        // una prueba NUEVA: una instantánea ya construida es un valor aparte.
+        let mut ctx2 = contexto_de(1623730);
+        ctx2.perfil_nombre = Some("Nombre nuevo".to_string());
+        ctx2.comando_confirmado = Some("otro comando %command%".to_string());
+
+        assert_eq!(
+            snap.configuracion.perfil_nombre.clone().unwrap().valor,
+            nombre_original,
+            "el nombre histórico no cambia al renombrar el perfil"
+        );
+        assert_eq!(
+            snap.configuracion.comando_confirmado.clone().unwrap().valor,
+            comando_original,
+            "el comando histórico no cambia al actualizar el perfil"
+        );
+
+        // Serializar y volver a leer (lo que pasa al reiniciar) tampoco lo cambia.
+        let json = serde_json::to_string(&snap).unwrap();
+        let leido: SnapshotConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(leido, snap, "la instantánea sobrevive a guardar y releer");
+    }
+
+    /// 8. Perfil cargado con cambios sin guardar: se registra el hecho.
+    #[test]
+    fn s52_registra_cambios_sin_guardar() {
+        let ctx = ContextoDeCaptura {
+            cambios_sin_guardar: Some(true),
+            ..contexto_de(1623730)
+        };
+        let snap = snapshot_de(1623730, &ctx);
+        assert_eq!(snap.configuracion.cambios_sin_guardar, Some(true));
+    }
+
+    /// 9. Benchmark sin perfil cargado: no se inventa uno.
+    #[test]
+    fn s52_sin_perfil_cargado_queda_sin_perfil() {
+        let ctx = ContextoDeCaptura {
+            perfil_id: None,
+            perfil_nombre: None,
+            ..contexto_de(1623730)
+        };
+        let snap = snapshot_de(1623730, &ctx);
+        assert!(snap.configuracion.perfil_id.is_none());
+        assert!(snap.configuracion.perfil_nombre.is_none());
+    }
+
+    /// 10. Proton configurado ≠ Proton verificado.
+    #[test]
+    fn s52_proton_configurado_no_se_presenta_como_ejecutado() {
+        let ctx = ContextoDeCaptura {
+            modo_proton: Some(true),
+            ..contexto_de(1623730)
+        };
+        let snap = snapshot_de(1623730, &ctx);
+
+        assert_eq!(
+            snap.configuracion.modo_proton.as_ref().unwrap().valor,
+            true
+        );
+        assert_eq!(
+            snap.configuracion.modo_proton.as_ref().unwrap().procedencia,
+            Procedencia::ConfiguradoEnThoriapp,
+            "es lo configurado, no lo ejecutado"
+        );
+        assert!(
+            snap.configuracion.ejecucion_verificada.is_none(),
+            "configurar Proton no demuestra que el proceso lo usara"
+        );
+        // Y la versión de Proton tampoco se presume.
+        assert!(snap.entorno.proton_seleccionado.is_none());
+    }
+
+    /// 11 y 12. Cambio de juego durante la captura, o CSV de otro juego: la configuración se
+    /// registra como desconocida en vez de atribuirse al juego equivocado.
+    #[test]
+    fn s52_configuracion_de_otro_juego_no_se_atribuye() {
+        let ctx = ContextoDeCaptura {
+            corresponde_al_juego: false,
+            // Aunque lleguen datos, no deben usarse: es la protección contra mezclar.
+            ..contexto_de(1623730)
+        };
+        let snap = snapshot_de(251570, &ctx);
+
+        assert!(snap.configuracion.comando_confirmado.is_none());
+        assert!(snap.configuracion.perfil_id.is_none());
+        assert!(snap.configuracion.perfil_nombre.is_none());
+        assert!(snap.configuracion.modo_proton.is_none());
+        assert!(snap.configuracion.revision_motor.is_none());
+        assert!(snap.configuracion.cambios_sin_guardar.is_none());
+        // La identidad sí es la del benchmark, no la del juego abierto.
+        assert_eq!(snap.identidad.appid_real, Some(251570));
+
+        // Las opciones de Steam no dependen del juego abierto: se leen para el AppID de la
+        // grabación, así que sí se conservan.
+        assert_eq!(
+            snap.configuracion.opciones_steam.as_ref().unwrap().valor,
+            "mangohud %command%"
+        );
+    }
+
+    /// 13. Una operación IPC pendiente se manifiesta como «sin contexto»: la vista no manda
+    /// contexto y la instantánea no mezcla datos de una revisión no confirmada.
+    #[test]
+    fn s52_sin_contexto_no_se_inventa_la_configuracion() {
+        let mut b = bench(1623730, "Palworld");
+        b.number = Some(1);
+        let snap = construir_snapshot(&b, &ContextoDeCaptura::default(), None, "2026-11-24 20:00:00");
+
+        assert!(snap.configuracion.comando_confirmado.is_none());
+        assert!(snap.configuracion.revision_motor.is_none());
+        // Pero la instantánea existe: el hueco es visible, no la ausencia del bloque.
+        assert_eq!(snap.version, SNAPSHOT_SCHEMA_VERSION);
+    }
+
+    /// 17. Sin BuildID ni hardware disponible: `None`, nunca ceros ni cadenas vacías.
+    #[test]
+    fn s52_hardware_o_buildid_ausentes_quedan_en_none() {
+        // AppID 0 = no hay juego instalado que consultar: build_id debe ser None.
+        assert_eq!(crate::steam::build_id(0).unwrap(), None);
+        // Un AppID que no está instalado: tampoco hay dato, y no es un error.
+        assert_eq!(crate::steam::build_id(999999999).unwrap(), None);
+
+        let e = leer_entorno(999999999, "2026-11-24 19:25:00");
+        assert!(e.build_id.is_none(), "sin appmanifest no hay BuildID");
+        // El driver y Proton no se detectan todavía: desconocidos, no inventados.
+        assert!(e.driver.is_none());
+        assert!(e.proton_seleccionado.is_none());
+        // Lo que sí se detecta lleva su procedencia y su fecha de captura.
+        if let Some(gpu) = &e.gpu {
+            assert_eq!(gpu.procedencia, Procedencia::DetectadoEnSistema);
+            assert!(!gpu.valor.trim().is_empty());
+            assert_eq!(gpu.capturado_en.as_deref(), Some("2026-11-24 19:25:00"));
+        }
+    }
+
+    /// 18. Ningún dato histórico desconocido se completa con datos actuales.
+    ///
+    /// Es la regla más importante de la subfase: una instantánea antigua que dice «no
+    /// consta» no puede rellenarse al leerla con el hardware de hoy.
+    #[test]
+    fn s52_no_se_rellenan_huecos_con_datos_actuales() {
+        let fuente = include_str!("benchmarks.rs");
+
+        // No existe ninguna función que «complete» o «reconstruya» instantáneas.
+        let seccion = &fuente[..fuente.find("mod tests {").unwrap()];
+        assert!(
+            !seccion.contains("fn reconstruir_snapshot"),
+            "no debe existir una reconstrucción de instantáneas"
+        );
+        assert!(
+            !seccion.contains("fn completar_snapshot"),
+            "no debe existir un relleno de instantáneas"
+        );
+
+        // Y `construir_snapshot` solo se llama al guardar, no al leer.
+        let llamadas = seccion.matches("construir_snapshot(").count();
+        assert_eq!(llamadas, 2, "una es la definición y otra el guardado; ninguna al leer");
+
+        // Un archivo con instantánea se devuelve tal cual, con sus huecos.
+        let mut b = bench(1623730, "Palworld");
+        b.snapshot = Some(snapshot_de(
+            1623730,
+            &ContextoDeCaptura {
+                corresponde_al_juego: true,
+                ..Default::default()
+            },
+        ));
+        let json = serde_json::to_string(&b).unwrap();
+        let leido: Benchmark = serde_json::from_str(&json).unwrap();
+        assert!(
+            leido.snapshot.as_ref().unwrap().configuracion.comando_confirmado.is_none(),
+            "el hueco sigue siendo hueco después de guardar y releer"
+        );
+    }
+
+    /// 16. Los números de prueba y los contadores no cambian al añadir la instantánea.
+    #[test]
+    fn s52_se_conservan_numeros_y_contadores() {
+        let mut d = vacio();
+        guardar(&mut d, 1623730, "Palworld", 1);
+        guardar(&mut d, 1623730, "Palworld", 1);
+        guardar(&mut d, 251570, "7 Days to Die", 1);
+
+        let numeros: Vec<Option<u32>> = d
+            .benchmarks
+            .iter()
+            .filter(|b| b.game_name == "Palworld")
+            .map(|b| b.number)
+            .collect();
+        assert_eq!(numeros, vec![Some(1), Some(2)]);
+        assert_eq!(d.counters.get("appid:1623730"), Some(&2));
+        assert_eq!(d.counters.get("appid:251570"), Some(&1));
+    }
+
+    /// 14. Las comparaciones guardadas conservan las instantáneas embebidas de los dos
+    /// benchmarks, aunque los originales se borren.
+    #[test]
+    fn s52_la_comparacion_guardada_conserva_las_dos_instantaneas() {
+        let mut a = bench(1623730, "Palworld");
+        a.snapshot = Some(snapshot_de(1623730, &contexto_de(1623730)));
+        let mut b = a.clone();
+        b.id = "segundo".to_string();
+        b.number = Some(4);
+        // La segunda prueba se hizo con otro comando y otro perfil.
+        let mut ctx2 = contexto_de(1623730);
+        ctx2.comando_confirmado = Some("game-performance %command%".to_string());
+        ctx2.perfil_nombre = Some("Otro perfil".to_string());
+        b.snapshot = Some(snapshot_con_numero(1623730, 4, &ctx2));
+
+        let comparacion = BenchmarkComparison {
+            baseline: a.clone(),
+            test: b.clone(),
+            fps_change_percent: 5.0,
+            fps_1_percent_change_percent: 1.0,
+            fps_0_1_percent_change_percent: 1.0,
+            frame_time_change_percent: -5.0,
+            conclusion: "Mejora".to_string(),
+            noise_percent: Some(3.0),
+            within_noise: false,
+            comandos_iguales: Some(false),
+        };
+
+        let guardada = SavedComparison {
+            id: "cmp_1".to_string(),
+            saved_at: "2026-11-24 21:00:00".to_string(),
+            game_name: "Palworld".to_string(),
+            before_fps: 60.0,
+            after_fps: 63.0,
+            fps_change_percent: 5.0,
+            comparison: comparacion,
+        };
+
+        let json = serde_json::to_string(&guardada).unwrap();
+        let leida: SavedComparison = serde_json::from_str(&json).unwrap();
+
+        assert!(leida.comparison.baseline.snapshot.is_some());
+        assert!(leida.comparison.test.snapshot.is_some());
+        assert_eq!(
+            leida.comparison.test.snapshot.as_ref().unwrap().identidad.numero_prueba,
+            Some(4)
+        );
+        assert_ne!(
+            leida.comparison.baseline.snapshot,
+            leida.comparison.test.snapshot,
+            "cada prueba conserva SU instantánea, no la de la otra"
+        );
+    }
+
+    /// 15. Persistencia: la instantánea sobrevive a escribir en disco y releer.
+    #[test]
+    fn s52_la_instantanea_persiste_en_disco() {
+        let dir = tmp_dir("s52-persistencia");
+        let path = dir.join("benchmarks.json");
+
+        let mut b = bench(1623730, "Palworld");
+        b.number = Some(1);
+        b.snapshot = Some(snapshot_con_numero(1623730, 1, &contexto_de(1623730)));
+        let d = BenchmarksData {
+            version: Some(BENCHMARKS_SCHEMA_VERSION),
+            benchmarks: vec![b],
+            counters: HashMap::new(),
+        };
+        escribir_atomico(&path, &serde_json::to_string(&d).unwrap()).unwrap();
+
+        let releido = leer_bench(&path).unwrap().unwrap();
+        let snap = releido.benchmarks[0].snapshot.as_ref().unwrap();
+        assert_eq!(snap.configuracion.perfil_id.as_deref(), Some("perfil-1"));
+        assert_eq!(
+            snap.configuracion.comando_confirmado.as_ref().unwrap().valor,
+            "mangohud %command%"
+        );
+        assert_eq!(snap.identidad.numero_prueba, Some(1));
+    }
+
+    /// 15. Con una grabación real, la instantánea deja el hardware **de la grabación**
+    ///     separado del detectado ahora, cada uno con su procedencia y su fecha.
+    #[test]
+    fn s52_el_hardware_de_la_grabacion_va_aparte_del_actual() {
+        let mut b = bench(0, "Palworld");
+        b.number = Some(1);
+        b.log_path = fixture_log(LOG2);
+        // El CSV no trae AppID: el contexto es el que declara ser del juego de la prueba.
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+
+        let grabacion = snap.hardware_grabacion.as_ref().expect("hardware de la grabación");
+        let cpu = grabacion.cpu.as_ref().expect("cpu");
+        assert_eq!(cpu.valor, "AMD Ryzen 5 5600X 6-Core Processor");
+        assert_eq!(cpu.procedencia, Procedencia::RegistradoPorMangohud);
+        assert_eq!(cpu.capturado_en.as_deref(), Some("2026-11-24 19:25:00"));
+
+        // `os` es el runtime de Steam, y se guarda sin reinterpretarlo como distro.
+        assert_eq!(grabacion.os.as_ref().unwrap().valor, "Steam Runtime 4");
+
+        // `driver` vacío en el CSV: no se deduce de «RADV NAVI23».
+        assert_eq!(grabacion.driver, None);
+
+        // El equipo actual es un bloque **independiente**. Puede coincidir o no: este
+        // entorno tiene el mismo modelo de CPU que la grabación, pero la procedencia y la
+        // fecha son otras, y ninguno rellena los huecos del otro.
+        let actual = &snap.entorno;
+        if let Some(cpu_actual) = &actual.cpu {
+            assert_eq!(cpu_actual.procedencia, Procedencia::DetectadoEnSistema);
+            assert_eq!(
+                cpu_actual.capturado_en.as_deref(),
+                Some("2026-11-24 19:25:00")
+            );
+            assert_ne!(
+                cpu_actual.procedencia, cpu.procedencia,
+                "las dos fuentes se distinguen aunque el valor coincida"
+            );
+        }
+        // El bloque de la grabación no depende de que el entorno detecte algo.
+        assert!(snap.hardware_grabacion.is_some());
+    }
+
+    /// 15b. Si el CSV no trae un campo, el bloque de la grabación lo deja en `None`
+    ///      aunque el equipo actual lo detecte: no se rellena el hueco.
+    #[test]
+    fn s52_el_hueco_del_csv_no_lo_rellena_el_equipo_actual() {
+        let mut b = bench(0, "Palworld");
+        b.log_path = fixture_log(LOG2);
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+        let grabacion = snap.hardware_grabacion.expect("hardware");
+
+        // `driver` viene vacío en el CSV.
+        assert_eq!(grabacion.driver, None);
+        // El kernel sí viene: no es un hueco.
+        assert!(grabacion.kernel.is_some());
+        // Y que un campo esté en `None` en la grabación no copia el valor del entorno.
+        if snap.entorno.driver.is_some() {
+            panic!("el entorno tampoco debe inventar un driver");
+        }
+    }
+
+    /// 16. RAM: se guarda el crudo en KiB y la conversión en GiB, sin confundir unidades.
+    #[test]
+    fn s52_la_ram_conserva_kib_y_gib() {
+        let mut b = bench(0, "Palworld");
+        b.log_path = fixture_log(LOG2);
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+        let hw = snap.hardware_grabacion.unwrap();
+
+        assert_eq!(hw.ram_kib.unwrap().valor, 32_777_068);
+        let gib = hw.ram_gib.unwrap().valor;
+        assert!((gib - 31.26).abs() < 0.01, "{gib}");
+    }
+
+    /// 17. El resumen de MangoHud se guarda aparte y NO sustituye a las métricas de
+    ///     Thoriapp, que siguen siendo las calculadas por el motor.
+    #[test]
+    fn s52_el_resumen_no_pisa_las_metricas_de_thoriapp() {
+        let mut b = bench(0, "Palworld");
+        b.avg_fps = 66.23;
+        b.fps_1_percent_low = 41.31;
+        b.log_path = fixture_log(LOG2);
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+
+        let resumen = snap.resumen_mangohud.as_ref().expect("resumen");
+        assert_eq!(resumen.valor("Average FPS"), Some(60.4));
+        assert_eq!(resumen.valor("1% Min FPS"), Some(26.4349));
+
+        // Las del benchmark siguen intactas: la instantánea no las toca.
+        assert_eq!(b.avg_fps, 66.23);
+        assert_eq!(b.fps_1_percent_low, 41.31);
+        // Y son distintas de las de MangoHud, cada una con su metodología.
+        assert_ne!(Some(b.avg_fps), resumen.valor("Average FPS"));
+    }
+
+    /// El camino completo: analizar un CSV real y guardarlo con `save_benchmark` deja en
+    /// disco los dos bloques de hardware y el resumen, cada uno con su procedencia. Es lo
+    /// que ocurre al pulsar «Analizar y guardar» en la aplicación.
+    #[test]
+    fn s52_analizar_y_guardar_conserva_hardware_y_resumen() {
+        // El CSV real tiene 60 s de muestras; se analiza como en la interfaz.
+        let ruta = fixture_log(LOG2);
+        let analisis = analyze_mangohud_log(&ruta, 10.0).expect("análisis");
+
+        let mut b = bench(0, "Palworld");
+        b.log_path = ruta.clone();
+        b.avg_fps = analisis.avg_fps;
+        b.fps_1_percent_low = analisis.fps_1_percent_low;
+
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+
+        // Bloque histórico: lo que MangoHud escribió en el CSV.
+        let hw = snap.hardware_grabacion.as_ref().expect("hardware del CSV");
+        assert_eq!(hw.gpu.as_ref().unwrap().valor, "AMD Radeon RX 6600 (RADV NAVI23)");
+        assert_eq!(hw.gpu.as_ref().unwrap().procedencia, Procedencia::RegistradoPorMangohud);
+        assert_eq!(hw.ram_kib.as_ref().unwrap().valor, 32_777_068);
+        // El driver no viene en el CSV: queda vacío, no se deduce «RADV».
+        assert!(hw.driver.is_none());
+        // `os` es el runtime de Steam, y así se guarda: no se convierte en distribución.
+        assert_eq!(hw.os.as_ref().unwrap().valor, "Steam Runtime 4");
+
+        // Bloque actual: detectado aquí, con su propia procedencia.
+        assert_eq!(
+            snap.entorno.gpu.as_ref().unwrap().procedencia,
+            Procedencia::DetectadoEnSistema
+        );
+
+        // Resumen original: se conserva entero, sin recalcular.
+        let resumen = snap.resumen_mangohud.as_ref().expect("resumen del CSV");
+        assert_eq!(resumen.valor("Average FPS"), Some(60.4));
+
+        // Y las métricas de Thoriapp siguen siendo las suyas.
+        assert!((b.avg_fps - analisis.avg_fps).abs() < 1e-9);
+        assert_ne!(Some(b.avg_fps.round()), resumen.valor("Average FPS").map(|v| v.round()));
+    }
+
+    /// 18. Un CSV sin cabecera de sistema no produce hardware de la grabación, aunque el
+    ///     equipo actual sí se detecte. No se rellena el hueco.
+    #[test]
+    fn s52_un_csv_sin_metadatos_deja_el_hardware_desconocido() {
+        let dir = tmp_dir("s52-sin-metadatos");
+        let csv = dir.join("Juego_2026-01-01_10-00-00.csv");
+        let mut contenido = String::from("fps,frametime,elapsed\n");
+        for i in 0..700 {
+            contenido.push_str(&format!("60.0,16.6,{}\n", i * 100_000_000u64));
+        }
+        fs::write(&csv, contenido).unwrap();
+
+        let mut b = bench(0, "Juego");
+        b.log_path = csv.to_string_lossy().to_string();
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+
+        assert_eq!(snap.hardware_grabacion, None);
+        assert_eq!(snap.resumen_mangohud, None);
+    }
+
+    /// Ayudante: sesión observada de Palworld con la configuración capturada al abrirla.
+    fn armar_sesion_de_prueba(posterior_al_arranque: bool) -> crate::sessions::SesionDeEjecucion {
+        use crate::sessions::{
+            ConfiguracionCapturada, IdentidadDeSesion, OrigenAppId, SesionDeEjecucion, TipoDeSesion,
+        };
+        SesionDeEjecucion {
+            id: "sesion-1".to_string(),
+            tipo: TipoDeSesion::Observada,
+            identidad: IdentidadDeSesion {
+                appid: Some(1623730),
+                origen: OrigenAppId::EntornoDelProceso,
+                ..Default::default()
+            },
+            proceso: None,
+            evidencia_proceso: Default::default(),
+            configuracion_inicial: Some(ConfiguracionCapturada {
+                comando_confirmado: Some(ConProcedencia {
+                    valor: "mangohud %command%".to_string(),
+                    procedencia: Procedencia::MotorRust,
+                    capturado_en: None,
+                }),
+                perfil: None,
+                revision_motor: Some(7),
+                opciones_steam: None,
+                capturado_en: "2026-11-24 18:00:04".to_string(),
+                posterior_al_arranque,
+            }),
+            grabaciones: Vec::new(),
+            abierta_en: "2026-11-24 18:00:04".to_string(),
+            ultima_observacion: None,
+            cerrada_en: None,
+            pasadas_sin_verlo: 0,
+            // Sesión de prueba sin ejecución que seguir.
+            vivos_de_la_ejecucion: Vec::new(),
+            arbol_del_lanzamiento: Vec::new(),
+        }
+    }
+
+    /// Regresión del fallo real de la prueba 15: la cabecera de la configuración decía
+    /// «AppID desconocido» mientras la sesión asociada tenía el AppID 1623730. La causa era
+    /// que la instantánea se construía **antes** de asociar la sesión, así que nunca podía
+    /// consultarla. Con la sesión delante, el AppID observado se usa y se acredita.
+    #[test]
+    fn el_appid_observado_en_la_sesion_llega_a_la_instantanea_con_su_procedencia() {
+        let b = bench(0, "Palworld");
+        let ctx = ContextoDeCaptura {
+            appid_real: None,
+            corresponde_al_juego: false,
+            ..Default::default()
+        };
+        let sesion = armar_sesion_de_prueba(true);
+        let snap = construir_snapshot(&b, &ctx, Some(&sesion), "2026-11-24 19:25:00");
+
+        assert_eq!(
+            snap.identidad.appid_real,
+            Some(1623730),
+            "el AppID observado en el proceso debe llegar a la instantánea"
+        );
+        assert_eq!(
+            snap.identidad.appid_procedencia,
+            Procedencia::ObservadoEnProceso,
+            "y decir que se observó en el proceso, no que se supuso"
+        );
+    }
+
+    /// Un AppID sin evidencia directa (inferido por nombre, o candidato sin resolver) **no**
+    /// se escribe como certeza: la cabecera debe seguir diciendo que no se conoce.
+    #[test]
+    fn un_appid_inferido_no_se_presenta_como_observado() {
+        use crate::sessions::{IdentidadDeSesion, OrigenAppId};
+        let b = bench(0, "Palworld");
+        let mut sesion = armar_sesion_de_prueba(true);
+        sesion.identidad = IdentidadDeSesion {
+            appid: Some(1623730),
+            origen: OrigenAppId::InferidoPorNombre,
+            ..Default::default()
+        };
+        let snap = construir_snapshot(
+            &b,
+            &ContextoDeCaptura::default(),
+            Some(&sesion),
+            "2026-11-24 19:25:00",
+        );
+        assert_eq!(snap.identidad.appid_real, None);
+        assert_eq!(snap.identidad.appid_procedencia, Procedencia::Desconocido);
+    }
+
+    /// La instantánea pertenece a la prueba: si el benchmark trae su propio AppID y la sesión
+    /// dice otro, no se sobreescribe el del benchmark con el de la sesión.
+    #[test]
+    fn la_sesion_no_pisa_el_appid_de_la_propia_prueba() {
+        let b = bench(1623730, "Palworld");
+        let mut sesion = armar_sesion_de_prueba(true);
+        sesion.identidad.appid = Some(999999);
+        let snap = construir_snapshot(
+            &b,
+            &ContextoDeCaptura::default(),
+            Some(&sesion),
+            "2026-11-24 19:25:00",
+        );
+        assert_eq!(snap.identidad.appid_real, Some(1623730));
+    }
+
+    /// Regresión del problema 3: la configuración se declaraba «posterior a la grabación»
+    /// aunque la sesión hubiera guardado una foto tomada **durante** la observación, antes
+    /// de que el juego arrancara.
+    #[test]
+    fn una_configuracion_capturada_al_arrancar_no_es_posterior_a_la_grabacion() {
+        let b = bench(0, "Palworld");
+        let sesion = armar_sesion_de_prueba(false);
+        let snap = construir_snapshot(
+            &b,
+            &ContextoDeCaptura::default(),
+            Some(&sesion),
+            "2026-11-24 19:25:00",
+        );
+        assert!(
+            !snap.posterior_a_la_grabacion,
+            "la foto existía antes de analizar el CSV: no es posterior a la grabación"
+        );
+    }
+
+    /// Sin sesión no se puede afirmar nada: se mantiene «posterior», que es lo honesto.
+    #[test]
+    fn sin_sesion_la_captura_sigue_siendo_posterior() {
+        let b = bench(0, "Palworld");
+        let snap = construir_snapshot(
+            &b,
+            &ContextoDeCaptura::default(),
+            None,
+            "2026-11-24 19:25:00",
+        );
+        assert!(snap.posterior_a_la_grabacion);
+    }
+
+    /// 19. La instantánea de una grabación real no se atribuye a otro juego.
+    #[test]
+    fn s52_la_grabacion_real_no_supone_que_es_el_juego_abierto() {
+        let mut b = bench(0, "Palworld");
+        b.log_path = fixture_log(LOG2);
+        // Contexto de OTRO juego.
+        let mut ctx = contexto_de(251570);
+        ctx.corresponde_al_juego = false;
+        let snap = construir_snapshot(&b, &ctx, None, "2026-11-24 19:25:00");
+
+        // El AppID del contexto no se cuela.
+        assert_eq!(snap.identidad.appid_real, None);
+        // El hardware de la grabación sí es de la grabación: lo registró MangoHud.
+        assert!(snap.hardware_grabacion.is_some());
+    }
+
+    /// 20. Valores cero de sensores: se leen del CSV como cero, sin convertirlos en
+    ///     «ausente» ni al revés. La interpretación es cosa de 5.4.
+    #[test]
+    fn s52_los_ceros_del_csv_no_se_reescriben() {
+        let contenido = fixture_csv(LOG2);
+        let serie = crate::mangohud::Serie::desde_csv(&contenido).unwrap();
+        assert!(serie.valores("cpu_power").iter().all(|v| *v == 0.0));
+        assert!(serie.valores("gpu_power").iter().all(|v| *v > 0.0));
+    }
+
+    /// 21. Un resumen de otra grabación no se asocia a este CSV.
+    #[test]
+    fn s52_solo_se_asocia_el_resumen_de_su_csv() {
+        let mut b = bench(0, "Palworld");
+        b.log_path = fixture_log(LOG1);
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+        let resumen = snap.resumen_mangohud.unwrap();
+
+        // Es el del log1 (74.5), no el del log2 (60.4).
+        assert_eq!(resumen.valor("Average FPS"), Some(74.5));
+        // Se guarda cada par nombre/valor tal cual, sin renombrar columnas.
+        assert!(resumen
+            .valores
+            .iter()
+            .any(|(n, v)| n == "Average FPS" && *v == 74.5));
+    }
+
+    /// 22. Un CSV inexistente no rompe: se guarda sin datos de grabación.
+    #[test]
+    fn s52_un_csv_inexistente_no_rompe_la_instantanea() {
+        let mut b = bench(0, "Fantasma");
+        b.log_path = "/tmp/no-existe-en-absoluto-123.csv".to_string();
+        let snap = construir_snapshot(&b, &contexto_de(1623730), None, "2026-11-24 19:25:00");
+        assert!(snap.hardware_grabacion.is_none());
+        assert!(snap.resumen_mangohud.is_none());
+    }
+
+    /// 23. Un benchmark antiguo se lee igual y, al no tener instantánea, no se le inventa
+    ///     hardware histórico ni resumen.
+    #[test]
+    fn s52_los_antiguos_no_se_completan_con_datos_nuevos() {
+        let json = r#"{"benchmarks":[{"id":"b1","profile_id":"p","game_name":"Palworld",
+            "appid":1623730,"timestamp":"2024-01-01 10:00:00","duration_seconds":60.0,
+            "avg_fps":60.0,"fps_1_percent_low":50.0,"fps_0_1_percent_low":40.0,"max_fps":70.0,
+            "min_fps":30.0,"frame_time_avg":16.6,"frame_time_1_percent_high":20.0,
+            "total_frames":3600,"launch_command":"","origen_comando":"desconocido"}]}"#;
+        let d: BenchmarksData = serde_json::from_str(json).unwrap();
+        let b = &d.benchmarks[0];
+        assert!(b.snapshot.is_none());
+        let n: Option<u32> = b.number;
+        assert_eq!(n, None);
+    }
+
+    /// 24. Numeración e historial: el tope son 10 guardadas pero el número de prueba
+    ///     continúa subiendo.
+    #[test]
+    fn s52_la_numeracion_sigue_subiendo_con_el_tope_de_diez() {
+        let mut counters = HashMap::new();
+        counters.insert("appid:1623730".to_string(), 12u32);
+        let d = BenchmarksData {
+            version: Some(BENCHMARKS_SCHEMA_VERSION),
+            benchmarks: Vec::new(),
+            counters,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let releido: BenchmarksData = serde_json::from_str(&json).unwrap();
+        assert_eq!(releido.counters.get("appid:1623730"), Some(&12));
+        assert_eq!(MAX_BENCHMARKS_PER_GAME, 10);
+    }
+}
+
+#[cfg(test)]
+mod pruebas_quinta_correccion {
+    use super::*;
+
+    fn bench(appid: u32, name: &str) -> Benchmark {
+        Benchmark {
+            id: format!("{}-{}", appid, name),
+            profile_id: String::new(),
+            game_name: name.to_string(),
+            appid,
+            timestamp: String::new(),
+            duration_seconds: 60.0,
+            avg_fps: 60.0,
+            fps_1_percent_low: 30.0,
+            fps_0_1_percent_low: 20.0,
+            max_fps: 120.0,
+            min_fps: 10.0,
+            frame_time_avg: 16.6,
+            frame_time_1_percent_high: 33.0,
+            total_frames: 3600,
+            notes: None,
+            launch_command: "%command%".to_string(),
+            origen_comando: OrigenComando::Instantanea,
+            steam_command: None,
+            number: None,
+            snapshot: None,
+            sesion_id: None,
+            spikes_per_min: None,
+            pct_over_33ms: None,
+            jitter_ms: None,
+            worst_frame_ms: None,
+            warmup_seconds: None,
+            noise_percent: None,
+            shader_stutter: None,
+            log_path: String::new(),
+            sample_count: None,
+            muestras_temporales: None,
+        }
+    }
+
+    /// Dos grabaciones de juegos distintos no son comparables.
+    #[test]
+    fn s53c5_dos_appid_distintos_no_son_el_mismo_juego() {
+        let a = bench(4623570, "Deskrawl");
+        let b = bench(1623730, "Palworld");
+        assert!(!mismo_juego(&a, &b));
+        // Aunque el nombre se haya escrito igual, dos AppID distintos son dos juegos.
+        let a2 = bench(4623570, "Juego");
+        let b2 = bench(1623730, "Juego");
+        assert!(!mismo_juego(&a2, &b2), "el AppID manda sobre el nombre");
+    }
+
+    /// El mismo AppID con el nombre escrito de otra forma sigue siendo el mismo juego.
+    #[test]
+    fn s53c5_el_appid_manda_sobre_el_nombre() {
+        let a = bench(4623570, "Deskrawl");
+        let b = bench(4623570, "Deskrawl (Proton)");
+        assert!(mismo_juego(&a, &b));
+    }
+
+    /// Sin AppID en ninguna, se compara el nombre normalizado.
+    #[test]
+    fn s53c5_sin_appid_manda_el_nombre_normalizado() {
+        let a = bench(0, "7 Days to Die");
+        let b = bench(0, "7 days to die");
+        assert!(mismo_juego(&a, &b));
+        let c = bench(0, "Palworld");
+        assert!(!mismo_juego(&a, &c));
+    }
+
+    /// Si una tiene AppID y la otra no, no se puede afirmar que sean el mismo juego.
+    #[test]
+    fn s53c5_sin_evidencia_suficiente_no_se_afirma_que_sean_el_mismo() {
+        let con = bench(4623570, "Deskrawl");
+        let sin = bench(0, "Deskrawl");
+        assert!(
+            !mismo_juego(&con, &sin),
+            "afirmar que son el mismo juego sin evidencia es peor que no compararlas"
+        );
+    }
+
+    /// El historial y la comparación usan la misma regla: no puede haber discrepancia.
+    #[test]
+    fn s53c5_historial_y_comparacion_usan_la_misma_regla() {
+        let referencia = bench(4623570, "Deskrawl");
+        let misma = bench(4623570, "Deskrawl");
+        let otra = bench(1623730, "Palworld");
+        assert_eq!(
+            juego_coincide(&misma, referencia.appid, &referencia.game_name),
+            mismo_juego(&referencia, &misma)
+        );
+        assert_eq!(
+            juego_coincide(&otra, referencia.appid, &referencia.game_name),
+            mismo_juego(&referencia, &otra)
+        );
+    }
+
+    /// Comparar dos juegos distintos se rechaza en el backend, no se devuelve con un aviso.
+    #[test]
+    fn s53c5_comparar_juegos_distintos_se_rechaza() {
+        let r = comparar_identidades(4623570, "Deskrawl", 1623730, "Palworld");
+        assert!(r.is_err(), "la comparación debe rechazarse, no calcularse");
+        assert!(r.unwrap_err().contains("juegos distintos"));
+    }
+
+    /// Atajo que aplica las mismas comprobaciones que `compare_benchmarks` antes de calcular,
+    /// para poder probar el rechazo sin tocar el disco.
+    fn comparar_identidades(
+        appid_a: u32,
+        nombre_a: &str,
+        appid_b: u32,
+        nombre_b: &str,
+    ) -> Result<(), String> {
+        let a = bench(appid_a, nombre_a);
+        let b = bench(appid_b, nombre_b);
+        if !mismo_juego(&a, &b) {
+            return Err(format!(
+                "No se pueden comparar grabaciones de juegos distintos: «{}» (AppID {}) y «{}» (AppID {}).",
+                a.game_name,
+                texto_appid(a.appid),
+                b.game_name,
+                texto_appid(b.appid)
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Conjunto mixto de la subfase 5.3 (complemento final).
+///
+/// Reproduce el caso que el usuario vio en sus capturas: siete pruebas en «Historial de este
+/// juego», dos de Deskrawl y cinco de Palworld. Aquí se añaden además una antigua **sin AppID**
+/// y otra con **identidad contradictoria**, que son las que pueden colarse.
+///
+/// Todas estas pruebas son puras: no tocan disco ni ficheros reales.
+#[cfg(test)]
+mod pruebas_aislamiento {
+    use super::*;
+
+    pub(super) fn b(id: &str, appid: u32, nombre: &str, ts: &str) -> Benchmark {
+        Benchmark {
+            id: id.to_string(),
+            profile_id: String::new(),
+            game_name: nombre.to_string(),
+            appid,
+            timestamp: ts.to_string(),
+            duration_seconds: 60.0,
+            avg_fps: 60.0,
+            fps_1_percent_low: 30.0,
+            fps_0_1_percent_low: 20.0,
+            max_fps: 120.0,
+            min_fps: 10.0,
+            frame_time_avg: 16.6,
+            frame_time_1_percent_high: 33.0,
+            total_frames: 3600,
+            notes: None,
+            launch_command: "%command%".to_string(),
+            origen_comando: OrigenComando::Instantanea,
+            steam_command: None,
+            number: None,
+            snapshot: None,
+            sesion_id: None,
+            spikes_per_min: None,
+            pct_over_33ms: None,
+            jitter_ms: None,
+            worst_frame_ms: None,
+            warmup_seconds: None,
+            noise_percent: None,
+            shader_stutter: None,
+            log_path: String::new(),
+            sample_count: None,
+            muestras_temporales: None,
+        }
+    }
+
+    const DESKRAWL: u32 = 4623570;
+    const PALWORLD: u32 = 1623730;
+
+    /// El conjunto tal cual lo describe el usuario, más los dos casos peligrosos.
+    fn historial_mixto() -> Vec<Benchmark> {
+        vec![
+            b("d1", DESKRAWL, "Deskrawl", "2026-11-25 10:00:00"),
+            b("d2", DESKRAWL, "Deskrawl", "2026-11-25 11:00:00"),
+            b("p1", PALWORLD, "Palworld", "2026-11-24 20:00:00"),
+            b("p2", PALWORLD, "Palworld", "2026-11-24 21:00:00"),
+            b("p3", PALWORLD, "Palworld", "2026-11-24 22:00:00"),
+            b("p4", PALWORLD, "Palworld", "2026-11-24 23:00:00"),
+            b("p5", PALWORLD, "Palworld", "2026-11-25 09:00:00"),
+            // Antigua: MangoHud no escribe el AppID en el CSV, así que se quedó en 0. El
+            // nombre sí quedó limpio (`-Win64-Shipping` se quita al importar), por eso
+            // coincide por nombre con el Palworld comercial.
+            b("p0", 0, "Palworld", "2026-11-23 19:00:00"),
+            // Contradictoria: el nombre dice Palworld pero el AppID dice Deskrawl. No se
+            // resuelve sola hacia ninguno de los dos: manda el AppID, que es lo observado.
+            b("x1", DESKRAWL, "Palworld", "2026-11-25 12:00:00"),
+        ]
+    }
+
+    fn ids_del_historial(lista: &[Benchmark], appid: u32, nombre: &str) -> Vec<String> {
+        lista
+            .iter()
+            .filter(|x| juego_coincide(x, appid, nombre))
+            .map(|x| x.id.clone())
+            .collect()
+    }
+
+    /// 1. El historial de cada juego enseña **solo** sus pruebas.
+    #[test]
+    fn s53f_el_historial_no_mezcla_juegos() {
+        let h = historial_mixto();
+
+        let deskrawl = ids_del_historial(&h, DESKRAWL, "Deskrawl");
+        // d1, d2 y x1 (que declara AppID de Deskrawl, aunque se llame Palworld).
+        assert_eq!(deskrawl, vec!["d1", "d2", "x1"]);
+
+        let palworld = ids_del_historial(&h, PALWORLD, "Palworld");
+        // p1..p5 y la antigua sin AppID. **No** x1, aunque se llame Palworld: su AppID dice
+        // otra cosa y una coincidencia de nombre no puede pasar por encima de eso.
+        assert_eq!(palworld, vec!["p1", "p2", "p3", "p4", "p5", "p0"]);
+        assert!(!palworld.contains(&"x1".to_string()));
+    }
+
+    /// 2. La prueba antigua sin AppID se conserva, y con su certeza correspondiente.
+    #[test]
+    fn s53f_la_prueba_sin_appid_se_conserva_y_no_se_le_inventa_identidad() {
+        let h = historial_mixto();
+        let antigua = h.iter().find(|x| x.id == "p0").unwrap();
+        // Sigue teniendo AppID 0: no se le asigna uno deducido.
+        assert_eq!(antigua.appid, 0);
+        // Se encuentra por nombre, que es la única pista que hay…
+        assert!(ids_del_historial(&h, PALWORLD, "Palworld").contains(&"p0".to_string()));
+        // …pero no se afirma que sea el mismo juego que una prueba con AppID.
+        let con_appid = h.iter().find(|x| x.id == "p1").unwrap();
+        assert!(!mismo_juego(antigua, con_appid));
+    }
+
+    /// 3. Comparar pruebas de juegos distintos se rechaza, no se avisa y se devuelve igual.
+    #[test]
+    fn s53f_las_comparaciones_directas_no_mezclan_juegos() {
+        let h = historial_mixto();
+        let deskrawl = h.iter().find(|x| x.id == "d1").unwrap();
+        let palworld = h.iter().find(|x| x.id == "p1").unwrap();
+        let antigua = h.iter().find(|x| x.id == "p0").unwrap();
+
+        assert!(!mismo_juego(deskrawl, palworld));
+        assert!(!mismo_juego(deskrawl, antigua));
+        // Dos del mismo juego sí, que es lo que hace útil la comprobación.
+        assert!(mismo_juego(deskrawl, h.iter().find(|x| x.id == "d2").unwrap()));
+    }
+
+    /// 4. La comparación **automática** (la de las dos últimas) usa la misma regla.
+    #[test]
+    fn s53f_la_comparacion_automatica_no_mezcla_juegos() {
+        let h = historial_mixto();
+        let del_juego = ids_del_historial(&h, PALWORLD, "Palworld");
+        // Se toman las dos últimas **de ese juego**, nunca las dos últimas del archivo.
+        let mut suyas: Vec<&Benchmark> =
+            h.iter().filter(|x| del_juego.contains(&x.id)).collect();
+        suyas.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        let ultimas = &suyas[suyas.len() - 2..];
+        assert!(mismo_juego(ultimas[0], ultimas[1]));
+        assert!(ultimas.iter().all(|x| x.appid == PALWORLD || x.appid == 0));
+        // Las dos últimas del archivo entero serían x1 (Deskrawl) y d2: el contador no debe
+        // sacarlas de ahí.
+        assert!(!ultimas.iter().any(|x| x.id == "x1"));
+    }
+
+    /// 5. Los contadores por juego no se mezclan.
+    #[test]
+    fn s53f_los_contadores_son_por_juego() {
+        let h = historial_mixto();
+        let mut claves: Vec<String> = h.iter().map(game_key).collect();
+        claves.sort();
+        claves.dedup();
+        // Cada juego con AppID tiene su propia clave: no comparten contador.
+        assert!(claves.contains(&format!("appid:{DESKRAWL}")));
+        assert!(claves.contains(&format!("appid:{PALWORLD}")));
+        // La antigua, al no tener AppID, cae en una clave por nombre. Se documenta aquí
+        // porque es una limitación conocida: no se une al grupo de su AppID.
+        assert!(claves.contains(&format!("name:{}", norm_game_name("Palworld"))));
+    }
+
+    /// 6. Borrar el historial de Deskrawl no toca ninguna prueba de Palworld.
+    #[test]
+    fn s53f_borrar_un_juego_no_toca_las_pruebas_de_otro() {
+        let mut data = BenchmarksData {
+            version: None,
+            benchmarks: historial_mixto(),
+            counters: HashMap::new(),
+        };
+        let antes = data.benchmarks.len();
+        let ids = ids_a_borrar_del_juego(&data, DESKRAWL, "Deskrawl");
+        assert_eq!(ids, vec!["d1", "d2", "x1"]);
+        data.benchmarks.retain(|x| !ids.iter().any(|i| i == &x.id));
+
+        let quedan: Vec<String> = data.benchmarks.iter().map(|x| x.id.clone()).collect();
+        // Las cinco de Palworld y su antigua siguen todas.
+        for id in ["p1", "p2", "p3", "p4", "p5", "p0"] {
+            assert!(quedan.contains(&id.to_string()), "se borró {id} sin tocar");
+        }
+        assert_eq!(antes - data.benchmarks.len(), 3);
+        // Y no se ha borrado nada de más.
+        assert_eq!(quedan.len(), 6);
+    }
+
+    /// 7. El borrado por juego y la lectura usan **el mismo** alcance.
+    ///
+    /// Si divergieran, el botón borraría pruebas que la ventana no estaba enseñando (o al
+    /// revés). Se comprueba sobre los dos juegos y con las dos formas de llamar.
+    #[test]
+    fn s53f_borrar_borra_exactamente_lo_que_se_ve() {
+        for (appid, nombre) in [(DESKRAWL, "Deskrawl"), (PALWORLD, "Palworld")] {
+            let data = BenchmarksData {
+                version: None,
+                benchmarks: historial_mixto(),
+                counters: HashMap::new(),
+            };
+            let visto = ids_del_historial(&data.benchmarks, appid, nombre);
+            let a_borrar = ids_a_borrar_del_juego(&data, appid, nombre);
+            assert_eq!(visto, a_borrar, "el alcance de borrado no coincide con el de la vista");
+        }
+    }
+
+    /// 8. Una identidad contradictoria no se borra como si fuera de un juego concreto.
+    ///
+    /// `x1` se llama Palworld. Al pedir el historial de Palworld no aparece (manda su AppID),
+    /// pero **tampoco se borra** desde el historial de Deskrawl por su nombre. Se borra solo
+    /// cuando se borra Deskrawl, que es el juego que su AppID declara.
+    #[test]
+    fn s53f_una_identidad_contradictoria_no_se_borra_por_su_nombre() {
+        let data = BenchmarksData {
+            version: None,
+            benchmarks: historial_mixto(),
+            counters: HashMap::new(),
+        };
+        // Pedir el historial de Palworld no incluye x1…
+        let de_palworld = ids_del_historial(&data.benchmarks, PALWORLD, "Palworld");
+        assert!(!de_palworld.contains(&"x1".to_string()));
+        // …así que borrar «el historial de Palworld» tampoco se la lleva.
+        let a_borrar = ids_a_borrar_del_juego(&data, PALWORLD, "Palworld");
+        assert!(!a_borrar.contains(&"x1".to_string()));
+    }
+
+    /// 9. Las comparaciones guardadas que dependen de pruebas borradas se limpian.
+    ///
+    /// El fallo: `delete_benchmarks_for_game` borraba las pruebas y dejaba los informes
+    /// guardados, que siguen citando datos que ya no existen.
+    #[test]
+    fn s53f_la_purga_quita_solo_las_comparaciones_huerfanas() {
+        let h = historial_mixto();
+        let get = |id: &str| h.iter().find(|x| x.id == id).unwrap().clone();
+        let guardada = |id: &str, base: &str, test: &str| SavedComparison {
+            id: id.to_string(),
+            saved_at: String::new(),
+            game_name: String::new(),
+            before_fps: 0.0,
+            after_fps: 0.0,
+            fps_change_percent: 0.0,
+            comparison: BenchmarkComparison {
+                baseline: get(base),
+                test: get(test),
+                fps_change_percent: 0.0,
+                fps_1_percent_change_percent: 0.0,
+                fps_0_1_percent_change_percent: 0.0,
+                frame_time_change_percent: 0.0,
+                conclusion: String::new(),
+                noise_percent: None,
+                within_noise: false,
+                comandos_iguales: None,
+            },
+        };
+        // Una de Palworld (debe sobrevivir) y una de Deskrawl (debe caer).
+        let mut comps = vec![
+            guardada("c_pal", "p1", "p2"),
+            guardada("c_desk", "d1", "d2"),
+        ];
+        let ids_borrados = ids_a_borrar_del_juego(
+            &BenchmarksData {
+                version: None,
+                benchmarks: h.clone(),
+                counters: HashMap::new(),
+            },
+            DESKRAWL,
+            "Deskrawl",
+        );
+        comps.retain(|c| {
+            !ids_borrados
+                .iter()
+                .any(|i| i == &c.comparison.baseline.id || i == &c.comparison.test.id)
+        });
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].id, "c_pal");
+    }
+}
+
+/// Identidad del juego en la ventana «Pruebas del juego» (defecto real de la Prueba 4).
+///
+/// Datos auténticos del equipo del usuario: **todas** las grabaciones tienen `appid: 0`
+/// (MangoHud no escribe el AppID en el CSV) y la Biblioteca llama al juego por su nombre
+/// comercial, `Deskrawl: Idle ARPG`, mientras MangoHud escribe `Deskrawl`. La ficha decía
+/// «Todavía no hay pruebas de Deskrawl: Idle ARPG» teniendo cuatro.
+///
+/// Palworld funcionaba por casualidad: su nombre comercial no lleva subtítulo.
+#[cfg(test)]
+mod pruebas_identidad_por_nombre {
+    use super::*;
+
+    /// Historial real: 5 de Palworld y 4 de Deskrawl, todas con `appid: 0`.
+    fn historial_real() -> Vec<Benchmark> {
+        let mut v: Vec<Benchmark> = (11..=15)
+            .enumerate()
+            .map(|(i, n)| {
+                let mut x = pruebas_aislamiento::b(
+                    &format!("p{i}"),
+                    0,
+                    "Palworld",
+                    &format!("2026-11-24 20:{n}:00"),
+                );
+                x.number = Some(n);
+                x
+            })
+            .collect();
+        v.extend((1..=4).enumerate().map(|(i, n)| {
+            let mut x = pruebas_aislamiento::b(
+                &format!("d{i}"),
+                0,
+                "Deskrawl",
+                &format!("2026-11-25 18:3{n}:11"),
+            );
+            x.number = Some(n);
+            x
+        }));
+        v
+    }
+
+    fn cuantas(appid: u32, nombre: &str) -> usize {
+        historial_real()
+            .into_iter()
+            .filter(|x| juego_coincide(x, appid, nombre))
+            .count()
+    }
+
+    /// El caso exacto que falló: mismo AppID (0) y nombres que difieren en el subtítulo.
+    #[test]
+    fn s53g_el_subtitulo_del_nombre_comercial_no_oculta_el_historial() {
+        assert_eq!(
+            cuantas(0, "Deskrawl: Idle ARPG"),
+            4,
+            "la ficha con el nombre comercial debe encontrar las 4 pruebas de Deskrawl"
+        );
+        // Y el otro lado sigue intacto.
+        assert_eq!(cuantas(0, "Palworld"), 5);
+    }
+
+    /// El nombre del binario también sirve: es lo que escribe MangoHud.
+    #[test]
+    fn s53g_el_nombre_sin_subtitulo_encuentra_lo_mismo() {
+        assert_eq!(cuantas(0, "Deskrawl"), 4);
+        assert_eq!(cuantas(0, "Deskrawl.exe"), 4);
+    }
+
+    /// Un subtítulo es un corte en separador, no un prefijo cualquiera. Si se aceptara
+    /// cualquier prefijo, «Slime» arrastraría el historial de «Slime Rancher».
+    #[test]
+    fn s53g_un_prefijo_compartido_no_es_el_mismo_juego() {
+        let mut slime = pruebas_aislamiento::b("s1", 0, "Slime", "2026-11-20 10:00:00");
+        slime.number = Some(1);
+        let mut rancher = pruebas_aislamiento::b("s2", 0, "Slime Rancher", "2026-11-20 11:00:00");
+        rancher.number = Some(1);
+
+        assert!(
+            !juego_coincide(&slime, 0, "Slime Rancher"),
+            "«Slime» no es «Slime Rancher»: el corte cae en un espacio, no en un separador"
+        );
+        assert!(!juego_coincide(&rancher, 0, "Slime"));
+        // El de una letra tampoco puede comerse todo.
+        assert!(!es_el_mismo_con_subtitulo("p", "palworld: x"));
+    }
+
+    /// Un AppID válido manda siempre; el subtítulo solo actúa cuando no hay AppID.
+    #[test]
+    fn s53g_con_appid_valido_no_se_mira_el_nombre() {
+        let b = pruebas_aislamiento::b("x", 4623570, "Deskrawl: Idle ARPG", "2026-11-25 18:30:13");
+        // Mismo AppID con nombres distintos: sí es el mismo juego.
+        assert!(juego_coincide(&b, 4623570, "Deskrawl"));
+        // AppID distinto: no, aunque el nombre se parezca.
+        assert!(!juego_coincide(&b, 1623730, "Deskrawl: Idle ARPG"));
+    }
+
+    /// La comparación es estricta: un AppID de un lado y ninguno del otro sigue sin
+    /// compararse, tampoco por subtítulo. Ahí se produciría un número inventado.
+    #[test]
+    fn s53g_el_subtitulo_no_relaja_la_comparacion_estricta() {
+        let con = pruebas_aislamiento::b("a", 4623570, "Deskrawl", "2026-11-25 18:30:13");
+        let sin = pruebas_aislamiento::b("b", 0, "Deskrawl: Idle ARPG", "2026-11-25 18:30:13");
+        assert!(
+            !mismo_juego(&con, &sin),
+            "evidencia incompleta: no se comparan aunque el nombre encaje"
+        );
+        // Y dos sin AppID con subtítulo distinto sí son el mismo juego.
+        let otro = pruebas_aislamiento::b("c", 0, "Deskrawl", "2026-11-25 19:00:00");
+        assert!(mismo_juego(&sin, &otro));
+    }
+
+    /// El borrado desde la ficha usa la misma regla, así que borra exactamente las cuatro
+    /// de Deskrawl y deja intactas las cinco de Palworld.
+    #[test]
+    fn s53g_borrar_desde_la_ficha_alcance_exacto() {
+        let data = BenchmarksData {
+            version: None,
+            benchmarks: historial_real(),
+            counters: HashMap::new(),
+        };
+        let ids = ids_a_borrar_del_juego(&data, 0, "Deskrawl: Idle ARPG");
+        assert_eq!(ids.len(), 4, "solo las 4 de Deskrawl");
+
+        let sobran: Vec<&Benchmark> = data
+            .benchmarks
+            .iter()
+            .filter(|x| !ids.contains(&x.id))
+            .collect();
+        assert_eq!(sobran.len(), 5);
+        assert!(
+            sobran.iter().all(|x| x.game_name == "Palworld"),
+            "ninguna prueba de Palworld puede caer"
+        );
     }
 }

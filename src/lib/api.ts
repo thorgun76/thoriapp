@@ -4,6 +4,12 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AnalisisComando,
+  CambioAjuste,
+  EstadoAjuste,
+  ResultadoSerializacion,
+} from './motorComando';
+import type {
   OpcionesSteam,
   AntiCheatReport,
   Benchmark,
@@ -23,6 +29,8 @@ import type {
   RequirementsReport,
   RuntimeEnv,
   ShaderCache,
+  SesionDeEjecucion,
+  EstadoObservador,
 } from './types';
 
 /** Forma cruda que devuelve el backend `scan_external_launchers`. */
@@ -49,10 +57,20 @@ export interface SaveProfilePayload {
   selectedCommunityRecs: number[];
   selectedEngineRecs: number[];
   forceProton: boolean;
-  expertMode: boolean;
+  /**
+   * Campo heredado. Los modos experto/guiado ya no existen en la interfaz, pero el
+   * `Profile` persistido lo tiene y no se migra: se sigue enviando (siempre `false`) para
+   * que el formato guardado no cambie y los perfiles antiguos no se rompan al re-guardar.
+   */
+  expertMode?: boolean;
   manualCommand: string | null;
   useManualCommand: boolean;
   notes: string | null;
+  /**
+   * Comando **exacto** que el motor confirmó. Es lo que se guarda y lo que se enseña al
+   * leer el perfil; sin él, la pestaña Perfiles lo reconstruía y podía salir otro texto.
+   */
+  command: string | null;
 }
 
 /** Una comparación guardada, tal como la devuelve Rust. */
@@ -68,6 +86,25 @@ export interface SavedComparison {
 
 /** update_profile reutiliza los mismos campos salvo appid y gameName, que no cambia. */
 /** Argumentos de save_benchmark: el propio benchmark ya calculado + metadatos. */
+/**
+ * Lo que la interfaz sabe de la configuración **de un juego concreto** al guardar.
+ *
+ * Todos los campos son opcionales: si el juego abierto no es el de la grabación se manda
+ * `correspondeAlJuego: false` y el backend registra la configuración como desconocida.
+ */
+export interface ContextoDeCaptura {
+  /** AppID real del juego de la prueba (no el `0` de las reglas genéricas). */
+  appidReal?: number | null;
+  comandoConfirmado?: string | null;
+  revisionMotor?: number | null;
+  opcionesSteam?: string | null;
+  perfilId?: string | null;
+  perfilNombre?: string | null;
+  cambiosSinGuardar?: boolean | null;
+  modoProton?: boolean | null;
+  correspondeAlJuego: boolean;
+}
+
 export interface SaveBenchmarkPayload {
   benchmark: Benchmark;
   profileId: string;
@@ -88,6 +125,13 @@ export interface SaveBenchmarkPayload {
    * opciones»). Nunca se inventa.
    */
   steamCommand?: string | null;
+  /**
+   * Contexto de captura para la instantánea histórica (subfase 5.2).
+   *
+   * Va vacío cuando el editor tenía abierto otro juego que el de la grabación: es
+   * preferible registrar la configuración como desconocida a atribuirle la de otro juego.
+   */
+  contexto?: ContextoDeCaptura | null;
   notes: string | null;
 }
 
@@ -100,6 +144,12 @@ export const api = {
   // ---------- Biblioteca ----------
   scanLibrary: () => invoke<Game[]>('scan_library'),
   scanExternalLaunchers: () => invoke<RawExternalGame[]>('scan_external_launchers'),
+  /**
+   * Igual que `scanExternalLaunchers`, pero además invalida la caché de catálogo del
+   * motor de procesos: un juego recién instalado se reconoce sin esperar la
+   * revalidación periódica. Es el botón de actualizar biblioteca.
+   */
+  refreshLibrary: () => invoke<RawExternalGame[]>('refresh_library'),
   /** Juegos de Heronite ocultos por estar desinstalados (`is_installed: false`). */
   heroniteUninstalledCount: () => invoke<number>('heronite_uninstalled_count'),
   searchStore: (term: string) => invoke<Game[]>('search_store', { term }),
@@ -113,6 +163,85 @@ export const api = {
    */
   steamLaunchOptions: (appid: number) =>
     invoke<OpcionesSteam | null>('steam_launch_options', { appid }),
+
+  /**
+   * Analiza un comando y devuelve su modelo estructurado.
+   *
+   * El resultado se reenvía tal cual a `serializeLaunchCommand` y
+   * `launchCommandStates`: el análisis y el comando del que sale tienen que ser los
+   * mismos, o los índices apuntarían a otro sitio.
+   */
+  analyzeLaunchCommand: (command: string, appid: number, extras: string[] = []) =>
+    invoke<AnalisisComando>('analyze_launch_command', { command, appid, extras }),
+
+  /**
+   * Estado de cada ajuste del catálogo respecto al comando (activo, inactivo, parcial,
+   * ambiguo, conflicto). La UI lo pinta sin deducir nada.
+   */
+  launchCommandStates: (analisis: AnalisisComando, appid: number, extras: string[] = []) =>
+    invoke<EstadoAjuste[]>('launch_command_states', { analisis, appid, extras }),
+
+  /**
+   * Catálogo efectivo con el índice real de cada ajuste.
+   *
+   * La interfaz **no** puede calcular estos índices por su cuenta: el catálogo del motor
+   * salta las recomendaciones que ya están en el perfil del juego, y ese salto no se ve
+   * desde aquí. Calcular `params.length + indexOf` desplazaba todos los índices posteriores
+   * y el toggle escribía en otro ajuste.
+   */
+  catalogoDeAjustes: (appid: number, extras: string[] = []) =>
+    invoke<{ indice: number; valor: string }[]>('catalogo_de_ajustes', { appid, extras }),
+
+  /**
+   * Traduce «quiero estos ajustes» a los cambios concretos, decidiendo en Rust qué sobra
+   * y qué falta. TS no implementa esta comparación.
+   */
+  launchCommandChanges: (
+    analisis: AnalisisComando,
+    appid: number,
+    activos: number[],
+    extras: string[] = [],
+  ) => invoke<CambioAjuste[]>('launch_command_changes', { analisis, appid, activos, extras }),
+
+  /** Quita un argumento conservado, si el motor considera seguro hacerlo. */
+  launchCommandRemoveSegment: (analisis: AnalisisComando, indice: number) =>
+    invoke<ResultadoSerializacion>('launch_command_remove_segment', { analisis, indice }),
+
+  /**
+   * Aplica los cambios sobre el comando original.
+   *
+   * No lanza excepción cuando el motor no puede: devuelve `aplicado: false` con el motivo
+   * y el comando original intacto, para poder conservar el último estado bueno.
+   */
+  serializeLaunchCommand: (
+    analisis: AnalisisComando,
+    appid: number,
+    cambios: CambioAjuste[],
+    extras: string[] = [],
+  ) =>
+    invoke<ResultadoSerializacion>('serialize_launch_command', {
+      analisis,
+      appid,
+      cambios,
+      extras,
+    }),
+
+  /**
+   * Valida un comando para lanzar. Solo gramática y reglas soportadas por Thoriapp: no
+   * garantiza que el juego arranque.
+   */
+  validateLaunchCommand: (command: string) =>
+    invoke<null>('validate_launch_command', { command }),
+
+  /**
+   * Envoltorios conocidos por el sistema y por el catálogo.
+   *
+   * Rust es la única fuente de verdad desde la fase 2: el frontend pregunta en vez de
+   * mantener una copia que se pueda quedar corta (ese fue el bug de `prime-run`,
+   * `vkbasalt`, `obs-gamecapture`, `game-performance` y `scx_lavd`, que acababan DETRÁS de
+   * `%command%` como si fueran argumentos del juego).
+   */
+  knownWrappers: () => invoke<string[]>('known_wrappers'),
 
   /**
    * Igual que `steamLaunchOptions`, pero para una grabación.
@@ -196,10 +325,12 @@ export const api = {
       selectedCommunityRecs: p.selectedCommunityRecs,
       selectedEngineRecs: p.selectedEngineRecs,
       forceProton: p.forceProton,
-      expertMode: p.expertMode,
+      // Heredado: el formato persistido lo conserva y siempre va en `false`.
+      expertMode: p.expertMode ?? false,
       manualCommand: p.manualCommand,
       useManualCommand: p.useManualCommand,
       notes: p.notes,
+      command: p.command,
     }),
   updateProfile: (profileId: string, p: UpdateProfilePayload) =>
     invoke<Profile>('update_profile', {
@@ -209,10 +340,12 @@ export const api = {
       selectedCommunityRecs: p.selectedCommunityRecs,
       selectedEngineRecs: p.selectedEngineRecs,
       forceProton: p.forceProton,
-      expertMode: p.expertMode,
+      // Heredado: el formato persistido lo conserva y siempre va en `false`.
+      expertMode: p.expertMode ?? false,
       manualCommand: p.manualCommand,
       useManualCommand: p.useManualCommand,
       notes: p.notes,
+      command: p.command,
     }),
   deleteProfile: (profileId: string) => invoke<void>('delete_profile', { profileId }),
   reorderProfiles: (profileIds: string[]) => invoke<void>('reorder_profiles', { profileIds }),
@@ -256,6 +389,7 @@ export const api = {
       origenComando: p.origenComando ?? 'desconocido',
       steamCommand: p.steamCommand ?? null,
       notes: p.notes,
+      contexto: p.contexto ?? null,
     }),
   /**
    * Último comando registrado de verdad en una prueba de este juego.
@@ -340,6 +474,29 @@ export const api = {
   deleteComparison: (comparisonId: string) =>
     invoke<void>('delete_comparison', { comparisonId }),
   deleteAllComparisons: () => invoke<void>('delete_all_comparisons'),
+  // ---- Sesiones de ejecución (subfase 5.3) ----
+  /** Qué está haciendo el observador de procesos, y su coste medido. */
+  estadoObservador: () => invoke<EstadoObservador>('estado_observador'),
+  /** Activa o desactiva el observador. Apagado no se lee ni una vez `/proc`. */
+  configurarObservador: (activo: boolean) =>
+    invoke<boolean>('configurar_observador', { activo }),
+  listarSesiones: () => invoke<SesionDeEjecucion[]>('listar_sesiones'),
+  /** Sesión de una prueba guardada, si sigue existiendo. `null` es una respuesta válida. */
+  sesionDeBenchmark: (benchmarkId: string) =>
+    invoke<SesionDeEjecucion | null>('sesion_de_benchmark', { benchmarkId }),
+  /** Asigna a mano el juego de una sesión que no se pudo identificar. */
+  asignarJuegoASesion: (sesionId: string, appid: number, nombre: string) =>
+    invoke<void>('asignar_juego_a_sesion', { sesionId, appid, nombre }),
+  /** Qué juego mirar en `/proc`. No es evidencia de identidad. */
+  fijarPistaDeJuego: (nombre: string | null) =>
+    invoke<void>('fijar_pista_de_juego', { nombre }),
+  /** Guarda la configuración vigente para capturarla con su instante si hay juego vivo. */
+  fijarConfiguracionDeSesion: (cfg: {
+    comando: string | null;
+    procedencia: string | null;
+    perfil: string | null;
+    opcionesSteam: string | null;
+  }) => invoke<void>('fijar_configuracion_de_sesion', cfg),
 };
 
 export type Api = typeof api;

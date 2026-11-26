@@ -11,6 +11,8 @@ import type { SavedComparison } from '../hooks/useSavedComparisons';
  */
 
 const guardadas: SavedComparison[] = [];
+/** Error de lectura simulado (subfase 5.1). `null` = lectura correcta. */
+let errorLectura: string | null = null;
 
 vi.mock('../hooks/useSavedComparisons', () => ({
   useSavedComparisons: () => ({
@@ -18,6 +20,7 @@ vi.mock('../hooks/useSavedComparisons', () => ({
     loading: false,
     remove: vi.fn(),
     removeAll: vi.fn(),
+    error: errorLectura,
   }),
 }));
 
@@ -36,6 +39,7 @@ function filaDe(indice = 0) {
 afterEach(cleanup);
 beforeEach(() => {
   guardadas.length = 0;
+  errorLectura = null;
 });
 
 function bench(over: Partial<Benchmark> = {}): Benchmark {
@@ -221,5 +225,34 @@ describe('Mis pruebas: filas de la lista', () => {
     const fechas = screen.getAllByRole('button', { name: /FPS\./ }).map((el) => el.textContent ?? '');
     expect(fechas[0]).toContain('24/11/2026');
     expect(fechas[1]).toContain('23/11/2026');
+  });
+
+  // ── Subfase 5.1: un fallo de lectura no se disfraza de «no hay pruebas» ──
+
+  it('s51 avisa cuando no se pudo leer el archivo en vez de decir que no hay pruebas', () => {
+    errorLectura =
+      'Tus pruebas guardadas está dañado (expected value). No se ha modificado nada en disco.';
+    render(<DashboardView />);
+
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(screen.getByText(/No se pudieron leer tus pruebas guardadas/)).toBeTruthy();
+    // La pantalla vacía afirmaría lo contrario de lo que sabemos: que no hay ninguna.
+    expect(screen.queryByText(/No hay pruebas guardadas aún/)).toBeNull();
+  });
+
+  it('s51 el aviso dice dónde siguen los datos, para no asustar sin motivo', () => {
+    errorLectura = 'Tus pruebas guardadas está dañado.';
+    render(<DashboardView />);
+
+    const alerta = screen.getByRole('alert');
+    expect(alerta.textContent).toContain('saved_comparisons.json');
+    expect(alerta.textContent).toContain('no se han borrado');
+  });
+
+  it('s51 sin error sigue diciendo «no hay pruebas» cuando de verdad no hay', () => {
+    render(<DashboardView />);
+
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByText(/No hay pruebas guardadas aún/)).toBeTruthy();
   });
 });

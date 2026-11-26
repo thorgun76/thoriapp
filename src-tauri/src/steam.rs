@@ -1,10 +1,17 @@
 use serde::Serialize;
 use std::{env, fs, path::PathBuf};
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct LibGame {
     pub appid: u32,
     pub name: String,
+    /// Carpeta del juego dentro de `steamapps/common`, según el `appmanifest`.
+    ///
+    /// Es lo único que el `.acf` garantiza sobre el contenido del juego: el nombre de la
+    /// carpeta. **No** se deduce ni se lista qué ejecutables hay dentro, porque el
+    /// manifiesto no los trae y suponerlos inventaría identidad.
+    #[serde(default)]
+    pub install_dir: Option<String>,
 }
 
 fn steam_roots() -> Vec<PathBuf> {
@@ -25,7 +32,8 @@ fn vdf_value(line: &str, key: &str) -> Option<String> {
     }
 }
 
-pub fn scan_library() -> Vec<LibGame> {
+/// Carpetas `steamapps` de todas las bibliotecas de Steam instaladas.
+pub fn bibliotecas() -> Vec<PathBuf> {
     let mut libs: Vec<PathBuf> = vec![];
     for root in steam_roots() {
         if !root.join("steamapps").exists() {
@@ -42,9 +50,28 @@ pub fn scan_library() -> Vec<LibGame> {
     }
     libs.sort();
     libs.dedup();
+    libs
+}
 
+/// Catálogo reducido para resolver identidad de sesiones.
+///
+/// `install_dir` es la pista fuerte: la ruta del ejecutable
+/// (`.../steamapps/common/<dir>/...`) se cruza con este campo. Cuando el manifiesto no lo
+/// trae, queda `None` y se conserva la incertidumbre en vez de inventarlo.
+pub fn catalogo_para_identidad() -> Vec<crate::sessions::JuegoDeBiblioteca> {
+    scan_library()
+        .into_iter()
+        .map(|g| crate::sessions::JuegoDeBiblioteca {
+            appid: g.appid,
+            nombre: g.name,
+            installdir: g.install_dir,
+        })
+        .collect()
+}
+
+pub fn scan_library() -> Vec<LibGame> {
     let mut out: Vec<LibGame> = vec![];
-    for lib in libs {
+    for lib in bibliotecas() {
         let Ok(rd) = fs::read_dir(&lib) else { continue };
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
@@ -54,6 +81,7 @@ pub fn scan_library() -> Vec<LibGame> {
             let Ok(txt) = fs::read_to_string(e.path()) else { continue };
             let mut appid = None;
             let mut name = None;
+            let mut install_dir = None;
             for l in txt.lines() {
                 if appid.is_none() {
                     appid = vdf_value(l, "appid").and_then(|v| v.parse::<u32>().ok());
@@ -61,13 +89,20 @@ pub fn scan_library() -> Vec<LibGame> {
                 if name.is_none() {
                     name = vdf_value(l, "name");
                 }
+                if install_dir.is_none() {
+                    install_dir = vdf_value(l, "installdir");
+                }
             }
             if let (Some(appid), Some(name)) = (appid, name) {
                 let skip = name.starts_with("Proton")
                     || name.starts_with("Steam Linux Runtime")
                     || name.starts_with("Steamworks Common");
                 if !skip && !out.iter().any(|g| g.appid == appid) {
-                    out.push(LibGame { appid, name });
+                    out.push(LibGame {
+                        appid,
+                        name,
+                        install_dir,
+                    });
                 }
             }
         }
@@ -89,7 +124,7 @@ pub fn search_store(term: &str) -> Result<Vec<LibGame>, String> {
         .map(|a| {
             a.iter()
                 .filter(|i| i["type"] == "app")
-                .filter_map(|i| Some(LibGame { appid: i["id"].as_u64()? as u32, name: i["name"].as_str()?.to_string() }))
+                .filter_map(|i| Some(LibGame { appid: i["id"].as_u64()? as u32, name: i["name"].as_str()?.to_string(), install_dir: None }))
                 .collect()
         })
         .unwrap_or_default())
@@ -239,5 +274,46 @@ mod tests {
         let wrapped = format!("<strong>minimum:</strong>{body}");
         let parsed = crate::requirements::parse_pc_requirements(&wrapped);
         assert!(!parsed.iter().any(|r| r.text.contains("64-bit")));
+    }
+}
+
+/// `buildid` del `appmanifest_<appid>.acf`, que identifica la **versión instalada** del
+/// juego.
+///
+/// Sirve para saber si dos pruebas se hicieron con la misma versión: tras un parche, una
+/// mejora de rendimiento puede venir del juego y no del ajuste probado.
+///
+/// `Ok(None)` = el juego no está instalado en ninguna biblioteca (dato legítimo: puede
+/// probarse con un juego ya desinstalado). `Err` = hay un `appmanifest` pero no se pudo
+/// leer, que es distinto de «no existe».
+pub fn build_id(appid: u32) -> Result<Option<String>, String> {
+    if appid == 0 {
+        // 0 no es un AppID real: es el que llevan los CSV cuando MangoHud no lo escribe.
+        return Ok(None);
+    }
+    let nombre = format!("appmanifest_{}.acf", appid);
+    let mut encontrado = false;
+    for lib in bibliotecas() {
+        let ruta = lib.join(&nombre);
+        if !ruta.exists() {
+            continue;
+        }
+        encontrado = true;
+        let txt = match fs::read_to_string(&ruta) {
+            Ok(t) => t,
+            Err(e) => return Err(format!("no se pudo leer {}: {}", ruta.display(), e)),
+        };
+        for l in txt.lines() {
+            if let Some(v) = vdf_value(l, "buildid") {
+                return Ok(Some(v));
+            }
+        }
+    }
+    if encontrado {
+        // El archivo existe pero no trae `buildid`: Steam no lo ha rellenado (instalación
+        // recién empezada). No se inventa una versión.
+        Ok(None)
+    } else {
+        Ok(None)
     }
 }

@@ -5,6 +5,8 @@ import type { Benchmark, GroupComparison } from '../lib/types';
 const loadBenchmarksForGame = vi.fn();
 const deleteBenchmark = vi.fn();
 const deleteBenchmarksForGame = vi.fn();
+// Borrado global: se espía para comprobar que desde esta ventana **no** se usa nunca.
+const deleteAllBenchmarks = vi.fn();
 const compareBenchmarkGroups = vi.fn();
 
 vi.mock('../lib/api', () => ({
@@ -12,6 +14,7 @@ vi.mock('../lib/api', () => ({
     loadBenchmarksForGame: (...a: unknown[]) => loadBenchmarksForGame(...a),
     deleteBenchmark: (...a: unknown[]) => deleteBenchmark(...a),
     deleteBenchmarksForGame: (...a: unknown[]) => deleteBenchmarksForGame(...a),
+    deleteAllBenchmarks: (...a: unknown[]) => deleteAllBenchmarks(...a),
     compareBenchmarkGroups: (...a: unknown[]) => compareBenchmarkGroups(...a),
   },
 }));
@@ -254,5 +257,71 @@ describe('PruebasJuego (historial del juego abierto)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(deleteBenchmark).not.toHaveBeenCalled();
     expect(deleteBenchmarksForGame).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Nombre comercial con subtítulo (defecto real de la Prueba 4).
+ *
+ * La Biblioteca llama al juego «Deskrawl: Idle ARPG»; MangoHud escribe «Deskrawl» y deja
+ * `appid: 0`. La ventana decía «Todavía no hay pruebas» teniendo cuatro. La identidad la
+ * decide Rust (`coinciden_por_identidad`); aquí se comprueba que la ventana **no** aplica
+ * un segundo criterio por su cuenta: pasa appid y nombre tal cual y enseña lo que llega.
+ */
+describe('PruebasJuego · nombre comercial con subtítulo', () => {
+  it('pasa el nombre con subtítulo al backend sin recortarlo ni normalizarlo en React', async () => {
+    loadBenchmarksForGame.mockResolvedValue([]);
+    renderVista({ appid: 0, gameName: 'Deskrawl: Idle ARPG' });
+
+    await screen.findByText(/Todavía no hay pruebas de Deskrawl: Idle ARPG/);
+    // Una sola política de identidad: la de Rust. React no toca el nombre.
+    expect(loadBenchmarksForGame).toHaveBeenCalledWith({
+      appid: 0,
+      gameName: 'Deskrawl: Idle ARPG',
+    });
+  });
+
+  it('enseña las cuatro grabaciones que devuelve el backend para ese juego', async () => {
+    loadBenchmarksForGame.mockResolvedValue([
+      bench('d1', 1, { fps: 60 }),
+      bench('d2', 2, { fps: 70 }),
+      bench('d3', 3, { fps: 55 }),
+      bench('d4', 4, { fps: 65 }),
+    ]);
+    renderVista({ appid: 0, gameName: 'Deskrawl: Idle ARPG' });
+
+    expect(await screen.findByText(/Cuál va mejor/)).toBeTruthy();
+    expect(screen.queryByText(/Todavía no hay pruebas/)).toBeNull();
+  });
+
+  it('el borrado desde esta ventana usa el alcance del juego, con su nombre exacto', async () => {
+    loadBenchmarksForGame.mockResolvedValue([
+      bench('d1', 1),
+      bench('d2', 2),
+      bench('d3', 3),
+      bench('d4', 4),
+    ]);
+    renderVista({ appid: 0, gameName: 'Deskrawl: Idle ARPG' });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Borrar todas/i }));
+    // La ventana de pruebas **ya** es un `role="dialog"`, así que hay dos. Se busca el de
+    // confirmación por su título, no por posición.
+    await waitFor(() => expect(screen.getAllByRole('dialog').length).toBeGreaterThan(1));
+    const confirmacion = screen
+      .getAllByRole('dialog')
+      .find((d) => /Se eliminarán/i.test(d.textContent ?? '')) as HTMLElement;
+    expect(confirmacion).toBeTruthy();
+    // El texto de la confirmación nombra el juego tal como se llama en la ficha.
+    expect(confirmacion.textContent).toContain('Deskrawl: Idle ARPG');
+    fireEvent.click(within(confirmacion).getByRole('button', { name: 'Borrar todas' }));
+
+    await waitFor(() =>
+      expect(deleteBenchmarksForGame).toHaveBeenCalledWith({
+        appid: 0,
+        gameName: 'Deskrawl: Idle ARPG',
+      })
+    );
+    // Y nunca el borrado global.
+    expect(deleteAllBenchmarks).not.toHaveBeenCalled();
   });
 });

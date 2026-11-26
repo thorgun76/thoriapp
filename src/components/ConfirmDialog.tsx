@@ -69,7 +69,29 @@ export function ConfirmDialog({
           </label>
         )}
 
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          {/* Acciones de tres vías (guardar / descartar / cancelar). Se cierran igual que
+              el resto: la acción se ejecuta después de cerrar, para que un fallo suyo no
+              deje el diálogo abierto encima del error. */}
+          {state.accionesExtra?.map((accion) => (
+            <button
+              key={accion.label}
+              type="button"
+              onClick={() => {
+                onClose();
+                accion.onSelect();
+              }}
+              className={
+                accion.tone === 'primary'
+                  ? 'px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--action)] hover:bg-[var(--action-hover)] transition-colors'
+                  : accion.tone === 'danger'
+                    ? 'px-4 py-2 rounded-lg text-sm font-semibold text-white bg-[var(--error)] hover:opacity-90 transition-colors'
+                    : 'px-4 py-2 rounded-lg text-sm font-semibold bg-[var(--bg)] text-[var(--text)] border border-[var(--border)] hover:border-action/50 transition-colors'
+              }
+            >
+              {accion.label}
+            </button>
+          ))}
           <button
             type="button"
             autoFocus={!state.input}

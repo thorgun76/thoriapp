@@ -10,7 +10,7 @@ beforeEach(() => {
   vi.spyOn(api, 'scanLibrary').mockResolvedValue([
     { appid: 2646460, name: 'Soulmask', installed: true, launcher: 'steam' },
   ]);
-  vi.spyOn(api, 'scanExternalLaunchers').mockResolvedValue([
+  vi.spyOn(api, 'refreshLibrary').mockResolvedValue([
     // El mismo juego desde otro launcher: debe quedar oculto.
     { name: 'Soulmask', launcher: 'lutris', install_path: '', appid: 2646460, cover_key: 'soulmask' },
     { name: 'Star Valor', launcher: 'lutris', install_path: '', appid: null, cover_key: 'star-valor' },
@@ -57,7 +57,7 @@ describe('useLibrary', () => {
       await result.current.loadInitial();
     });
 
-    expect(api.scanExternalLaunchers).toHaveBeenCalledTimes(1);
+    expect(api.refreshLibrary).toHaveBeenCalledTimes(1);
   });
 
   it('el re-escaneo manual usa la biblioteca de Steam ya cargada', async () => {

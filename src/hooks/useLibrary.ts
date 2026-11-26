@@ -102,7 +102,10 @@ export function useLibrary({ onNotify }: UseLibraryOptions) {
   const scanExternal = useCallback(async (steamLibrary?: Game[]): Promise<ScanExternalResult> => {
     setScanningLaunchers(true);
     try {
-      const raw = await api.scanExternalLaunchers();
+      // `refreshLibrary` es el mismo escaneo, pero además invalida la caché del
+      // catálogo que usa el observador de procesos. Con `scanExternalLaunchers` un
+      // juego recién instalado tardaba hasta cinco minutos en reconocerse.
+      const raw = await api.refreshLibrary();
       const scanned = raw.map(toGame);
       // Steam manda: si el juego ya está en Steam, no se repite desde otro
       // launcher. Se usa la `library` del momento del escaneo.

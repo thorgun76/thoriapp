@@ -48,7 +48,10 @@ export function OptimizationSummary({
             Perfil de optimización · Linux
           </p>
           <p className="text-sm text-[var(--text)] leading-relaxed mb-3">{summary}</p>
-          <div className="flex flex-wrap items-center gap-2">
+          {/* Altura reservada: el badge cambia de «Sin ajustes activos» a «1 ajuste activo»
+              y el texto tiene longitudes muy distintas, así que sin un alto mínimo la fila
+              podía envolver y mover todo lo de abajo al activar el primer ajuste. */}
+          <div className="flex flex-wrap items-center gap-2 min-h-[30px]">
             <span
               className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg font-semibold border ${TONE_CLASS[impacts.tone]}`}
             >

@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { ChevronDown, Copy, GripVertical } from 'lucide-react';
+import { ChevronDown, Copy, GripVertical, Play } from 'lucide-react';
 import type { Profile } from '../lib/types';
 
 /** Props de la tarjeta ordenable. */
@@ -12,11 +12,28 @@ interface SortableProfileProps {
   onCopy: () => void;
   onExport: () => void;
   onDelete: () => void;
+  /**
+   * Abre el juego del perfil. Opcional: la vista de juego ya está abierta y no tiene
+   * sentido «abrir» nada.
+   */
+  onOpenGame?: () => void;
+  /** Abre el juego y carga este perfil en él. */
+  onLoadInGame?: () => void;
   command: string | undefined;
 }
 
 /** Tarjeta ordenable de un perfil guardado (drag & drop). */
-export function SortableProfile({ profile, isExpanded, onToggle, onCopy, onExport, onDelete, command }: SortableProfileProps) {
+export function SortableProfile({
+  profile,
+  isExpanded,
+  onToggle,
+  onCopy,
+  onExport,
+  onDelete,
+  onOpenGame,
+  onLoadInGame,
+  command,
+}: SortableProfileProps) {
   const {
     attributes,
     listeners,
@@ -62,9 +79,14 @@ export function SortableProfile({ profile, isExpanded, onToggle, onCopy, onExpor
               <h3 className="text-base font-bold text-[var(--text)] truncate">
                 {profile.name}
               </h3>
-              {profile.expert_mode && (
-                <span className="text-[10px] px-2 py-0.5 rounded bg-action/10 text-[var(--action)] border border-action/30 shrink-0">
-                  Experto
+              {/* Perfil guardado antes de que se almacenara el comando literal: se puede
+                  cargar, pero conviene saber que su comando se reconstruye. */}
+              {!profile.command && (
+                <span
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--caution)]/10 text-[var(--caution)] border border-[var(--caution)]/30 shrink-0"
+                  title="Perfil guardado antes de que se almacenara el comando exacto. Su comando se reconstruye a partir de los ajustes."
+                >
+                  Antiguo
                 </span>
               )}
             </div>
@@ -120,8 +142,26 @@ export function SortableProfile({ profile, isExpanded, onToggle, onCopy, onExpor
                 </div>
               )}
 
-              {/* Botones de acción */}
-              <div className="flex gap-2 justify-end pt-1">
+              {/* Botones de acción. «Abrir juego» solo navega; «Cargar en el juego» además
+                  aplica la configuración, así que se distinguen por texto y por color. */}
+              <div className="flex flex-wrap gap-2 justify-end pt-1">
+                {onLoadInGame && (
+                  <button
+                    onClick={onLoadInGame}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--action)] text-white hover:bg-[var(--action-hover)] transition-colors flex items-center gap-1"
+                  >
+                    <Play className="w-3 h-3" />
+                    Cargar en el juego
+                  </button>
+                )}
+                {onOpenGame && (
+                  <button
+                    onClick={onOpenGame}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] transition-colors"
+                  >
+                    Abrir juego
+                  </button>
+                )}
                 <button
                   onClick={onExport}
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] hover:bg-[var(--card-hover)] transition-colors"

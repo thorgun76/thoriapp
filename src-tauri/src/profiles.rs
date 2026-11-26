@@ -13,10 +13,27 @@ pub struct Profile {
     pub selected_community_recs: Vec<usize>,
     pub selected_engine_recs: Vec<usize>,
     pub force_proton: bool,
+    /// **Campo heredado.** Los modos experto/guiado ya no existen en la interfaz y la app
+    /// ya no lo lee, pero sigue en el formato persistido para que los perfiles antiguos
+    /// carguen y se re-guarden sin perder datos ni migrar nada (eso es la fase 4). Al
+    /// guardar siempre va en `false`.
     pub expert_mode: bool,
     pub manual_command: Option<String>,
     pub use_manual_command: bool,
     pub notes: Option<String>,
+    /// Comando **exacto** que el motor confirmó al guardar el perfil.
+    ///
+    /// Antes no se guardaba y el comando se reconstruía al leer, a partir de
+    /// `enabled_params` y las recomendaciones. Eso daba otro texto: los argumentos que
+    /// Thoriapp no conoce se perdían (no están en el catálogo, así que no había forma de
+    /// reconstruirlos), y el orden podía cambiar. Es el fallo «guardo
+    /// `PROTON_USE_NTSYNC=1 %command%` y en Perfiles sale otro comando».
+    ///
+    /// Es opcional para que los perfiles antiguos sigan cargando: si falta, se sigue usando
+    /// la reconstrucción de siempre. Un perfil con `command` se muestra tal cual, sin
+    /// reinterpretarlo.
+    #[serde(default)]
+    pub command: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -157,37 +174,22 @@ const MAX_PROFILE_NOTES: usize = 4000;
 /// Tope de índices por lista de selecciones. Ningún juego pasa de ~10 parámetros.
 const MAX_SELECTIONS: usize = 64;
 
-/// Ejecutables que Thoriapp acepta como PRIMERA palabra de un comando manual.
+/// Ejecutables que Thoriapp acepta como primera palabra de un comando manual.
 ///
-/// Es el espejo de `ALLOWED_COMMANDS` en `src/lib/command.ts`. Está duplicado a
-/// propósito: el frontend lo usa para avisar mientras se escribe, y este lado
-/// para no guardar un perfil que luego se lea desde otro sitio. Si se cambia uno,
-/// hay que cambiar el otro (los tests de ambos lados lo comprueban).
-const ALLOWED_MANUAL_COMMANDS: &[&str] = &[
-    "gamemoderun",
-    "mangohud",
-    "gamescope",
-    // Envoltorios que el propio catálogo (`games.json`) puede poner en un
-    // comando. Sin ellos, "Editar manualmente" rechaza un comando que la app
-    // acaba de generar.
-    "prime-run",
-    "obs-gamecapture",
-    "vkbasalt",
-    "game-performance",
-    "scx_lavd",
-    "WINEDLLOVERRIDES",
-    "steam",
-    "steam-native",
-    "steam-runtime",
-    "protontricks",
-    "umu-run",
-    "proton",
-    "wine",
-    "wine64",
-    "winetricks",
-];
+/// Ya no es una lista propia: es la del motor, para que solo haya una. Antes había tres
+/// copias (esta, `launch_command::LANZADORES_PERMITIDOS` y `ALLOWED_COMMANDS` en
+/// `src/lib/command.ts`) y bastaba con tocar una para que la app se contradijera consigo
+/// misma. La de TS se queda porque el frontend avisa mientras se escribe, pero su test
+/// comprueba que coincide con la de Rust.
+#[cfg_attr(not(test), allow(dead_code))]
+const ALLOWED_MANUAL_COMMANDS: &[&str] = &crate::launch_command::LANZADORES_PERMITIDOS;
 
 /// Longitud máxima de un comando manual.
+///
+/// Se mantiene igual que `launch_command::MAX_LONGITUD`; el test
+/// `la_longitud_maxima_coincide_con_el_motor` impide que se separen.
+/// Longitud máxima de un comando manual.
+#[cfg_attr(not(test), allow(dead_code))]
 const MAX_MANUAL_COMMAND_LENGTH: usize = 2000;
 
 /// ¿Es seguro este comando manual? Devuelve `Err(motivo)` si no lo es.
@@ -200,87 +202,31 @@ const MAX_MANUAL_COMMAND_LENGTH: usize = 2000;
 /// Misma lista cerrada que `checkManualCommand` del frontend, por duplicado y sin
 /// dependencias: esto tiene que ser barato y obvio al leerlo.
 fn check_manual_command(command: &str) -> Result<(), String> {
-    let text = command.trim();
-
-    if text.is_empty() {
-        return Err("El comando está vacío.".to_string());
-    }
-
-    if text.chars().count() > MAX_MANUAL_COMMAND_LENGTH {
-        return Err(format!(
-            "El comando es demasiado largo (máximo {} caracteres).",
-            MAX_MANUAL_COMMAND_LENGTH
-        ));
-    }
-
-    // Caracteres que encadenan órdenes, redirigen o sustituyen texto por la salida
-    // de otro programa. `%command%` no los lleva, así que no hay falsos positivos.
-    if let Some(bad) = text
-        .chars()
-        .find(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '\n' | '\r'))
-    {
-        let shown = if bad == '\n' || bad == '\r' {
-            "un salto de línea".to_string()
-        } else {
-            format!("«{}»", bad)
-        };
-        return Err(format!(
-            "El comando lleva {}, que sirve para encadenar órdenes. Thoriapp solo \
-             acepta una orden de lanzamiento.",
-            shown
-        ));
-    }
-
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    let tiene_marcador = tokens.contains(&"%command%");
-
-    // El ejecutable, si lo hay, está ANTES de `%command%`: detrás solo van
-    // argumentos del juego (`-novid`, `-dx11`…), que no son programas. Buscar en
-    // toda la línea lo convertía en un falso positivo con cualquier bandera.
-    let cabeza: &[&str] = match tokens.iter().position(|t| *t == "%command%") {
-        Some(i) => &tokens[..i],
-        // Sin marcador no es una línea de Steam válida, pero se valida igual: en
-        // ese caso el comando empieza directamente por el programa.
-        None => &tokens[..],
-    };
-
-    let first = cabeza.iter().find(|t| !t.contains('='));
-
-    if first.is_none() && !tiene_marcador {
-        return Err(
-            "El comando no lleva %command%, así que Steam no sabría qué lanzar.".to_string(),
-        );
-    }
-
-    // Un comando puede ser solo variables de entorno + `%command%`: ahí no hay
-    // programa propio que validar.
-    let Some(first) = first else {
-        return Ok(());
-    };
-
-    let program = first.rsplit('/').next().unwrap_or(first);
-
-    if !ALLOWED_MANUAL_COMMANDS.contains(&program) {
-        return Err(format!(
-            "«{}» no es un lanzador conocido. Comprueba el comando antes de usarlo: \
-             un perfil importado puede traer cualquier cosa.",
-            program
-        ));
-    }
-
-    // Rutas absolutas y `~`: un comando legítimo se resuelve por PATH. Una ruta
-    // concreta apunta a un binario arbitrario del disco. Se mira la cabeza
-    // (programa y envoltorios), no los argumentos del juego.
-    if cabeza
-        .iter()
-        .any(|t| t.starts_with('/') || t.starts_with('~'))
-    {
-        return Err("El comando usa una ruta del sistema. Thoriapp solo acepta órdenes \
-                    que se resuelven por PATH para no lanzar un binario cualquiera."
-            .to_string());
-    }
-
-    Ok(())
+    // Delegado en el motor único. Antes había aquí una segunda implementación de las mismas
+    // reglas (lista de lanzadores, caracteres prohibidos, marcador, rutas), y dos
+    // validadores que dicen lo mismo acaban diciendo cosas distintas.
+    //
+    // Lo que este puente NO cambia:
+    //  - el formato del perfil ni la versión del esquema;
+    //  - el texto de los mensajes de la mayoría de casos, porque salen del mismo sitio;
+    //  - los perfiles ya guardados.
+    //
+    // Lo que sí cambia, y está cubierto por los tests de caracterización de abajo:
+    //
+    //  1. `env FOO=1 mangohud %command%` ahora se ACEPTA. El validador viejo partía por
+    //     espacios y tomaba `env` como el programa, que no estaba en su lista. `env` es un
+    //     lanzador legítimo (está en `LANZADORES_PERMITIDOS`) y el motor nuevo lo entiende
+    //     como envoltorio, así que rechazarlo dejaba fuera comandos válidos que Steam
+    //     acepta.
+    //  2. `FOO="a b" %command%` ahora se ACEPTA. El validador viejo partía por espacios
+    //     ciegos y veía tres tokens donde hay dos. El motor tokeniza de verdad.
+    //  3. Una comilla sin cerrar ahora se RECHAZA con código `sintaxis`. Antes pasaba. Es
+    //     intencionado: la línea se puede conservar e importar, pero no presentar como
+    //     válida para lanzar.
+    //
+    // Nada de esto afecta a un perfil guardado que ya estuviera cargado: lo que se valida
+    // es el comando al guardarlo, y los que ya estaban guardados no se revalidan.
+    crate::launch_command::validar(command).map_err(|m| m.mensaje)
 }
 
 /// Convierte lo que escribe el usuario en una ruta real: quita espacios y comillas,
@@ -370,27 +316,73 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 fn load_profiles_data() -> ProfilesData {
-    let file = get_profiles_file();
-
-    if file.exists() {
-        match fs::read_to_string(&file) {
-            Ok(content) => match serde_json::from_str::<ProfilesData>(&content) {
-                Ok(data) => return data,
-                Err(e) => {
-                    // El archivo existe pero no se pudo leer: se guarda una copia antes de
-                    // que un guardado posterior lo sobrescriba con una lista vacía.
-                    println!("[Perfiles] ⚠️ profiles.json ilegible: {}", e);
-                    let backup = file.with_extension("json.corrupt.bak");
-                    fs::write(&backup, &content).ok();
-                }
-            },
-            Err(e) => println!("[Perfiles] ⚠️ No se pudo leer profiles.json: {}", e),
+    match try_load_profiles_data() {
+        Ok(data) => data,
+        Err(e) => {
+            // No se puede perder lo que hay en disco por un error de lectura. Antes esto
+            // devolvía una colección vacía y la siguiente escritura sobrescribía el fichero
+            // real: los perfiles desaparecían de golpe. Ahora se avisa y se devuelve vacío
+            // **sin** dejar que nadie escriba encima (ver `load_profiles_data_para_editar`).
+            println!("[Perfiles] ⚠️ profiles.json ilegible: {}", e);
+            ProfilesData {
+                profiles: Vec::new(),
+            }
         }
     }
+}
 
-    ProfilesData {
-        profiles: Vec::new(),
+/// Lee los perfiles, distinguiendo «no hay fichero» de «no se pudo leer».
+///
+/// Las operaciones que **escriben** usan esta variante: si el fichero existe y no se puede
+/// interpretar, hay que abortar en lugar de guardar una lista vacía. Devolver `Ok` con cero
+/// perfiles en ese caso era la vía por la que un fichero ilegible acababa borrado.
+fn try_load_profiles_data() -> Result<ProfilesData, String> {
+    let file = get_profiles_file();
+
+    if !file.exists() {
+        return Ok(ProfilesData {
+            profiles: Vec::new(),
+        });
     }
+
+    let content = match fs::read_to_string(&file) {
+        Ok(c) => c,
+        // El fichero existía al comprobarlo y ya no: carrera con otro proceso. No es un
+        // error de integridad, es «todavía no hay nada».
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Ok(ProfilesData {
+                profiles: Vec::new(),
+            })
+        }
+        Err(e) => {
+            return Err(format!(
+                "No se pudieron leer tus perfiles ({}) y no se va a escribir nada encima                  para no perderlos. Revisa los permisos de {}.",
+                e,
+                file.display()
+            ))
+        }
+    };
+
+    serde_json::from_str::<ProfilesData>(&content).map_err(|e| {
+        // Copia de seguridad antes de nada: si el usuario decide seguir, el original queda.
+        let backup = file.with_extension("json.corrupt.bak");
+        let copiado = fs::write(&backup, &content).is_ok();
+        format!(
+            "El archivo de perfiles está dañado ({}) y no se va a escribir encima para no              perderlos.{}{}",
+            e,
+            if copiado { " Se guardó una copia en " } else { " No se pudo guardar copia en " },
+            backup.display()
+        )
+    })
+}
+
+/// Variante para operaciones que van a **escribir**.
+///
+/// Aborta si el fichero existente no se puede interpretar. Es la corrección del punto
+/// crítico: «no conviertas un error de lectura en una colección vacía que posteriormente
+/// sobrescriba el fichero existente».
+fn load_profiles_data_para_editar() -> Result<ProfilesData, String> {
+    try_load_profiles_data()
 }
 
 fn save_profiles_data(data: &ProfilesData) -> Result<(), String> {
@@ -582,6 +574,9 @@ pub fn save_profile(
     manual_command: Option<String>,
     use_manual_command: bool,
     notes: Option<String>,
+    // Comando exacto confirmado en el editor. Se guarda tal cual y es lo que se muestra al
+    // leer el perfil: no se reconstruye, así que no puede diferir de lo que se vio.
+    command: Option<String>,
 ) -> Result<Profile, String> {
     // Se valida antes de tocar el disco: el comando manual que llega aquí puede
     // venir de un perfil que se acaba de importar.
@@ -591,7 +586,7 @@ pub fn save_profile(
         }
     }
 
-    let mut data = load_profiles_data();
+    let mut data = load_profiles_data_para_editar()?;
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let next_order = data.profiles.iter().map(|p| p.order).max().unwrap_or(0) + 1;
@@ -609,6 +604,7 @@ pub fn save_profile(
         manual_command,
         use_manual_command,
         notes,
+        command,
         created_at: now.clone(),
         updated_at: now,
         order: next_order,
@@ -638,7 +634,7 @@ pub fn load_profiles_for_game(appid: u32) -> Result<Vec<Profile>, String> {
 
 #[tauri::command]
 pub fn delete_profile(profile_id: String) -> Result<(), String> {
-    let mut data = load_profiles_data();
+    let mut data = load_profiles_data_para_editar()?;
     data.profiles.retain(|p| p.id != profile_id);
     save_profiles_data(&data)?;
     Ok(())
@@ -827,7 +823,7 @@ fn import_from_content(raw: &str) -> Result<Vec<Profile>, String> {
     let profiles = parse_imported_profiles(raw)?;
 
     let total = profiles.len();
-    let mut data = load_profiles_data();
+    let mut data = load_profiles_data_para_editar()?;
     let mut next_order = data
         .profiles
         .iter()
@@ -911,6 +907,9 @@ pub fn update_profile(
     manual_command: Option<String>,
     use_manual_command: bool,
     notes: Option<String>,
+    // Comando exacto confirmado en el editor. Se guarda tal cual y es lo que se muestra al
+    // leer el perfil: no se reconstruye, así que no puede diferir de lo que se vio.
+    command: Option<String>,
 ) -> Result<Profile, String> {
     if use_manual_command {
         if let Some(cmd) = manual_command.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -918,7 +917,7 @@ pub fn update_profile(
         }
     }
 
-    let mut data = load_profiles_data();
+    let mut data = load_profiles_data_para_editar()?;
 
     let profile = data.profiles.iter_mut()
         .find(|p| p.id == profile_id)
@@ -933,6 +932,10 @@ pub fn update_profile(
     profile.manual_command = manual_command;
     profile.use_manual_command = use_manual_command;
     profile.notes = notes;
+    // Mismo criterio que `save_profile`: si el editor confirma un comando, se guarda para
+    // que el perfil diga exactamente lo mismo que se vio. Actualizar sin esto dejaba el
+    // comando viejo en el perfil y volvía el fallo de «enseña otro comando».
+    profile.command = command;
     profile.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let updated_profile = profile.clone();
@@ -943,7 +946,7 @@ pub fn update_profile(
 
 #[tauri::command]
 pub fn reorder_profiles(profile_ids: Vec<String>) -> Result<(), String> {
-    let mut data = load_profiles_data();
+    let mut data = load_profiles_data_para_editar()?;
 
     for (index, profile_id) in profile_ids.iter().enumerate() {
         if let Some(profile) = data.profiles.iter_mut().find(|p| &p.id == profile_id) {
@@ -982,6 +985,144 @@ mod tests {
     use super::*;
 
     // ---- check_manual_command: lo que sí se acepta ----
+
+    // ---- Divergencias con `launch_command::validar` (fase 1.1) ----
+    //
+    // Hay dos validadores vivos: este (`check_manual_command`, el que manda hoy para los
+    // perfiles) y `launch_command::validar` (el del motor nuevo). Antes de sustituir el
+    // viejo hay que saber EXACTAMENTE en qué discrepan. El siguiente test las enumera.
+    //
+    // No afirma que una sea «la buena»: fija el comportamiento actual para que cualquier
+    // cambio futuro en cualquiera de las dos se vea aquí. Si algún día se unifican y este
+    // test empieza a fallar, es señal de que la unificación cambió el comportamiento de los
+    // perfiles antiguos, y eso no puede pasar en silencio.
+
+    /// Comandos donde los dos validadores NO coinciden hoy.
+    ///
+    /// Se documenta cada uno con el motivo, porque son los que impedirían un cambio
+    /// directo a `launch_command::validar` para los perfiles guardados.
+    fn divergencias_conocidas() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "env FOO=1 %command%",
+                "solo el motor nuevo conoce `env` como lanzador permitido; el viejo lo \
+                 rechaza como lanzador desconocido",
+            ),
+            (
+                "FOO=\"a b\" %command%",
+                "el viejo parte por espacios y ve `FOO=\"a` como programa; el nuevo \
+                 tokeniza respetando comillas",
+            ),
+        ]
+    }
+
+        #[test]
+    fn la_longitud_maxima_coincide_con_el_motor() {
+        assert_eq!(
+            MAX_MANUAL_COMMAND_LENGTH,
+            crate::launch_command::MAX_LONGITUD,
+            "si los dos límites se separan, un comando puede guardarse en un sitio y \
+             rechazarse en el otro"
+        );
+    }
+
+    #[test]
+    fn ya_solo_hay_un_validador() {
+        // Antes había dos implementaciones de las mismas reglas y este test comprobaba que
+        // sus divergencias siguieran siendo exactamente las documentadas. Ahora
+        // `check_manual_command` delega en `launch_command::validar`, así que ya no puede
+        // divergir: lo que aquí se comprueba es que no vuelva a aparecer una copia.
+        for cmd in [
+            "%command%",
+            "mangohud %command%",
+            "env FOO=1 mangohud %command%",
+            r#"FOO="a b" %command%"#,
+            "%command% ; rm -rf /",
+            "",
+            "programa_desconocido %command%",
+            "/usr/bin/mangohud %command%",
+        ] {
+            let puente = check_manual_command(cmd).is_ok();
+            let motor = crate::launch_command::validar(cmd).is_ok();
+            assert_eq!(
+                puente, motor,
+                "el puente de perfiles y el motor tienen que decidir lo mismo con {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn las_divergencias_que_habia_se_resolvieron_a_favor_del_motor() {
+        // Las dos divergencias conocidas antes de unificar, con el resultado que ahora
+        // tienen. Se dejan aquí para que quede escrito por qué cambió.
+        //
+        // 1. `env` como lanzador: el validador viejo partía por espacios y no lo conocía.
+        assert!(
+            check_manual_command("env FOO=1 mangohud %command%").is_ok(),
+            "`env` es un lanzador más y tiene que aceptarse"
+        );
+        // 2. Comillas con espacios: el validador viejo las partía a la mitad.
+        assert!(
+            check_manual_command(r#"FOO="a b" %command%"#).is_ok(),
+            "una variable con espacios es un solo token y hay que aceptarla"
+        );
+    }
+
+    #[test]
+    fn una_comilla_sin_cerrar_se_rechaza_pero_no_revienta() {
+        // Antes el validador viejo la aceptaba. Ahora se rechaza porque no se puede dar por
+        // buena una línea que Steam interpretaría de otra forma.
+        let r = check_manual_command(r#"FOO="a %command%"#);
+        assert!(r.is_err(), "una comilla sin cerrar no es un comando válido");
+        // Pero rechazar no es lo mismo que perder el comando: el motor conserva el texto.
+        let a = crate::launch_command::analizar(r#"FOO="a %command%"#, &[]);
+        assert_eq!(a.original, r#"FOO="a %command%"#);
+        assert!(!a.sintaxis_valida);
+    }
+
+    #[test]
+    fn lo_que_los_dos_validadores_aceptan_sigue_coincidiendo() {
+        // Base común: aquí no hay divergencia y, tras unificar, nada de esto puede cambiar.
+        for cmd in [
+            "%command%",
+            "mangohud %command%",
+            "gamemoderun mangohud %command%",
+            "game-performance mangohud %command%",
+            "prime-run %command%",
+            "PROTON_ENABLE_NVAPI=1 %command% -novid",
+            "gamescope -W 1920 -H 1080 -f -- %command%",
+        ] {
+            assert!(check_manual_command(cmd).is_ok(), "el viejo debería aceptar {cmd}");
+            assert!(
+                crate::launch_command::validar(cmd).is_ok(),
+                "el nuevo debería aceptar {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn lo_que_los_dos_validadores_rechazan_sigue_coincidiendo() {
+        // Seguridad: si alguno de los dos empezara a aceptar esto, sería un fallo grave.
+        for cmd in [
+            "mangohud %command%; rm -rf /",
+            "mangohud %command% | tee /tmp/x",
+            "mangohud %command% && echo",
+            "mangohud $(whoami) %command%",
+            "mangohud `id` %command%",
+            "/usr/bin/mangohud %command%",
+            "./juego %command%",
+            "",
+        ] {
+            assert!(
+                check_manual_command(cmd).is_err(),
+                "el viejo NO debería aceptar {cmd:?}"
+            );
+            assert!(
+                crate::launch_command::validar(cmd).is_err(),
+                "el nuevo NO debería aceptar {cmd:?}"
+            );
+        }
+    }
 
     #[test]
     fn acepta_variables_de_entorno_y_el_marcador() {
@@ -1146,6 +1287,7 @@ mod tests {
             manual_command: None,
             use_manual_command: false,
             notes: None,
+            command: None,
             created_at: "2026-01-01 12:00:00".to_string(),
             updated_at: "2026-01-01 12:00:00".to_string(),
             order: 0,
@@ -1357,7 +1499,8 @@ mod tests {
         // alguien añade uno en un lado y no en el otro, esto salta.
         let mut esperados: Vec<&str> = vec![
             "gamemoderun", "mangohud", "gamescope", "prime-run", "obs-gamecapture",
-            "vkbasalt", "game-performance", "scx_lavd", "WINEDLLOVERRIDES", "steam",
+            // `env` se añadió al unificar: es un lanzador real (`env FOO=1 prog`).
+            "env", "vkbasalt", "game-performance", "scx_lavd", "WINEDLLOVERRIDES", "steam",
             "steam-native", "steam-runtime", "protontricks", "umu-run", "proton", "wine",
             "wine64", "winetricks",
         ];
@@ -1579,5 +1722,212 @@ mod tests {
         assert!(con_home(Path::new("/tmp/respaldo.json"), &home).is_ok());
         let _ = fs::remove_dir_all(&home);
     }
-}
 
+    // ---- el perfil guarda el comando confirmado, literal ----
+
+    /// Regresión del P0 «guardo un comando y en Perfiles sale otro».
+    ///
+    /// El comando se reconstruía al leer a partir de `enabled_params`, así que los
+    /// argumentos que Thoriapp no conoce (no están en el catálogo) desaparecían y el orden
+    /// podía cambiar. Ahora se guarda el texto confirmado y `command` manda sobre la
+    /// reconstrucción.
+    #[test]
+    fn un_comando_con_desconocidos_comillas_espacios_y_wrappers_se_guarda_literal() {
+        let command = "\"MANGOHUD_CONFIG=fps_limit=0, position=top-left\" \\
+                      RADV_PERFTEST=sam gamemoderun mangohud %command% -novid --desconocido=1"
+            .replace("\\\n                      ", "");
+
+        let p = Profile {
+            command: Some(command.clone()),
+            ..perfil_valido()
+        };
+
+        // 1) serializa y vuelve igual (ida y vuelta por disco incluida, como el frontend).
+        let json = serde_json::to_string(&p).unwrap();
+        let leido: Profile = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            leido.command.as_deref(),
+            Some(command.as_str()),
+            "el comando no sobrevive al guardado"
+        );
+
+        // 2) el valor guardado es el del editor, no una reconstrucción.
+        let guardado = leido.command.clone().unwrap();
+        assert!(guardado.contains("--desconocido=1"));
+        assert!(guardado.contains("position=top-left"));
+    }
+
+    /// Editar un perfil también actualiza el comando guardado.
+    ///
+    /// Si solo se actualizara en `save_profile`, editar un perfil dejaría el comando viejo
+    /// y la tarjeta enseñaría uno distinto del que hay en el editor: el mismo fallo por otra
+    /// puerta.
+    #[test]
+    fn update_profile_actualiza_el_comando_guardado() {
+        let mut guardado = perfil_valido();
+        guardado.command = Some("mangohud %command%".to_string());
+
+        // Simula lo que hace el comando Tauri sobre el perfil encontrado.
+        guardado.command = Some("mangohud RADV_PERFTEST=sam %command% --nuevo".to_string());
+
+        let json = serde_json::to_string(&guardado).unwrap();
+        let leido: Profile = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            leido.command.as_deref(),
+            Some("mangohud RADV_PERFTEST=sam %command% --nuevo")
+        );
+    }
+
+    /// Un perfil antiguo (sin `command`) sigue cargando y se reconstruye como antes.
+    #[test]
+    fn un_perfil_sin_command_sigue_siendo_valido() {
+        let json = r#"{
+            "id": "440_x", "name": "Viejo", "appid": 440, "game_name": "TF2",
+            "enabled_params": [true], "selected_community_recs": [], "selected_engine_recs": [],
+            "force_proton": false, "expert_mode": false, "manual_command": null,
+            "use_manual_command": false, "notes": null,
+            "created_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00"
+        }"#;
+        let p: Profile = serde_json::from_str(json).expect("debe cargar sin `command`");
+        assert!(p.command.is_none());
+        assert!(validate_imported_profile(&p).is_ok());
+    }
+    /// Actualizar un perfil conserva su identidad: es lo que permite «Actualizar» sin
+    /// crear un duplicado ni perder el orden en la lista.
+    #[test]
+    fn actualizar_conserva_id_y_created_at() {
+        let original = perfil_minimo();
+        let mut actualizado = original.clone();
+        actualizado.command = Some("DXVK_HUD=fps %command%".to_string());
+        actualizado.updated_at = "2026-02-02 00:00:00".to_string();
+
+        // Lo que hace `update_profile`: copia los campos editables sobre el encontrado.
+        let mut en_disco = original.clone();
+        en_disco.command = actualizado.command.clone();
+        en_disco.updated_at = actualizado.updated_at.clone();
+
+        assert_eq!(en_disco.id, original.id, "el id no puede cambiar");
+        assert_eq!(
+            en_disco.created_at, original.created_at,
+            "created_at es cuándo se creó, no cuándo se tocó"
+        );
+        assert_ne!(en_disco.updated_at, original.updated_at);
+    }
+
+    /// Un perfil de otro juego no puede aplicarse: cambiaría la configuración equivocada.
+    #[test]
+    fn el_appid_distingue_los_perfiles_de_cada_juego() {
+        let mut de_palworld = perfil_minimo();
+        de_palworld.appid = 1623730;
+        de_palworld.game_name = "Palworld".to_string();
+
+        let mut de_7dtd = perfil_minimo();
+        de_7dtd.id = "otro".to_string();
+        de_7dtd.appid = 251570;
+        de_7dtd.game_name = "7 Days to Die".to_string();
+
+        assert_ne!(de_palworld.appid, de_7dtd.appid);
+        // El filtro por appid es exacto: no hay solapamiento.
+        let todos = vec![de_palworld.clone(), de_7dtd.clone()];
+        let de_este: Vec<_> = todos.iter().filter(|p| p.appid == 1623730).collect();
+        assert_eq!(de_este.len(), 1);
+        assert_eq!(de_este[0].game_name, "Palworld");
+    }
+
+    // ---- Integridad del fichero (fase 4, punto 10) ----
+    //
+    // El fichero de perfiles lo lee y lo escribe la misma función, así que un error de
+    // lectura se traducía en una colección vacía y la escritura siguiente borraba lo que
+    // hubiera. Estos tests fijan que ahora se aborta.
+
+    /// Un fichero con basura no se devuelve como «cero perfiles»: se informa del error.
+    #[test]
+    fn un_fichero_danado_no_se_lee_como_una_lista_vacia() {
+        let r = serde_json::from_str::<ProfilesData>("no es json");
+        assert!(r.is_err(), "parsear basura debe fallar, no dar una lista vacía");
+    }
+
+    /// La variante de escritura devuelve `Err` donde la de lectura devolvía `Ok` vacío.
+    ///
+    /// Se comprueba sobre el tipo, no sobre el sistema de archivos: lo que importa es que
+    /// las rutas que guardan usen laResult y no puedan seguir adelante con cero perfiles.
+    #[test]
+    fn las_rutas_de_escritura_usan_la_lectura_estricta() {
+        let fuente = include_str!("profiles.rs");
+        // Ningún `save_profiles_data` debe colgar de una lectura laxa: con una colección
+        // vacía por error se perdería el fichero. Se busca la pareja dentro de cada función
+        // que escribe.
+        for escritora in [
+            "pub fn save_profile",
+            "pub fn delete_profile",
+            "pub fn update_profile",
+            "pub fn reorder_profiles",
+        ] {
+            let inicio = fuente
+                .find(escritora)
+                .unwrap_or_else(|| panic!("no se encontró {escritora}"));
+            let cuerpo = &fuente[inicio..];
+            let fin = cuerpo.find("\n}\n").unwrap_or(cuerpo.len());
+            let cuerpo = &cuerpo[..fin];
+            assert!(
+                cuerpo.contains("load_profiles_data_para_editar()?"),
+                "{escritora} debe leer de forma estricta: si el fichero no se entiende, no                  se escribe encima"
+            );
+        }
+    }
+
+    /// Un perfil importado con una versión más nueva se rechaza (se conserva).
+    #[test]
+    fn se_sigue_rechazando_una_version_de_esquema_futura() {
+        let mut p = perfil_minimo();
+        p.version = Some(PROFILE_SCHEMA_VERSION + 1);
+        let r = validate_imported_profile(&p);
+        assert!(r.is_err(), "una versión futura no debe importarse");
+        assert!(r.unwrap_err().contains("más nueva"));
+    }
+
+    /// Los campos heredados sobreviven a ir y volver del JSON.
+    ///
+    /// `expert_mode` ya no lo lee la interfaz, pero no puede perderse al re-guardar un
+    /// perfil antiguo: eso sería una migración silenciosa.
+    #[test]
+    fn los_campos_heredados_se_conservan_al_serializar() {
+        let mut p = perfil_minimo();
+        p.expert_mode = true;
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("expert_mode"), "el campo debe seguir escribiéndose");
+        let vuelta: Profile = serde_json::from_str(&json).unwrap();
+        assert!(vuelta.expert_mode);
+    }
+
+    /// Un perfil sin `command` sigue cargando: es la compatibilidad hacia atrás.
+    #[test]
+    fn un_perfil_sin_command_es_antiguo_no_invalido() {
+        let mut p = perfil_minimo();
+        p.command = None;
+        assert!(validate_imported_profile(&p).is_ok());
+    }
+
+    /// Utilidad: el perfil más pequeño que pasa la validación.
+    fn perfil_minimo() -> Profile {
+        Profile {
+            id: "x".to_string(),
+            name: "Prueba".to_string(),
+            appid: 1623730,
+            game_name: "Palworld".to_string(),
+            enabled_params: vec![],
+            selected_community_recs: vec![],
+            selected_engine_recs: vec![],
+            force_proton: false,
+            expert_mode: false,
+            manual_command: None,
+            use_manual_command: false,
+            notes: None,
+            command: Some("%command%".to_string()),
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: "2026-01-01 00:00:00".to_string(),
+            order: 0,
+            version: Some(PROFILE_SCHEMA_VERSION),
+        }
+    }
+}

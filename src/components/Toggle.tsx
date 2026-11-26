@@ -10,6 +10,7 @@ export function Toggle({
   onChange,
   label,
   disabled,
+  indeterminate = false,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
@@ -19,6 +20,16 @@ export function Toggle({
    */
   label: string;
   disabled?: boolean;
+  /**
+   * El ajuste está puesto **en parte** del comando: hay otra aparición que Thoriapp no
+   * controla. Se pinta encendido (porque de verdad está en la línea) con una marca
+   * distinta, y `aria-checked="mixed"` lo anuncia como parcial.
+   *
+   * No se usa para «cargando»: mientras el motor responde el toggle se queda pulsable
+   * (deshabilitarlo lo teñía de `opacity-50` y hacía parpadear toda la lista) y la
+   * tarjeta solo se marca con `aria-busy`, sin cambio visual.
+   */
+  indeterminate?: boolean;
 }) {
   return (
     <button
@@ -26,10 +37,16 @@ export function Toggle({
       onClick={() => onChange(!checked)}
       disabled={disabled}
       className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--action)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] disabled:opacity-50 disabled:cursor-not-allowed ${
-        checked ? 'bg-[var(--action)]' : 'bg-[var(--border)]'
+        indeterminate
+          ? // Parcial: el mismo morado apagado, para que se lea «puesto» sin parecer
+            // completo.
+            'bg-action/60'
+          : checked
+            ? 'bg-[var(--action)]'
+            : 'bg-[var(--border)]'
       }`}
       role="switch"
-      aria-checked={checked}
+      aria-checked={indeterminate ? 'mixed' : checked}
       aria-label={label}
     >
       <span

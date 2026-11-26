@@ -134,6 +134,12 @@ export interface CommunityRecommendation {
   optimized_for: string[];
   notes?: string;
   recommended?: boolean;
+  /**
+   * Solo tiene efecto bajo Proton/Wine. Lo decide Rust (`marcar_proton_only`) con el mismo
+   * predicado que el catálogo de reglas. Es opcional para que una respuesta antigua o un
+   * fixture de test sin el campo sigan siendo válidos; `esSoloProton` cubre ese hueco.
+   */
+  proton_only?: boolean;
 }
 
 export interface Profile {
@@ -149,6 +155,12 @@ export interface Profile {
   manual_command?: string;
   use_manual_command: boolean;
   notes?: string;
+  /**
+   * Comando exacto confirmado al guardar. Si está, se muestra tal cual: es la única forma
+   * de que el perfil diga lo mismo que la caja del comando. Ausente en los perfiles
+   * antiguos, que se siguen reconstruyendo como antes.
+   */
+  command?: string;
   created_at: string;
   updated_at: string;
   order?: number;
@@ -194,6 +206,124 @@ export type LauncherFilter = 'all' | 'steam' | 'lutris' | 'heroic' | 'heronite';
 
 // ==================== PRUEBAS DE RENDIMIENTO ====================
 // Espejan los structs de src-tauri/src/benchmarks.rs
+
+// ==================== Instantánea de configuración (subfase 5.2) ====================
+
+/**
+ * De dónde salió un dato de la instantánea.
+ *
+ * `'verificado_en_ejecucion'` sigue sin usarse: comprobar el **efecto** de una optimización
+ * no es lo mismo que ver el proceso corriendo, y eso no está resuelto.
+ */
+export type Procedencia =
+  | 'motor_rust'
+  | 'configurado_en_thoriapp'
+  | 'leido_de_steam'
+  | 'registrado_por_mangohud'
+  | 'detectado_en_sistema'
+  | 'declarado_por_usuario'
+  | 'verificado_en_ejecucion'
+  /** Leído del proceso del juego mientras corría (subfase 5.3). */
+  | 'observado_en_proceso'
+  /** Asignado a mano por el usuario. */
+  | 'confirmado_por_usuario'
+  /** Deducido de una coincidencia de nombre: es una inferencia, no una observación. */
+  | 'inferido'
+  | 'desconocido';
+
+export interface ConProcedencia<T> {
+  valor: T;
+  procedencia: Procedencia;
+  capturado_en?: string | null;
+}
+
+export interface IdentidadInstantanea {
+  /** AppID real del juego; `null` si no se conoce (nunca el `0` de las reglas genéricas). */
+  appid_real: number | null;
+  /**
+   * De dónde sale `appid_real`. `observado_en_proceso` = leído del proceso del juego;
+   * `desconocido` = no hay dato fiable. La interfaz lo muestra en vez de dar el número a
+   * secas, para que no parezca lo mismo un AppID observado que uno supuesto.
+   */
+  appid_procedencia?: Procedencia;
+  benchmark_id: string;
+  numero_prueba: number | null;
+  fecha: string;
+}
+
+export interface ConfigInstantanea {
+  /** Comando literal confirmado por el motor de Rust. */
+  comando_confirmado: ConProcedencia<string> | null;
+  revision_motor: number | null;
+  opciones_steam: ConProcedencia<string> | null;
+  perfil_id: string | null;
+  perfil_nombre: ConProcedencia<string> | null;
+  cambios_sin_guardar: boolean | null;
+  modo_proton: ConProcedencia<boolean> | null;
+  /** Solo si es verificable. Configurar Proton no demuestra que se usara. */
+  ejecucion_verificada: ConProcedencia<string> | null;
+}
+
+export interface EntornoInstantanea {
+  gpu: ConProcedencia<string> | null;
+  cpu: ConProcedencia<string> | null;
+  ram_gb: ConProcedencia<number> | null;
+  kernel: ConProcedencia<string> | null;
+  driver: ConProcedencia<string> | null;
+  mesa: ConProcedencia<string> | null;
+  /** Versión de Proton instalada o seleccionada. NO la que usó el proceso. */
+  proton_seleccionado: ConProcedencia<string> | null;
+  build_id: ConProcedencia<string> | null;
+  log_interval_ms: ConProcedencia<number> | null;
+}
+
+/**
+ * Equipo tal como lo registró **MangoHud** durante la grabación.
+ *
+ * Es un bloque independiente del entorno detectado al analizar: pueden ser equipos
+ * distintos y momentos distintos. Ninguno rellena los huecos del otro.
+ */
+export interface HardwareDeLaGrabacion {
+  /** `os` del CSV. Con Proton suele ser «Steam Runtime 4», que NO es la distro. */
+  os: ConProcedencia<string> | null;
+  cpu: ConProcedencia<string> | null;
+  gpu: ConProcedencia<string> | null;
+  /** RAM total tal como la escribió MangoHud (KiB), sin convertir. */
+  ram_kib: ConProcedencia<number> | null;
+  /** La misma RAM convertida a GiB. */
+  ram_gib: ConProcedencia<number> | null;
+  kernel: ConProcedencia<string> | null;
+  /** Suele venir vacío con RADV: `null`, nunca deducido del nombre de la GPU. */
+  driver: ConProcedencia<string> | null;
+  cpuscheduler: ConProcedencia<string> | null;
+  intervalo_muestreo_ms: ConProcedencia<number> | null;
+}
+
+/** Resumen calculado por MangoHud. Fuente aparte; no sustituye a las métricas de Thoriapp. */
+export interface ResumenOriginal {
+  valores: Array<[string, number]>;
+  capturado_en: string;
+}
+
+/**
+ * Instantánea histórica de la configuración de una prueba.
+ *
+ * `null` en los benchmarks anteriores a la subfase 5.2. No se reconstruye: los datos
+ * actuales no dicen cómo se hizo una prueba del mes pasado.
+ */
+export interface SnapshotConfig {
+  version: number;
+  identidad: IdentidadInstantanea;
+  configuracion: ConfigInstantanea;
+  entorno: EntornoInstantanea;
+  /** `null` = el CSV no traía cabecera de sistema: condiciones desconocidas. */
+  hardware_grabacion: HardwareDeLaGrabacion | null;
+  /** `null` = no había `_summary.csv` o no se pudo leer. */
+  resumen_mangohud: ResumenOriginal | null;
+  capturado_en: string;
+  /** Se tomó después de terminar la grabación: no afirma qué estuvo activo durante ella. */
+  posterior_a_la_grabacion: boolean;
+}
 
 export interface Benchmark {
   id: string;
@@ -243,6 +373,12 @@ export interface Benchmark {
    * sin número».
    */
   number?: number | null;
+  /**
+   * Instantánea histórica de la configuración (subfase 5.2).
+   *
+   * Ausente/`null` en benchmarks anteriores: no se reconstruye con datos actuales.
+   */
+  snapshot?: SnapshotConfig | null;
   // Solo existen en benchmarks guardados con la versión nueva
   spikes_per_min?: number | null;
   pct_over_33ms?: number | null;
@@ -470,4 +606,99 @@ export interface FinishedLog {
   program: string;
   /** Marca de tiempo del nombre, `YYYY-MM-DD_HH-MM-SS`. */
   timestamp: string;
+}
+
+// ==================== Sesiones de ejecución (subfase 5.3) ====================
+
+/**
+ * ¿Se pudo ver el proceso del juego?
+ *
+ * `'sin_visibilidad'` **no** significa que el juego no estuviera corriendo: significa que no
+ * se pudo mirar (contenedor, otro usuario, `hidepid`). La interfaz nunca debe presentarlo
+ * como lo segundo.
+ */
+export type EvidenciaProceso =
+  | 'observada'
+  | 'sin_visibilidad'
+  | 'sin_permisos'
+  | 'terminada'
+  | 'no_observada';
+
+/** De dónde salió el AppID de una sesión. */
+export type OrigenAppId =
+  | 'entorno_del_proceso'
+  | 'ejecutable'
+  | 'directorio_de_instalacion'
+  | 'inferido_por_nombre'
+  | 'confimado_por_usuario'
+  | 'desconocido';
+
+export interface IdentidadDeSesion {
+  appid: number | null;
+  origen: OrigenAppId;
+  candidatos: number[];
+  nombre_observado: string | null;
+  evidencia: string[];
+}
+
+export interface ProcesoObservado {
+  pid: number;
+  inicio_del_proceso: string | null;
+  primera_observacion: string | null;
+  ejecutable: string | null;
+  appid_del_entorno: { steam_app_id: string | null; steam_game_id: string | null } | null;
+  bajo_proton: boolean | null;
+  hijo_de_steam: boolean | null;
+}
+
+export interface ConfiguracionCapturada {
+  comando_confirmado: ConProcedencia<string> | null;
+  perfil: ConProcedencia<string> | null;
+  revision_motor: number | null;
+  opciones_steam: ConProcedencia<string> | null;
+  capturado_en: string;
+  /**
+   * `true` si la foto se tomó **después** de que arrancara el juego. Entonces describe lo
+   * que había puesto más tarde, no necesariamente lo que se usó al arrancar.
+   */
+  posterior_al_arranque: boolean;
+}
+
+export interface SesionDeEjecucion {
+  id: string;
+  tipo: 'observada' | 'agrupada_sin_proceso';
+  identidad: IdentidadDeSesion;
+  proceso: ProcesoObservado | null;
+  evidencia_proceso: EvidenciaProceso;
+  configuracion_inicial: ConfiguracionCapturada | null;
+  grabaciones: string[];
+  abierta_en: string;
+  ultima_observacion: string | null;
+  cerrada_en: string | null;
+}
+
+/** Qué está haciendo el observador de procesos. */
+/** Un juego que el observador ve ahora mismo. */
+export interface JuegoObservado {
+  /** Clave del proceso observado (`pid@inicio`). */
+  clave: string;
+  /** AppID leído del propio proceso, si lo llevaba. */
+  appid: number | null;
+  /**
+   * Nombre **comercial**, resuelto en Rust por AppID contra la biblioteca de Steam.
+   * `null` = no se pudo resolver: se dice «identidad desconocida».
+   */
+  nombre: string | null;
+}
+
+export interface EstadoObservador {
+  activo: boolean;
+  estado: 'apagado' | 'sin_visibilidad' | 'observando' | 'buscando';
+  /** Juegos observados ahora, con su nombre. Vacío si no se está observando. */
+  juegos: JuegoObservado[];
+  /** Solo `true` con evidencia real de que el juego no corre. En Docker es `false`. */
+  puede_afirmar_que_no_corre: boolean;
+  pasadas: number;
+  coste_ms: number | null;
+  error: string | null;
 }

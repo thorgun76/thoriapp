@@ -14,6 +14,7 @@ import catalogoJuegos from '../../src-tauri/games.json';
 // (?raw), así que el test no depende de `fs` (jsdom lo stubea).
 import preflightRs from '../../src-tauri/src/preflight.rs?raw';
 import engineRs from '../../src-tauri/src/engine.rs?raw';
+import launchCommandRs from '../../src-tauri/src/launch_command.rs?raw';
 
 describe('checkManualCommand: comandos normales', () => {
   it('acepta un comando que solo son variables y %command%', () => {
@@ -453,5 +454,33 @@ describe('la lista de envoltorios coincide con la de preflight.rs', () => {
     const enTs = [...KNOWN_WRAPPERS].sort();
 
     expect(enTs).toEqual(enRust);
+  });
+});
+
+describe('la lista de lanzadores permitidos no se separa de la de Rust', () => {
+  it('todo lanzador que Rust acepta lo acepta el frontend', () => {
+    // Rust es la única fuente de verdad desde la fase 2 (`launch_command::validar`). Aquí
+    // hay una copia porque el frontend avisa mientras se escribe, sin ir y volver por IPC
+    // en cada pulsación. Si se separan, la app se contradice: Rust acepta el comando al
+    // guardar el perfil y el frontend lo marca en rojo (o al contrario).
+    const m = launchCommandRs.match(
+      /pub const LANZADORES_PERMITIDOS[^=]*=\s*\[([^\]]*)\]/,
+    );
+    expect(m, 'no se encontró LANZADORES_PERMITIDOS en launch_command.rs').not.toBeNull();
+    const enRust = [...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+
+    for (const lanzador of enRust) {
+      // Un lanzador sin `%command%` no basta para pasar la validación entera, pero sí para
+      // ser reconocido como programa: eso es lo que se comprueba aquí.
+      const r = checkManualCommand(`${lanzador} %command%`);
+      expect(r.safe, `Rust acepta «${lanzador}» y el frontend no`).toBe(true);
+    }
+  });
+
+  it('«env» se acepta en los dos lados', () => {
+    // Se añadió al unificar los validadores: `env FOO=1 prog` es una línea legítima y
+    // antes el frontend la rechazaba por lanzador desconocido.
+    expect(checkManualCommand('env FOO=1 %command%').safe).toBe(true);
+    expect(checkManualCommand('env %command%').safe).toBe(true);
   });
 });

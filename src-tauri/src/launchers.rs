@@ -9,6 +9,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct ExternalGame {
     pub name: String,
     pub appid: Option<u32>,
+    /// Identificador **interno** del lanzador, cuando lo tiene.
+    ///
+    /// Es la identidad estable de un juego que no es de Steam: Lutris numera sus entradas en
+    /// `pga.db` (`id`), y ese número no cambia aunque se renombre el juego o se mueva su
+    /// carpeta. **No es un AppID**: no identifica nada en Steam y nunca debe presentarse como
+    /// tal. Se guarda aparte justamente para no confundirlos.
+    pub id_de_lanzador: Option<String>,
     pub launcher: String,
     pub install_path: Option<String>,
     pub runner: Option<String>,
@@ -16,6 +23,98 @@ pub struct ExternalGame {
     /// app_name de Heroic, clave del library.json de Heronite). Necesaria para
     /// localizar su portada real, incluidas las que el usuario cambió a mano.
     pub cover_key: Option<String>,
+    /// Prefijo de Wine, cuando el lanzador lo conoce (Lutris lo guarda en su `.yml`).
+    ///
+    /// Sirve para correlacionar un proceso con su entrada de catálogo cuando `install_path`
+    /// falta: en Lutris, `directory` viene vacío en los juegos añadidos a mano, así que el
+    /// prefijo es la única carpeta que se conoce de verdad.
+    pub wine_prefix: Option<String>,
+    /// Ejecutable configurado por el lanzador, si lo declara.
+    ///
+    /// Es la evidencia más directa para saber **qué** proceso es el juego, por delante de
+    /// cualquier heurística sobre el nombre.
+    pub exec: Option<String>,
+    /// Runtime con el que el lanzador dice que ejecutará el juego.
+    ///
+    /// **Configurado, no observado.** Que Heroic tenga Proton configurado no demuestra que el
+    /// proceso esté usando esa versión. No se mezcla con `runner` (que dice cómo lo gestiona
+    /// el lanzador: `sideload`, `legendary`…) porque son dos cosas distintas.
+    pub runtime_configurado: Option<String>,
+}
+
+// ==================== GamesConfig (Heronite y Heroic) ====================
+
+/// Lo que Heronite y Heroic guardan por juego en su `GamesConfig`.
+///
+/// Los dos lanzadores son del mismo linaje y escriben el mismo esquema: un objeto con la
+/// versión de Wine y el prefijo. Se lee con **una** función y un **mismo** tipo, no con dos
+/// adaptadores paralelos.
+///
+/// Se busca por **claves**, no por posición: los datos que se conocen vienen de un recorrido
+/// recursivo y no está confirmado que estén en la raíz del documento. Por eso la lectura
+/// desciende por los objetos del JSON, pero **solo** dentro del fichero de esa entrada: nunca
+/// busca en otros ficheros del directorio, que es como se acabaría cogiendo la configuración
+/// de otro juego.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigDelJuego {
+    /// Ruta del prefijo de Wine, tal cual la escribe el lanzador.
+    ///
+    /// En el equipo real es el directorio **base** (`…/Prefixes/eslabong`), mientras que el
+    /// proceso declara `…/pfx`. Esa diferencia la resuelve `normalizar_prefijo`, no este
+    /// lector: aquí se guarda lo configurado, sin retocar.
+    pub wine_prefix: Option<String>,
+    /// Binario del runtime configurado (`…/proton`), si lo hay.
+    pub runtime_bin: Option<String>,
+    /// Nombre del runtime configurado (`proton-cachyos-slr`).
+    pub runtime_name: Option<String>,
+    /// Tipo de runtime configurado (`proton`, `wine`…).
+    pub runtime_type: Option<String>,
+}
+
+impl ConfigDelJuego {
+    /// ¿Hay algo aprovechable? Un fichero vacío no aporta.
+    pub fn esta_vacio(&self) -> bool {
+        self.wine_prefix.is_none()
+            && self.runtime_bin.is_none()
+            && self.runtime_name.is_none()
+            && self.runtime_type.is_none()
+    }
+}
+
+/// Lee la configuración de **un** juego desde su `GamesConfig/<id>.json`.
+///
+/// El documento es un **mapa de identificador a configuración**:
+///
+/// ```text
+/// { "5WzVLqXjCNJWsvmPCz4M4N": { "wineVersion": {...}, "winePrefix": "..." }, "otro": {...} }
+/// ```
+///
+/// Se busca la clave del identificador pedido y **solo** esa. No se recorre el documento: dos
+/// juegos pueden compartir fichero, y quedarse con "el primer prefijo que aparezca" asignaría a
+/// un juego la configuración de otro.
+///
+/// Tolera lo que hay en una instalación real: fichero ausente, JSON inválido, campos
+/// opcionales. Nada de eso es un error, es un juego sin configuración de lanzamiento.
+pub fn leer_config_del_juego(ruta: &Path, id: &str) -> Option<ConfigDelJuego> {
+    let texto = fs::read_to_string(ruta).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&texto).ok()?;
+    let entrada = json.get(id)?;
+    let config = ConfigDelJuego {
+        wine_prefix: texto_de(entrada, "winePrefix"),
+        runtime_bin: entrada.get("wineVersion").and_then(|w| texto_de(w, "bin")),
+        runtime_name: entrada.get("wineVersion").and_then(|w| texto_de(w, "name")),
+        runtime_type: entrada.get("wineVersion").and_then(|w| texto_de(w, "type")),
+    };
+    (!config.esta_vacio()).then_some(config)
+}
+
+/// Cadena no vacía de un campo, recortada. Sin el campo, `None`.
+fn texto_de(v: &serde_json::Value, clave: &str) -> Option<String> {
+    v.get(clave)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 // ==================== HELPERS ====================
@@ -60,15 +159,104 @@ fn find_lutris_dir() -> Option<PathBuf> {
     .find(|p| p.join("pga.db").exists())
 }
 
-/// Lee la ruta del exe desde el .yml de configuración del juego (si existe)
-fn read_lutris_exe(yml: &Path) -> Option<String> {
-    let content = fs::read_to_string(yml).ok()?;
-    content.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("exe:")
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-    })
+/// Lo que un `.yml` de Lutris sabe del juego y sirve para reconocerlo.
+///
+/// `pga.db` no basta: en un juego añadido a mano `directory` viene **vacío**, y `service` y
+/// `service_id` son `NULL`. El `id` local identifica la entrada, pero no dice nada de qué
+/// proceso es. El `.yml` sí: guarda el ejecutable configurado y el prefijo de Wine.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LutrisConfig {
+    /// `game.exe`: el ejecutable que el usuario configuró. Es la evidencia más directa.
+    pub exe: Option<String>,
+    /// `game.prefix`: prefijo de Wine. Correlaciona aunque el exe sea un nombre genérico.
+    pub prefix: Option<String>,
+    /// `game.working_dir`.
+    pub working_dir: Option<String>,
+    /// `game.directory`, si Lutris lo trae.
+    pub directory: Option<String>,
+}
+
+/// Lee un valor escalar de YAML, quitando comillas y comentarios.
+///
+/// Se lee a mano en vez de añadir `serde_yaml`: hace falta una docena de claves planas de un
+/// fichero que escribe Lutris, no un YAML completo. Se respeta la anidación por sangría para
+/// no confundir `game.exe` con un `exe:` de otra sección.
+fn valor_yaml(linea: &str, clave: &str, sangria_seccion: usize) -> Option<String> {
+    // La sección `game:` está a una sangría concreta; sus claves van un nivel más adentro.
+    let recortada = linea.trim_start();
+    let sangria = linea.len() - recortada.len();
+    // Dentro de `game:` las claves van un nivel más adentro; sin sección van en la raíz.
+    // Se aceptan ambas, pero **solo** esas dos: así un `exe:` metido en otra sección no
+    // pasa por el del juego.
+    if sangria != sangria_seccion + 2 && sangria != sangria_seccion {
+        return None;
+    }
+    let resto = recortada.strip_prefix(clave)?.strip_prefix(':')?;
+    let valor = resto.trim();
+    if valor.is_empty() {
+        return None;
+    }
+    // Comentario al final, solo si no va entre comillas.
+    let valor = if valor.starts_with('"') || valor.starts_with('\'') {
+        valor.trim_matches('"').trim_matches('\'').to_string()
+    } else {
+        valor.split(" #").next().unwrap_or(valor).trim().to_string()
+    };
+    (!valor.is_empty()).then_some(valor)
+}
+
+/// Extrae de un `.yml` de Lutris los datos que sirven para identificar el juego.
+///
+/// Se buscan dentro de la sección `game:`. Si el `.yml` no la tiene (formato antiguo, con las
+/// claves en la raíz), se busca en la raíz: Lutris escribió los dos formatos y rechazar el
+/// viejo dejaría sin datos a instalaciones reales.
+pub fn leer_config_de_lutris(yml: &Path) -> Option<LutrisConfig> {
+    let contenido = fs::read_to_string(yml).ok()?;
+    let mut config = LutrisConfig::default();
+    let mut sangria_de_game: Option<usize> = None;
+
+    for linea in contenido.lines() {
+        let recortada = linea.trim_start();
+        if recortada.starts_with('#') || recortada.is_empty() {
+            continue;
+        }
+        let sangria = linea.len() - recortada.len();
+        if recortada.starts_with("game:") && recortada.trim() == "game:" {
+            sangria_de_game = Some(sangria);
+            continue;
+        }
+        // Se acaba la sección cuando aparece otra clave con la misma sangría que `game:`.
+        if let Some(g) = sangria_de_game {
+            if sangria <= g && !recortada.starts_with('-') {
+                sangria_de_game = None;
+            }
+        }
+        let base = sangria_de_game.unwrap_or(0);
+        if config.exe.is_none() {
+            config.exe = valor_yaml(linea, "exe", base);
+        }
+        if config.prefix.is_none() {
+            config.prefix = valor_yaml(linea, "prefix", base);
+        }
+        if config.working_dir.is_none() {
+            config.working_dir = valor_yaml(linea, "working_dir", base);
+        }
+        if config.directory.is_none() {
+            config.directory = valor_yaml(linea, "directory", base);
+        }
+    }
+
+    (config != LutrisConfig::default()).then_some(config)
+}
+
+/// ¿Hay al menos una biblioteca de lanzador instalada?
+///
+/// Sirve para distinguir «este usuario no tiene juegos» de «no se pudo leer nada». No lee
+/// ningún catálogo: solo comprueba que exista el directorio de datos de algún lanzador.
+pub fn hay_alguna_biblioteca() -> bool {
+    find_lutris_dir().is_some()
+        || find_heroic_dir().is_some()
+        || home_dir().join(".local/share/heronite").is_dir()
 }
 
 /// Escanea juegos de Lutris.
@@ -239,10 +427,14 @@ pub fn scan_lutris_games() -> Vec<ExternalGame> {
             None
         };
 
+        // El `.yml` es la única fuente que tiene el ejecutable configurado y el prefijo.
+        // Se lee una vez y se reutiliza: no se vuelve a abrir por cada campo.
+        let config = yml.as_deref().and_then(leer_config_de_lutris);
+
         // `directory` viene vacío en casi todos los juegos de Wine: se usa el exe del .yml
         let install_path = directory
             .filter(|d| !d.is_empty())
-            .or_else(|| yml.as_deref().and_then(read_lutris_exe));
+            .or_else(|| config.as_ref().and_then(|c| c.exe.clone()));
 
         // Nombre de la carátula en disco. No basta con `configpath`: para un
         // juego añadido a mano el .yml se llama `<slug>-<timestamp>`, mientras
@@ -250,15 +442,26 @@ pub fn scan_lutris_games() -> Vec<ExternalGame> {
         // numérico de la base de datos, que Lutris también usa como nombre.
         let cover_key = build_lutris_cover_key(&name, configpath.as_deref(), db_id);
 
-        println!("[Lutris] ✓ {} (AppID: {:?}) [carátula: {}]", name, appid, cover_key);
+        println!(
+            "[Lutris] ✓ {} (AppID: {:?}) [carátula: {}]",
+            name, appid, cover_key
+        );
 
         games.push(ExternalGame {
             name,
             appid,
+            // El `id` de `pga.db` es la identidad estable de Lutris: no cambia al renombrar
+            // el juego ni al mover su carpeta. Es lo que permite distinguir dos juegos que
+            // compartan instalación sin inventarles un AppID de Steam.
+            id_de_lanzador: db_id.map(|i| i.to_string()),
             launcher: "lutris".to_string(),
             install_path,
             runner,
             cover_key: Some(cover_key),
+            wine_prefix: config.as_ref().and_then(|c| c.prefix.clone()),
+            exec: config.as_ref().and_then(|c| c.exe.clone()),
+            // Lutris lo pone en el `.yml` con otro esquema; no se inventa aquí.
+            runtime_configurado: None,
         });
     }
 
@@ -280,6 +483,57 @@ fn find_heroic_dir() -> Option<PathBuf> {
 }
 
 /// Escanea juegos de Epic instalados en Heroic
+/// Ejecutable declarado en la **biblioteca de la tienda** (`store_cache/legendary_library.json`),
+/// buscado por el identificador **exacto** de Epic.
+///
+/// Existe como complemento, no como fuente principal. El registro de instalación
+/// (`legendaryConfig/legendary/installed.json`) es el que manda, pero durante una instalación
+/// o una actualización puede traer `install.executable` a `null` mientras el ejecutable ya
+/// está en disco. La biblioteca, que se escribe al listar la tienda, sí lo conserva.
+///
+/// La búsqueda es por `app_name` (o su `id`), **nunca por título**: dos juegos diferentes
+/// pueden llamarse parecido, y emparejar por nombre atribuiría el ejecutable de uno al otro.
+/// Si la biblioteca no nombra ese id, se devuelve `None` y no se inventa nada.
+fn ejecutable_en_biblioteca_de_la_tienda(dir: &Path, epic_id: &str) -> Option<String> {
+    let ruta = dir.join("store_cache/legendary_library.json");
+    let value = read_json(&ruta)?;
+    // La forma es `{"library": [{ "app_name": "...", "executable": "..." }, ...]}`; se
+    // acepta también un array en la raíz por si la versión instalada lo escribe así.
+    let lista = value
+        .get("library")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.as_array())?;
+    for entrada in lista {
+        // Solo el id exacto: `app_name` es el identificador de Epic y es lo que usa Heroic.
+        let coincide = entrada
+            .get("app_name")
+            .and_then(|v| v.as_str())
+            .map(|a| a == epic_id)
+            .unwrap_or(false)
+            || entrada
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|a| a == epic_id)
+                .unwrap_or(false);
+        if !coincide {
+            continue;
+        }
+        // El campo puede llamarse `executable` o venir anidado en `install`.
+        let exec = entrada
+            .get("executable")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                entrada
+                    .get("install")
+                    .and_then(|i| i.get("executable"))
+                    .and_then(|v| v.as_str())
+            })
+            .filter(|s| !s.is_empty())?;
+        return Some(exec.to_string());
+    }
+    None
+}
+
 /// Usa legendaryConfig/legendary/installed.json (archivo central de juegos instalados)
 fn scan_heroic_epic_games(dir: &Path) -> Vec<ExternalGame> {
     let mut games = Vec::new();
@@ -313,7 +567,14 @@ fn scan_heroic_epic_games(dir: &Path) -> Vec<ExternalGame> {
         }
 
         let title = json_str(game_data, "title").unwrap_or_else(|| id.clone());
-        let install_path = json_str(game_data, "install_path");
+        // `install` es el objeto que trae lo declarado por la tienda: `install_path` y
+        // `executable`. Buscarlos en la raíz devolvía `None` y, con `install_path` a `None`,
+        // el juego se descartaba como "carpeta no existe" —que es exactamente lo que pasaba
+        // con Tattoo Tycoon—. Se mantiene el respaldo en la raíz porque
+        // `legendaryConfig/legendary/installed.json` sí los escribía ahí.
+        let install = game_data.get("install").unwrap_or(&serde_json::Value::Null);
+        let install_path =
+            json_str(install, "install_path").or_else(|| json_str(game_data, "install_path"));
 
         // Si la carpeta se borró a mano, el registro queda huérfano
         if !path_exists(&install_path) {
@@ -321,15 +582,76 @@ fn scan_heroic_epic_games(dir: &Path) -> Vec<ExternalGame> {
             continue;
         }
 
-        println!("[Heroic] ✓ Epic: {} (id: {})", title, id);
+        // La configuración de **este** juego: el fichero se llama igual que su `app_name`.
+        // Es donde Heroic guarda el prefijo y el runtime; la biblioteca de la tienda no los
+        // tiene, y por eso salían a `null` y no se podía correlacionar.
+        let config =
+            leer_config_del_juego(&dir.join("GamesConfig").join(format!("{}.json", id)), id);
+
+        // El ejecutable de Epic viene **relativo** a la instalación (`Tattoo Tycoon.exe`),
+        // con espacios dentro del nombre. Se resuelve contra `install_path` tal cual: no se
+        // parte por espacios ni se recorta nada.
+        //
+        // Va dentro de `install`: buscarlo en la raíz devolvía `None` y el juego quedaba sin
+        // ejecutable (que es justo lo que impedía reconocerlo en el proceso).
+        let exec = install
+            .get("executable")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            // Respaldo: el registro de instalación puede no traer el ejecutable todavía
+            // (instalación en curso, actualización), pero la física sí está y la biblioteca
+            // de la tienda lo recuerda por id exacto.
+            .or_else(|| {
+                let e = ejecutable_en_biblioteca_de_la_tienda(dir, id)?;
+                println!("[Heroic] exec desde la biblioteca de la tienda: {} -> {}", id, e);
+                Some(e)
+            })
+            .map(|e| {
+                if e.starts_with('/') {
+                    e
+                } else {
+                    match install_path.as_deref() {
+                        Some(base) => format!("{}/{}", base.trim_end_matches('/'), e),
+                        None => e,
+                    }
+                }
+            });
+
+        println!(
+            "[Heroic] ✓ Epic: {} (id: {}, prefijo: {:?}, exec: {:?})",
+            title,
+            id,
+            config.as_ref().and_then(|c| c.wine_prefix.clone()),
+            exec
+        );
+        crate::diagnostico_procesos::rastro_del_ejecutable(format!(
+            "heroic/epic {}: id={} install_path={:?} install.executable={:?}              install_path_en_raiz={:?} exec_resuelto={:?}",
+            title,
+            id,
+            install.get("install_path").and_then(|v| v.as_str()),
+            install.get("executable").and_then(|v| v.as_str()),
+            game_data.get("install_path").and_then(|v| v.as_str()),
+            exec
+        ));
 
         games.push(ExternalGame {
             name: title,
             appid: None,
+            // El identificador estable es el de **Epic** (`app_name`), no el de Steam: este
+            // juego no está en Steam. Se prefija con la tienda para no confundirlo con el de
+            // otro lanzador que use un id parecido.
+            id_de_lanzador: Some(format!("epic-{}", id)),
             launcher: "heroic".to_string(),
             install_path,
+            // `legendary` es con qué lo **gestiona** Heroic; el runtime de ejecución es el de
+            // `GamesConfig` y no se presenta como si fuera lo mismo.
             runner: Some(format!("epic-{}", id)),
             cover_key: Some(id.clone()),
+            wine_prefix: config.as_ref().and_then(|c| c.wine_prefix.clone()),
+            exec,
+            // El runtime **configurado** por Heroic para este juego.
+            runtime_configurado: config.as_ref().and_then(|c| c.runtime_name.clone()),
         });
     }
 
@@ -438,10 +760,14 @@ fn scan_heroic_gog_games(dir: &Path) -> Vec<ExternalGame> {
             games.push(ExternalGame {
                 name: title,
                 appid: None,
+                id_de_lanzador: Some(format!("gog-{}", app_name)),
                 launcher: "heroic".to_string(),
                 install_path,
                 runner: Some(format!("gog-{}", app_name)),
                 cover_key: Some(app_name.clone()),
+                wine_prefix: None,
+                exec: None,
+                runtime_configurado: None,
             });
         }
     }
@@ -470,10 +796,14 @@ fn amazon_entry(id: &str, game_data: &serde_json::Value) -> Option<ExternalGame>
     Some(ExternalGame {
         name: title,
         appid: None,
+        id_de_lanzador: Some(format!("amazon-{}", id)),
         launcher: "heroic".to_string(),
         install_path,
         runner: Some(format!("amazon-{}", id)),
         cover_key: Some(id.to_string()),
+        wine_prefix: None,
+        exec: None,
+        runtime_configurado: None,
     })
 }
 
@@ -575,10 +905,14 @@ fn scan_heroic_sideload_games(dir: &Path) -> Vec<ExternalGame> {
         games.push(ExternalGame {
             name: title,
             appid: None,
+            id_de_lanzador: Some(id.clone()),
             launcher: "heroic".to_string(),
             install_path,
             runner: Some("sideloaded".to_string()),
             cover_key: Some(id),
+            wine_prefix: None,
+            exec: None,
+            runtime_configurado: None,
         });
     }
 
@@ -656,8 +990,6 @@ struct HeroniteGame {
     steam_app_id: Option<serde_json::Value>,
     #[serde(default)]
     runner: Option<String>,
-    #[serde(rename = "launcher_args", alias = "launcherArgs", default)]
-    launcher_args: Option<String>,
     /// Identificador interno del juego en Heronite (`5WzVLqXjCNJWsvmPCz4M4N`).
     /// Es el nombre que usan sus archivos de arte.
     // Ojo: `sideload_apps/library.json` y las cachés escriben `app_name`
@@ -678,6 +1010,14 @@ struct HeroniteGame {
     install: Option<serde_json::Value>,
     #[serde(rename = "folder_name", default)]
     folder_name: Option<String>,
+    /// Ejecutable **original** que declara la instalación (`install.executable`).
+    ///
+    /// Solo aparece en `sideload_apps/library.json`. Cuando el usuario cambia el ejecutable
+    /// desde la interfaz de Heronite, el valor nuevo va a `remappedExecutable` de
+    /// `local_library/library.json` y **este no se toca**: por eso el remapeado tiene
+    /// precedencia, y por eso se lee aparte en vez de dejarse pisar.
+    #[serde(rename = "remappedExecutable", default)]
+    remapped_executable: Option<String>,
 }
 
 impl HeroniteGame {
@@ -694,14 +1034,19 @@ impl HeroniteGame {
         // `install_path` es lo que guardan las tiendas; los juegos añadidos a
         // mano solo tienen el ejecutable, y su carpeta es la de al lado.
         field("install_path")
-            .or_else(|| self.folder_name.as_deref().map(str::trim).filter(|p| !p.is_empty()))
+            .or_else(|| {
+                self.folder_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+            })
             .or_else(|| field("executable"))
     }
 
     /// El ejecutable concreto que lanza Heronite, si lo hay.
     ///
     /// Hace falta aparte de [`Self::install_folder`]: en `sideload_apps` el
-    /// `install_path` es la carpeta (`/home/thor/Descargas`), así que solo el
+    /// `install_path` es la carpeta (`/home/jugador/Descargas`), así que solo el
     /// ejecutable dice que el "juego" es en realidad `EAappInstaller.exe`.
     fn executable(&self) -> Option<&str> {
         self.install
@@ -710,6 +1055,44 @@ impl HeroniteGame {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|p| !p.is_empty())
+    }
+
+    /// El ejecutable que Heronite lanzará **de verdad**.
+    ///
+    /// Precedencia: `remappedExecutable` manda sobre `install.executable`. No es una
+    /// preferencia de estilo, es lo que hace el lanzador: el usuario cambia el ejecutable
+    /// desde su interfaz, Heronite guarda la elección en `remappedExecutable`
+    /// (`local_library/library.json`) y deja intacto el original de la instalación
+    /// (`sideload_apps/library.json`, `install.executable`). Lanzar el original cuando hay
+    /// remapeo sería ejecutar otra cosa que la que el usuario eligió.
+    ///
+    /// Los dos se conservan por separado: el original sigue diciendo de qué instalación
+    /// viene el juego, y se usa para deducir la carpeta cuando `folder_name` no ayuda.
+    fn ejecutable_efectivo(&self) -> Option<&str> {
+        self.remapped_executable
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.executable())
+    }
+
+    /// Carpeta de instalación declarada, con el ejecutable ya resuelto como respaldo.
+    fn carpeta_de_instalacion(&self) -> Option<String> {
+        if let Some(f) = self
+            .folder_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+        {
+            return Some(f.to_string());
+        }
+        // `install_path` de las tiendas, si lo hay.
+        if let Some(i) = self.install_folder() {
+            return Some(i.to_string());
+        }
+        // Último recurso: la carpeta que contiene el ejecutable.
+        self.ejecutable_efectivo()
+            .and_then(crate::evidencia_proceso::ruta_padre)
     }
 }
 
@@ -797,9 +1180,15 @@ fn is_not_a_game_executable(raw: &str) -> bool {
 fn heronite_removed_apps(local_library: &Path) -> HashSet<String> {
     let mut removed = HashSet::new();
     for file in ["launcher-imports.json", "clients.json"] {
-        let Ok(text) = fs::read_to_string(local_library.join(file)) else { continue };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        let Some(groups) = json.get("removed").and_then(|r| r.as_object()) else { continue };
+        let Ok(text) = fs::read_to_string(local_library.join(file)) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(groups) = json.get("removed").and_then(|r| r.as_object()) else {
+            continue;
+        };
         for apps in groups.values() {
             for app in apps.as_array().into_iter().flatten() {
                 if let Some(name) = app.as_str() {
@@ -830,15 +1219,256 @@ pub fn heronite_desinstalados() -> usize {
 /// biblioteca mostraba juegos ya desinstalados (o que nunca estuvieron
 /// instalados) como si se pudieran lanzar.
 #[cfg(test)]
-fn heronite_game_from_entry(key: &str, raw: serde_json::Value) -> Option<ExternalGame> {
-    heronite_game_from_entry_removed(key, raw, &HashSet::new())
+mod pruebas_lutris_yml {
+    use super::*;
+
+    /// Escribe un `.yml` temporal. Se usa `std::env::temp_dir()` como el resto de pruebas
+    /// del fichero, para no añadir una dependencia solo por esto.
+    struct Temporal(std::path::PathBuf);
+
+    impl Drop for Temporal {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn escribir(nombre: &str, contenido: &str) -> Temporal {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let ruta = std::env::temp_dir().join(format!(
+            "thoriapp-yml-{}-{}-{}.yml",
+            std::process::id(),
+            n,
+            nombre
+        ));
+        std::fs::write(&ruta, contenido).expect("escribir el yml");
+        Temporal(ruta)
+    }
+
+    /// Bloque F: el respaldo de la biblioteca de la tienda empareja por **id exacto**.
+    ///
+    /// El caso real es Tattoo Tycoon: la carpeta existe y el ejecutable está en disco, pero el
+    /// registro de instalación trae `install.executable` a `None` durante la lectura. La
+    /// biblioteca sí lo guarda y se busca por `app_name`, nunca por título.
+    #[test]
+    fn ejecutable_de_la_biblioteca_por_id_exacto() {
+        let base = std::env::temp_dir().join(format!(
+            "thoriapp-heroic-bib-{}-{}",
+            std::process::id(),
+            std::sync::atomic::AtomicUsize::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(base.join("store_cache")).expect("crear store_cache");
+        std::fs::write(
+            base.join("store_cache/legendary_library.json"),
+            r#"{"library":[
+                {"app_name":"epic-a","executable":"Juego A.exe"},
+                {"app_name":"epic-b","executable":"Juego B.exe"}
+            ]}"#,
+        )
+        .expect("escribir biblioteca");
+
+        // Acierta por el id exacto, no por parecido de nombre.
+        assert_eq!(
+            super::ejecutable_en_biblioteca_de_la_tienda(&base, "epic-b").as_deref(),
+            Some("Juego B.exe")
+        );
+        // Un id que no está no se inventa.
+        assert_eq!(
+            super::ejecutable_en_biblioteca_de_la_tienda(&base, "epic-c"),
+            None
+        );
+        // Un título no es un id: `Juego B.exe` no empareja con nada.
+        assert_eq!(
+            super::ejecutable_en_biblioteca_de_la_tienda(&base, "Juego B.exe"),
+            None
+        );
+        // Sin la biblioteca no revienta: simplemente no hay respaldo.
+        assert_eq!(
+            super::ejecutable_en_biblioteca_de_la_tienda(&base.join("no-existe"), "epic-a"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Bloque F, de extremo a extremo**: el ejecutable que sale del `legendary_library.json`
+    /// tiene que llegar al catálogo que usa el observador, no quedarse en el adaptador.
+    ///
+    /// El caso real es Tattoo Tycoon: `install.executable` viene vacío, la carpeta y el `.exe`
+    /// existen en disco, y sin este respaldo el juego se quedaba sin ejecutable y el observador
+    /// no podía reconocer su proceso.
+    #[test]
+    fn el_ejecutable_de_la_biblioteca_llega_al_catalogo_del_observador() {
+        let base = std::env::temp_dir().join(format!(
+            "thoriapp-heroic-pipeline-{}-{}",
+            std::process::id(),
+            std::sync::atomic::AtomicUsize::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let instalacion = base.join("Games/TattooTycoon");
+        std::fs::create_dir_all(&instalacion).expect("crear instalación");
+        std::fs::write(instalacion.join("Tattoo Tycoon.exe"), b"")
+            .expect("crear ejecutable");
+        std::fs::create_dir_all(base.join("legendaryConfig/legendary")).expect("leg. config");
+        std::fs::create_dir_all(base.join("store_cache")).expect("store_cache");
+
+        // `installed.json` sin `install.executable`: hay que resolverlo por la biblioteca.
+        std::fs::write(
+            base.join("legendaryConfig/legendary/installed.json"),
+            format!(
+                r#"{{"epic-tattoo":{{"title":"Tattoo Tycoon","install":{{"install_path":"{}"}}}}}}"#,
+                instalacion.display()
+            ),
+        )
+        .expect("escribir installed.json");
+        std::fs::write(
+            base.join("store_cache/legendary_library.json"),
+            r#"{"library":[{"app_name":"epic-tattoo","executable":"Tattoo Tycoon.exe"}]}"#,
+        )
+        .expect("escribir biblioteca");
+
+        // 1) El adaptador de Heroic resuelve el ejecutable contra `install_path`.
+        let juegos = super::scan_heroic_epic_games(&base);
+        let juego = juegos
+            .iter()
+            .find(|j| j.id_de_lanzador.as_deref() == Some("epic-epic-tattoo"))
+            .expect("el juego tiene que aparecer");
+        let esperado = instalacion.join("Tattoo Tycoon.exe");
+        assert_eq!(
+            juego.exec.as_deref(),
+            Some(esperado.to_string_lossy().as_ref()),
+            "el ejecutable de la biblioteca se resuelve contra la instalación"
+        );
+
+        // 2) Ese mismo ejecutable llega al catálogo del observador. Se construye la entrada
+        //    igual que `catalogo_lanzadores` a partir del `ExternalGame` ya resuelto.
+        let entrada = crate::evidencia_proceso::EntradaDeCatalogo {
+            id_plataforma: juego.id_de_lanzador.clone(),
+            plataforma: Some("epic".to_string()),
+            launcher: juego.launcher.clone(),
+            runner: juego.runner.clone(),
+            titulo: juego.name.clone(),
+            install_dir: juego.install_path.clone(),
+            wine_prefix: juego.wine_prefix.clone(),
+            exec: juego.exec.clone(),
+            runtime_configurado: juego.runtime_configurado.clone(),
+        };
+        assert_eq!(
+            entrada.exec.as_deref(),
+            Some(esperado.to_string_lossy().as_ref()),
+            "el catálogo recibe el ejecutable resuelto, no el vacío"
+        );
+
+        // 3) El índice que usa el observador la reconoce: el eslabón de extremo a extremo.
+        //    Se pregunta por la vía pública (`admite`), que es la que usa la detección real.
+        let indice = crate::proceso_linux::IndiceDelCatalogo::de_catalogo(&[entrada]);
+        let prueba = crate::proceso_linux::PruebaDeProceso {
+            comm: Some("Tattoo Tycoon.exe".to_string()),
+            exe: Some(esperado.to_string_lossy().to_string()),
+            argumentos: Vec::new(),
+            cwd: Some(instalacion.to_string_lossy().to_string()),
+            wine_prefix: None,
+        };
+        assert!(
+            indice.admite(&prueba).is_some(),
+            "el observador reconoce el ejecutable del juego"
+        );
+
+                let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Caso real de CachyOS: `directory` vacío en `pga.db`, pero el `.yml` guarda el `exe`.
+    #[test]
+    fn lee_el_exe_el_prefijo_y_el_directorio_de_trabajo() {
+        let f = escribir(
+            "exe_prefijo",
+            "game:\n  exe: /home/jugador/Games/Eslabong/eslabong.exe\n  prefix: /home/jugador/Games/Heronite/Prefixes/eslabong\n  working_dir: /home/jugador/Games/Eslabong\n  args: ''\n",
+        );
+        let c = leer_config_de_lutris(&f.0).expect("se lee");
+        assert_eq!(
+            c.exe.as_deref(),
+            Some("/home/jugador/Games/Eslabong/eslabong.exe")
+        );
+        assert_eq!(
+            c.prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/eslabong")
+        );
+        assert_eq!(c.working_dir.as_deref(), Some("/home/jugador/Games/Eslabong"));
+        assert_eq!(c.directory, None, "no estaba en el fichero");
+    }
+
+    /// Los `args` no se usan nunca: la app no ejecuta nada que lea de aquí.
+    #[test]
+    fn los_argumentos_no_se_leen() {
+        let f = escribir(
+            "args",
+            "game:\n  exe: /games/a.exe\n  args: -windowed -dx11\n",
+        );
+        let c = leer_config_de_lutris(&f.0).expect("se lee");
+        assert!(c.exe.is_some());
+        assert!(
+            !format!("{c:?}").contains("-windowed"),
+            "los argumentos de lanzamiento no deben recuperarse"
+        );
+    }
+
+    /// No se confunde un `exe:` de otra sección con el del juego.
+    #[test]
+    fn no_confunde_claves_de_otras_secciones() {
+        let f = escribir(
+            "secciones",
+            "game:\n  exe: /games/real.exe\ncustom:\n  exe: /otro/falso.exe\n",
+        );
+        let c = leer_config_de_lutris(&f.0).expect("se lee");
+        assert_eq!(
+            c.exe.as_deref(),
+            Some("/games/real.exe"),
+            "manda el de la sección game:"
+        );
+    }
+
+    /// Formato antiguo: claves en la raíz, sin sección `game:`.
+    #[test]
+    fn acepta_el_formato_sin_seccion_game() {
+        let f = escribir("raiz", "exe: /juegos/viejo.exe\nprefix: /prefijos/viejo\n");
+        let c = leer_config_de_lutris(&f.0).expect("se lee");
+        assert_eq!(c.exe.as_deref(), Some("/juegos/viejo.exe"));
+        assert_eq!(c.prefix.as_deref(), Some("/prefijos/viejo"));
+    }
+
+    /// Comillas y comentarios al final.
+    #[test]
+    fn limpia_comillas_y_comentarios() {
+        let f = escribir(
+            "comillas",
+            "game:\n  exe: \"/games/con espacios/a.exe\"\n  prefix: /p # comentario\n  directory: /games/instalado\n",
+        );
+        let c = leer_config_de_lutris(&f.0).expect("se lee");
+        assert_eq!(c.exe.as_deref(), Some("/games/con espacios/a.exe"));
+        assert_eq!(c.prefix.as_deref(), Some("/p"));
+        assert_eq!(c.directory.as_deref(), Some("/games/instalado"));
+    }
+
+    /// Un `.yml` sin datos útiles no inventa nada.
+    #[test]
+    fn un_fichero_sin_datos_no_devuelve_nada() {
+        let f = escribir("vacio", "game:\n  args: ''\n");
+        assert_eq!(leer_config_de_lutris(&f.0), None);
+    }
 }
 
-/// Igual, descartando además los juegos que el usuario quitó de la Colección.
-fn heronite_game_from_entry_removed(
+#[cfg(test)]
+fn heronite_game_from_entry(key: &str, raw: serde_json::Value) -> Option<ExternalGame> {
+    heronite_game_con_config(key, raw, &HashSet::new(), None)
+}
+
+/// Igual, con la `GamesConfig` de **esa** entrada.
+///
+/// La configuración se lee fuera y se pasa ya resuelta: así no hay forma de que una entrada
+/// acabe con la configuración de otra, que es el riesgo de buscar "el JSON que tenga prefijo".
+fn heronite_game_con_config(
     key: &str,
     raw: serde_json::Value,
     removed: &HashSet<String>,
+    config: Option<&ConfigDelJuego>,
 ) -> Option<ExternalGame> {
     let game: HeroniteGame = match serde_json::from_value(raw) {
         Ok(g) => g,
@@ -849,7 +1479,10 @@ fn heronite_game_from_entry_removed(
     };
 
     if game.is_installed == Some(false) {
-        println!("[Heronite] - {} descartado: is_installed = false", game.title);
+        println!(
+            "[Heronite] - {} descartado: is_installed = false",
+            game.title
+        );
         HERONITE_DESINSTALADOS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
@@ -870,9 +1503,12 @@ fn heronite_game_from_entry_removed(
 
     // Un instalador o el propio cliente de la tienda no es un juego: no se
     // puede lanzar ni tiene perfiles. Heronite sí los lista; aquí no aportan.
-    let ejecutable = game.executable().or_else(|| game.install_folder());
+    let ejecutable = game.ejecutable_efectivo().or_else(|| game.install_folder());
     if ejecutable.is_some_and(is_not_a_game_executable) {
-        println!("[Heronite] - {} descartado: su ejecutable es un instalador o un launcher", game.title);
+        println!(
+            "[Heronite] - {} descartado: su ejecutable es un instalador o un launcher",
+            game.title
+        );
         HERONITE_DESINSTALADOS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
@@ -880,32 +1516,62 @@ fn heronite_game_from_entry_removed(
     // El usuario lo quitó de la Colección de Heronite: tampoco aquí.
     let app_name = game.app_name.as_deref().unwrap_or(key);
     if removed.contains(app_name) || removed.contains(key) {
-        println!("[Heronite] - {} descartado: quitado de la Colección", game.title);
+        println!(
+            "[Heronite] - {} descartado: quitado de la Colección",
+            game.title
+        );
         HERONITE_DESINSTALADOS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
 
     let appid = parse_app_id(&game.steam_app_id);
 
-    println!("[Heronite] ✓ {} (AppID: {:?})", game.title, appid);
+    // Se calculan **antes** de mover campos del struct. El prefijo lo configura Heronite; el
+    // proceso declarará `…/pfx`, y emparejarlos es cosa de `normalizar_prefijo`.
+    let carpeta = game.carpeta_de_instalacion();
+    let ejecutable = game.ejecutable_efectivo().map(str::to_string);
+    let prefijo = config.and_then(|c| c.wine_prefix.clone());
+
+    println!(
+        "[Heronite] ✓ {} (AppID: {:?}, prefijo: {:?}, exec: {:?})",
+        game.title, appid, prefijo, ejecutable
+    );
 
     Some(ExternalGame {
         name: game.title.clone(),
         appid,
+        // La clave del `library.json` es lo único estable de Heronite. Su `appName` puede
+        // cambiar; la clave no.
+        id_de_lanzador: Some(key.to_string()),
         launcher: "heronite".to_string(),
-        install_path: game.launcher_args,
+        // La carpeta de instalación, no los argumentos de lanzamiento: `launcher_args` es la
+        // línea con la que Heronite arranca el juego y no dice dónde está instalado.
+        install_path: carpeta,
+        // `runner` de Heronite (`sideload`, `legendary`…) dice **quién lo gestiona**, no con
+        // qué se ejecuta. El runtime de verdad es el de `GamesConfig`.
         runner: game.runner,
         // Se envían varias candidatas separadas por `|`: el `appName`
         // interno, la clave del library.json y el título (Heronite también
         // nombra el arte por título en algunos casos).
         cover_key: Some(
-            [game.app_name.as_deref(), Some(key), Some(game.title.as_str())]
-                .into_iter()
-                .flatten()
-                .filter(|k| !k.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("|"),
+            [
+                game.app_name.as_deref(),
+                Some(key),
+                Some(game.title.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|k| !k.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("|"),
         ),
+        // El prefijo y el ejecutable **no** están en la biblioteca: están en
+        // `GamesConfig/<appName>.json`, que hasta ahora no se leía. Por eso las ocho entradas
+        // de Heronite salían con `wine_prefix` y `exec` a `null` y eslabong no correlacionaba.
+        wine_prefix: prefijo,
+        // El ejecutable que el lanzador ejecutará de verdad (remapeado si lo hay).
+        exec: ejecutable,
+        runtime_configurado: config.and_then(|c| c.runtime_name.clone()),
     })
 }
 
@@ -924,11 +1590,16 @@ fn heronite_game_from_entry_removed(
 /// `local_library/library.json` mostraba entradas fantasma: juegos borrados
 /// cuya metadata sobrevivía (Fortnite, NBA 2K21, AION 2…).
 fn heronite_library_files(data_dir: &Path) -> Vec<PathBuf> {
-    ["sideload_apps/library.json", "store_cache/legendary_library.json", "store_cache/gog_library.json", "store_cache/nile_library.json"]
-        .iter()
-        .map(|rel| data_dir.join(rel))
-        .filter(|p| p.is_file())
-        .collect()
+    [
+        "sideload_apps/library.json",
+        "store_cache/legendary_library.json",
+        "store_cache/gog_library.json",
+        "store_cache/nile_library.json",
+    ]
+    .iter()
+    .map(|rel| data_dir.join(rel))
+    .filter(|p| p.is_file())
+    .collect()
 }
 
 /// Lee una fuente y devuelve sus entradas, aceptando objeto (`games`) y array
@@ -961,9 +1632,40 @@ pub fn scan_heronite_games() -> Vec<ExternalGame> {
     for file in heronite_library_files(&data_dir) {
         println!("[Heronite] Escaneando: {:?}", file);
         for (key, raw) in heronite_store_entries(&file) {
+            // El identificador de la entrada es el mismo en las tres fuentes
+            // (`sideload_apps` `app_name`, `local_library` `appName`, y el nombre del fichero
+            // de `GamesConfig`). Se relaciona por ese valor **exacto**, nunca por título: dos
+            // juegos pueden llamarse igual y un título puede cambiar sin cambiar el juego.
+            let id_de_heronite = raw
+                .get("app_name")
+                .or_else(|| raw.get("appName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(&key)
+                .to_string();
             // La metadata manda para el título: es la que el usuario ve.
-            let merged = heronite_merge_meta(raw, &meta);
-            if let Some(game) = heronite_game_from_entry_removed(&key, merged, &removed) {
+            let mut merged = heronite_merge_meta(raw, &meta);
+            // `remappedExecutable` vive en `local_library`, no en la entrada de la tienda: se
+            // completa aquí para que la precedencia remapeado > original funcione.
+            if let Some(m) = meta.get(&id_de_heronite) {
+                if let (Some(dst), Some(src)) = (merged.as_object_mut(), m.as_object()) {
+                    if let Some(remap) = src.get("remappedExecutable") {
+                        dst.entry("remappedExecutable".to_string())
+                            .or_insert_with(|| remap.clone());
+                    }
+                }
+            }
+            // La configuración de **este** juego: una ruta construida con su identificador.
+            // Nunca se busca "el JSON que tenga un prefijo", que cogería el de otro.
+            // Un fichero **por juego**, en `GamesConfig/<id>.json`, no un documento único.
+            let config = leer_config_del_juego(
+                &data_dir
+                    .join("GamesConfig")
+                    .join(format!("{}.json", id_de_heronite)),
+                &id_de_heronite,
+            );
+            if let Some(game) =
+                heronite_game_con_config(&id_de_heronite, merged, &removed, config.as_ref())
+            {
                 games.push(game);
             }
         }
@@ -985,16 +1687,29 @@ fn heronite_local_meta(data_dir: &Path) -> HashMap<String, serde_json::Value> {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
         return HashMap::new();
     };
-    let Some(pool) = json.get("games") else { return HashMap::new() };
+    let Some(pool) = json.get("games") else {
+        return HashMap::new();
+    };
     heronite_entries(pool.clone()).into_iter().collect()
 }
 
 /// Completa la entrada de la tienda con la metadata local sin pisar lo que ya
 /// trae (el estado de instalación y la ruta son de la tienda).
-fn heronite_merge_meta(entry: serde_json::Value, meta: &HashMap<String, serde_json::Value>) -> serde_json::Value {
-    let Some(obj) = entry.as_object() else { return entry };
-    let app_name = obj.get("appName").or_else(|| obj.get("app_name")).and_then(|v| v.as_str());
-    let Some(m) = app_name.and_then(|a| meta.get(a)).and_then(|v| v.as_object()) else {
+fn heronite_merge_meta(
+    entry: serde_json::Value,
+    meta: &HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let Some(obj) = entry.as_object() else {
+        return entry;
+    };
+    let app_name = obj
+        .get("appName")
+        .or_else(|| obj.get("app_name"))
+        .and_then(|v| v.as_str());
+    let Some(m) = app_name
+        .and_then(|a| meta.get(a))
+        .and_then(|v| v.as_object())
+    else {
         return entry;
     };
     let mut out = obj.clone();
@@ -1018,15 +1733,24 @@ pub fn scan_all_launchers() -> Vec<ExternalGame> {
     println!("[Thoriapp] ============================================");
 
     let lutris_games = scan_lutris_games();
-    println!("[Thoriapp] Lutris: {} juegos encontrados", lutris_games.len());
+    println!(
+        "[Thoriapp] Lutris: {} juegos encontrados",
+        lutris_games.len()
+    );
     all_games.extend(lutris_games);
 
     let heroic_games = scan_heroic_games();
-    println!("[Thoriapp] Heroic: {} juegos encontrados", heroic_games.len());
+    println!(
+        "[Thoriapp] Heroic: {} juegos encontrados",
+        heroic_games.len()
+    );
     all_games.extend(heroic_games);
 
     let heronite_games = scan_heronite_games();
-    println!("[Thoriapp] Heronite: {} juegos encontrados", heronite_games.len());
+    println!(
+        "[Thoriapp] Heronite: {} juegos encontrados",
+        heronite_games.len()
+    );
     all_games.extend(heronite_games);
 
     // Orden estable e insensible a mayúsculas; deduplica por (nombre, launcher)
@@ -1206,7 +1930,9 @@ mod tests {
 
         let entries = heronite_entries(games);
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|(k, v)| k == "steam_2646460" && v["title"] == "Soulmask"));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "steam_2646460" && v["title"] == "Soulmask"));
     }
 
     #[test]
@@ -1268,7 +1994,7 @@ mod tests {
         assert!(removed.contains("lutris_9"));
 
         let raw = serde_json::json!({ "title": "Heroes III", "appName": "lutris_7", "is_installed": true });
-        assert!(heronite_game_from_entry_removed("lutris_7", raw, &removed).is_none());
+        assert!(heronite_game_con_config("lutris_7", raw, &removed, None).is_none());
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1288,8 +2014,9 @@ mod tests {
         let removed = heronite_removed_apps(&dir);
         assert!(removed.contains("battlenet_wow"));
 
-        let raw = serde_json::json!({ "title": "WoW", "appName": "battlenet_wow", "is_installed": true });
-        assert!(heronite_game_from_entry_removed("battlenet_wow", raw, &removed).is_none());
+        let raw =
+            serde_json::json!({ "title": "WoW", "appName": "battlenet_wow", "is_installed": true });
+        assert!(heronite_game_con_config("battlenet_wow", raw, &removed, None).is_none());
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1481,7 +2208,11 @@ mod tests {
         assert_eq!(entries.len(), 2);
 
         // Fortnite está desinstalado: no debe listarse.
-        let raw = entries.into_iter().find(|(k, _)| k == "Fortnite").unwrap().1;
+        let raw = entries
+            .into_iter()
+            .find(|(k, _)| k == "Fortnite")
+            .unwrap()
+            .1;
         assert!(heronite_game_from_entry("Fortnite", raw).is_none());
 
         let _ = fs::remove_dir_all(&base);
@@ -1536,12 +2267,12 @@ mod tests {
             "app_name": "q3iWPNp1GJwvxLb7kovdjo",
             "title": "EA App",
             "install": {
-                "executable": "/home/thor/Descargas/EAappInstaller.exe",
+                "executable": "/home/jugador/Descargas/EAappInstaller.exe",
                 "platform": "linux",
                 "is_dlc": false,
-                "install_path": "/home/thor/Descargas"
+                "install_path": "/home/jugador/Descargas"
             },
-            "folder_name": "/home/thor/Descargas",
+            "folder_name": "/home/jugador/Descargas",
             "is_installed": true,
             "canRunOffline": true,
             "browserUrl": "",
@@ -1578,7 +2309,9 @@ mod tests {
     #[test]
     fn heronite_descarta_cualquier_instalador() {
         assert!(is_not_a_game_executable("/home/u/Descargas/setup.exe"));
-        assert!(is_not_a_game_executable("/home/u/Descargas/GameInstaller.exe"));
+        assert!(is_not_a_game_executable(
+            "/home/u/Descargas/GameInstaller.exe"
+        ));
         assert!(is_not_a_game_executable("UbisoftConnectInstaller.exe"));
     }
 
@@ -1586,13 +2319,13 @@ mod tests {
     fn heronite_conserva_los_juegos_de_verdad() {
         // Los ejecutables reales del usuario no se tocan.
         for exe in [
-            "/home/thor/Games/Dune Awakening/DuneSandbox.exe",
-            "/home/thor/Games/Ostranauts/Ostranauts.exe",
-            "/home/thor/Games/ZERO Sievert/ZERO Sievert.exe",
-            "/home/thor/Games/Eslabong/eslabong.exe",
-            "/home/thor/Games/Esports Manager 2026/EsportsManager.exe",
-            "/home/thor/Games/Into the Dead/IntoTheDeadOurDarkestDays.exe",
-            "/home/thor/Games/Probably Stolen/Probably Stolen.exe",
+            "/home/jugador/Games/Dune Awakening/DuneSandbox.exe",
+            "/home/jugador/Games/Ostranauts/Ostranauts.exe",
+            "/home/jugador/Games/ZERO Sievert/ZERO Sievert.exe",
+            "/home/jugador/Games/Eslabong/eslabong.exe",
+            "/home/jugador/Games/Esports Manager 2026/EsportsManager.exe",
+            "/home/jugador/Games/Into the Dead/IntoTheDeadOurDarkestDays.exe",
+            "/home/jugador/Games/Probably Stolen/Probably Stolen.exe",
         ] {
             assert!(
                 !is_not_a_game_executable(exe),
@@ -1621,7 +2354,7 @@ mod tests {
             "appName": "steam_1623730",
             "runner": "sideload",
             "is_installed": true,
-            "install": { "executable": "/home/thor/Games/Palworld/Palworld.exe" }
+            "install": { "executable": "/home/jugador/Games/Palworld/Palworld.exe" }
         });
         assert!(heronite_game_from_entry("steam_1623730", real).is_some());
     }
@@ -1638,11 +2371,14 @@ mod tests {
             "app_name": "steam_2646460",
             "title": "Soulmask",
             "is_installed": true,
-            "install": { "executable": "/home/thor/Games/Soulmask/Soulmask.exe" }
+            "install": { "executable": "/home/jugador/Games/Soulmask/Soulmask.exe" }
         });
 
         let game = heronite_game_from_entry("otra-clave", raw).unwrap();
-        assert_eq!(game.cover_key.as_deref(), Some("steam_2646460|otra-clave|Soulmask"));
+        assert_eq!(
+            game.cover_key.as_deref(),
+            Some("steam_2646460|otra-clave|Soulmask")
+        );
     }
 
     #[test]
@@ -1653,7 +2389,7 @@ mod tests {
             "appName": "steam_2646460",
             "title": "Soulmask",
             "is_installed": true,
-            "install": { "executable": "/home/thor/Games/Soulmask/Soulmask.exe" }
+            "install": { "executable": "/home/jugador/Games/Soulmask/Soulmask.exe" }
         });
 
         let game = heronite_game_from_entry("k", raw).unwrap();
@@ -1669,10 +2405,13 @@ mod tests {
             "title": "Soulmask",
             "steam_app_id": "2646460",
             "is_installed": true,
-            "install": { "executable": "/home/thor/Games/Soulmask/Soulmask.exe" }
+            "install": { "executable": "/home/jugador/Games/Soulmask/Soulmask.exe" }
         });
 
-        assert_eq!(heronite_game_from_entry("k", raw).unwrap().appid, Some(2646460));
+        assert_eq!(
+            heronite_game_from_entry("k", raw).unwrap().appid,
+            Some(2646460)
+        );
     }
 
     #[test]
@@ -1685,15 +2424,22 @@ mod tests {
             "title": "EA App",
             "is_installed": true,
             "install": {
-                "executable": "/home/thor/Descargas/EAappInstaller.exe",
-                "install_path": "/home/thor/Descargas"
+                "executable": "/home/jugador/Descargas/EAappInstaller.exe",
+                "install_path": "/home/jugador/Descargas"
             },
-            "folder_name": "/home/thor/Descargas"
+            "folder_name": "/home/jugador/Descargas"
         });
 
         let g: HeroniteGame = serde_json::from_value(raw.clone()).unwrap();
-        assert_eq!(g.install_folder(), Some("/home/thor/Descargas"), "la carpeta es la buena para el stat");
-        assert_eq!(g.executable(), Some("/home/thor/Descargas/EAappInstaller.exe"));
+        assert_eq!(
+            g.install_folder(),
+            Some("/home/jugador/Descargas"),
+            "la carpeta es la buena para el stat"
+        );
+        assert_eq!(
+            g.executable(),
+            Some("/home/jugador/Descargas/EAappInstaller.exe")
+        );
         assert!(heronite_game_from_entry("q3iWPNp1GJwvxLb7kovdjo", raw).is_none());
     }
 
@@ -1706,11 +2452,502 @@ mod tests {
             "title": "Indie",
             "is_installed": true,
             "install": {
-                "executable": "/home/thor/Descargas/Indie/Indie.exe",
-                "install_path": "/home/thor/Descargas/Indie"
+                "executable": "/home/jugador/Descargas/Indie/Indie.exe",
+                "install_path": "/home/jugador/Descargas/Indie"
             }
         });
 
         assert!(heronite_game_from_entry("x", raw).is_some());
+    }
+}
+
+/// Adaptadores Heronite y Heroic con los datos **reales** de CachyOS.
+///
+/// Los documentos de aquí son transcripciones de los ficheros del equipo, no inventos: si
+/// algún día el lanzador cambia su esquema, es esta prueba la que avisa.
+#[cfg(test)]
+mod pruebas_adaptadores_reales {
+    use super::*;
+    use std::fs;
+
+    fn tmp() -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "thoriapp_adaptadores_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&d).expect("tmp");
+        d
+    }
+
+    /// `GamesConfig` real de Heronite: mapa de identificador a configuración.
+    ///
+    /// Reproduce la estructura confirmada en el equipo: la clave del objeto raíz **es** el
+    /// identificador del juego. Se incluyen dos entradas para que la prueba sirva de algo: si
+    /// el lector se quedara con "la primera configuración que encuentre", el prefijo de
+    /// eslabong aparecería al pedir cualquier otro juego.
+    const GAMECONFIG_HERONITE: &str = r#"{
+      "5WzVLqXjCNJWsvmPCz4M4N": {
+        "wineVersion": {
+          "bin": "/home/jugador/.local/share/Steam/compatibilitytools.d/proton-cachyos-10.0-20260102-slr-x86_64/proton",
+          "name": "proton-cachyos-10.0-20260102-slr-x86_64",
+          "type": "proton"
+        },
+        "winePrefix": "/home/jugador/Games/Heronite/Prefixes/eslabong"
+      },
+      "OtRoJuEgO0000000000000": {
+        "wineVersion": {
+          "bin": "/usr/bin/wine",
+          "name": "wine-ge",
+          "type": "wine"
+        },
+        "winePrefix": "/home/jugador/Games/Heronite/Prefixes/otro"
+      }
+    }"#;
+
+    const GAMECONFIG_HEROIC: &str = r#"{
+      "e75733d7dbb0463f9942ed6a2cd4acfb": {
+        "wineVersion": {
+          "bin": "/usr/share/steam/compatibilitytools.d/proton-cachyos-slr/proton",
+          "name": "proton-cachyos-slr",
+          "type": "proton"
+        },
+        "winePrefix": "/home/jugador/Games/Heroic/Prefixes/default/Tattoo Tycoon"
+      }
+    }"#;
+
+    fn escribir_config(nombre: &str, contenido: &str) -> (PathBuf, PathBuf) {
+        let d = tmp();
+        let f = d.join(nombre);
+        fs::write(&f, contenido).expect("config");
+        (d, f)
+    }
+
+    #[test]
+    fn config_de_heronite_produce_prefijo_y_runtime() {
+        let (d, f) = escribir_config("GamesConfig.json", GAMECONFIG_HERONITE);
+        let c = leer_config_del_juego(&f, "5WzVLqXjCNJWsvmPCz4M4N")
+            .expect("la configuración debe leerse");
+        assert_eq!(
+            c.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/eslabong")
+        );
+        assert_eq!(
+            c.runtime_name.as_deref(),
+            Some("proton-cachyos-10.0-20260102-slr-x86_64")
+        );
+        assert_eq!(c.runtime_type.as_deref(), Some("proton"));
+        assert!(c.runtime_bin.unwrap().ends_with("/proton"));
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// Con varios identificadores en el **mismo** documento, cada uno recibe el suyo.
+    ///
+    /// Es la regresión que impide volver a una búsqueda "del primer prefijo que aparezca".
+    #[test]
+    fn varios_identificadores_en_el_mismo_documento_no_se_mezclan() {
+        let (d, f) = escribir_config("GamesConfig.json", GAMECONFIG_HERONITE);
+
+        let a = leer_config_del_juego(&f, "5WzVLqXjCNJWsvmPCz4M4N").unwrap();
+        let b = leer_config_del_juego(&f, "OtRoJuEgO0000000000000").unwrap();
+
+        assert_eq!(
+            a.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/eslabong")
+        );
+        assert_eq!(
+            b.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/otro")
+        );
+        // El runtime tampoco se cruza.
+        assert_eq!(a.runtime_type.as_deref(), Some("proton"));
+        assert_eq!(b.runtime_type.as_deref(), Some("wine"));
+        assert_ne!(a.wine_prefix, b.wine_prefix);
+
+        // Un identificador que no está en el documento no hereda ninguna configuración.
+        assert!(leer_config_del_juego(&f, "no_existe").is_none());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn config_de_heroic_produce_prefijo_con_espacios() {
+        let (d, f) = escribir_config("GamesConfig.json", GAMECONFIG_HEROIC);
+        let c = leer_config_del_juego(&f, "e75733d7dbb0463f9942ed6a2cd4acfb").unwrap();
+        // El espacio en "Tattoo Tycoon" no debe romper nada.
+        assert_eq!(
+            c.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heroic/Prefixes/default/Tattoo Tycoon")
+        );
+        assert_eq!(c.runtime_name.as_deref(), Some("proton-cachyos-slr"));
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn fichero_ausente_json_invalido_o_campos_opcionales_no_rompen() {
+        let d = tmp();
+
+        // Fichero ausente: un juego sin configuración de lanzamiento, no un error.
+        assert!(leer_config_del_juego(&d.join("no_existe.json"), "x").is_none());
+
+        // JSON inválido.
+        let roto = d.join("roto.json");
+        fs::write(&roto, "{ esto no es json").unwrap();
+        assert!(leer_config_del_juego(&roto, "x").is_none());
+
+        // Documento válido pero sin la entrada pedida.
+        let sin_entrada = d.join("vacio.json");
+        fs::write(&sin_entrada, r#"{"otroId":{}}"#).unwrap();
+        assert!(leer_config_del_juego(&sin_entrada, "x").is_none());
+
+        // Entrada con solo el prefijo: los campos de `wineVersion` son opcionales.
+        let parcial = d.join("parcial.json");
+        fs::write(&parcial, r#"{"x":{"winePrefix":"/pfx"}}"#).unwrap();
+        let c = leer_config_del_juego(&parcial, "x").unwrap();
+        assert_eq!(c.wine_prefix.as_deref(), Some("/pfx"));
+        assert!(c.runtime_name.is_none() && c.runtime_bin.is_none());
+
+        // Entrada sin nada aprovechable: no se devuelve una configuración vacía.
+        let vacia = d.join("vacia.json");
+        fs::write(&vacia, r#"{"x":{"otraCosa":1}}"#).unwrap();
+        assert!(leer_config_del_juego(&vacia, "x").is_none());
+
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn eslabong_rellena_prefijo_y_ejecutable_remapeado() {
+        // La entrada de la tienda NO tiene `remappedExecutable`; está en `local_library`.
+        let store: serde_json::Value = serde_json::from_str(
+            r#"{
+              "runner": "sideload",
+              "app_name": "5WzVLqXjCNJWsvmPCz4M4N",
+              "title": "eslabong",
+              "install": {
+                "executable": "/home/jugador/Games/Eslabong/eslabong.exe",
+                "platform": "Windows",
+                "is_dlc": false
+              },
+              "folder_name": "/home/jugador/Games/Eslabong",
+              "is_installed": true,
+              "is_linux_native": false
+            }"#,
+        )
+        .unwrap();
+        let config = ConfigDelJuego {
+            wine_prefix: Some("/home/jugador/Games/Heronite/Prefixes/eslabong".into()),
+            runtime_name: Some("proton-cachyos-10.0-20260102-slr-x86_64".into()),
+            ..Default::default()
+        };
+
+        let juego = heronite_game_con_config(
+            "5WzVLqXjCNJWsvmPCz4M4N",
+            store,
+            &HashSet::new(),
+            Some(&config),
+        )
+        .unwrap();
+
+        assert_eq!(juego.name, "eslabong");
+        assert_eq!(
+            juego.install_path.as_deref(),
+            Some("/home/jugador/Games/Eslabong")
+        );
+        assert_eq!(
+            juego.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/eslabong")
+        );
+        assert_eq!(
+            juego.exec.as_deref(),
+            Some("/home/jugador/Games/Eslabong/eslabong.exe")
+        );
+        // `sideload` dice quién lo gestiona, no con qué se ejecuta.
+        assert_eq!(juego.runner.as_deref(), Some("sideload"));
+        assert_eq!(
+            juego.runtime_configurado.as_deref(),
+            Some("proton-cachyos-10.0-20260102-slr-x86_64")
+        );
+        // Sin AppID de Steam: las portadas no son identidad.
+        assert_eq!(juego.appid, None);
+        assert_eq!(
+            juego.id_de_lanzador.as_deref(),
+            Some("5WzVLqXjCNJWsvmPCz4M4N")
+        );
+    }
+
+    #[test]
+    fn remapped_executable_manda_sobre_el_original() {
+        // El usuario cambió el ejecutable en Heronite: manda el remapeado.
+        let entrada: serde_json::Value = serde_json::from_str(
+            r#"{
+              "runner": "sideload",
+              "app_name": "abc",
+              "title": "Juego",
+              "install": { "executable": "/games/original.exe" },
+              "folder_name": "/games/juego",
+              "remappedExecutable": "/games/otro.exe"
+            }"#,
+        )
+        .unwrap();
+
+        let juego = heronite_game_from_entry("abc", entrada).unwrap();
+        assert_eq!(juego.exec.as_deref(), Some("/games/otro.exe"));
+    }
+
+    #[test]
+    fn sin_remapeo_se_usa_el_ejecutable_de_la_instalacion() {
+        let entrada: serde_json::Value = serde_json::from_str(
+            r#"{
+              "app_name": "abc",
+              "title": "Juego",
+              "install": { "executable": "/games/original.exe" },
+              "folder_name": "/games/juego"
+            }"#,
+        )
+        .unwrap();
+
+        let juego = heronite_game_from_entry("abc", entrada).unwrap();
+        assert_eq!(juego.exec.as_deref(), Some("/games/original.exe"));
+    }
+
+    #[test]
+    fn tattoo_tycoon_usa_el_ejecutable_de_install_relativo_con_espacios() {
+        // El ejecutable de Epic viene **dentro de `install`**, relativo y con espacios.
+        // Se comprueba sobre el dato real: `json_str` es plano y buscar `executable` en la
+        // raíz devolvía `None`, que era el fallo que dejaba al juego sin reconocer.
+        let entrada = serde_json::json!({
+            "app_name": "e75733d7dbb0463f9942ed6a2cd4acfb",
+            "title": "Tattoo Tycoon",
+            "runner": "legendary",
+            "install": {
+                "executable": "Tattoo Tycoon.exe",
+                "install_path": "/home/jugador/Games/Heroic/TattooTycoon",
+                "platform": "Windows"
+            }
+        });
+        // `install_path` está en la raíz; `executable`, dentro de `install`.
+        assert_eq!(json_str(&entrada, "install_path").as_deref(), None);
+
+        let install = entrada.get("install").unwrap();
+        let base = json_str(install, "install_path")
+            .or_else(|| json_str(&entrada, "install_path"))
+            .unwrap();
+        let rel = install
+            .get("executable")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap();
+        let resuelto = format!("{}/{}", base.trim_end_matches('/'), rel);
+        assert_eq!(
+            resuelto,
+            "/home/jugador/Games/Heroic/TattooTycoon/Tattoo Tycoon.exe"
+        );
+    }
+
+    #[test]
+    fn un_campo_bin_fuera_de_wine_version_no_es_el_runtime() {
+        let d = tmp();
+        let f = d.join("cfg.json");
+        fs::write(&f, r#"{"x":{"otraCosa":{"bin":"/usr/bin/lo-que-sea"}}}"#).unwrap();
+        // Se lee `wineVersion.bin`, no cualquier `bin` del documento.
+        assert!(leer_config_del_juego(&f, "x").is_none());
+        fs::remove_dir_all(&d).ok();
+    }
+}
+
+/// Integración: árbol de directorios **real** y adaptadores de producción.
+///
+/// Las pruebas anteriores llaman al lector con una ruta ya construida, así que no habrían
+/// detectado que el adaptador buscara el fichero en el sitio equivocado. Estas sí: crean la
+/// estructura que los lanzadores tienen en disco y ejecutan `scan_heronite_games` y
+/// `scan_heroic_epic_games` de verdad, con `HOME` apuntando a ese árbol.
+#[cfg(test)]
+mod pruebas_integracion_adaptadores {
+    use super::*;
+    use std::fs;
+
+    /// `HOME` propio y exclusivo. Se serializa: es una variable de proceso y dos pruebas en
+    /// paralelo se pisarían.
+    static CANDADO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HogarTemporal {
+        ruta: PathBuf,
+        anterior: Option<std::ffi::OsString>,
+    }
+
+    impl HogarTemporal {
+        fn nuevo(nombre: &str) -> Self {
+            let ruta = std::env::temp_dir().join(format!(
+                "thoriapp_home_{}_{}_{}",
+                nombre,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            fs::create_dir_all(&ruta).expect("home temporal");
+            let anterior = std::env::var_os("HOME");
+            std::env::set_var("HOME", &ruta);
+            Self { ruta, anterior }
+        }
+    }
+
+    impl Drop for HogarTemporal {
+        fn drop(&mut self) {
+            match &self.anterior {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            fs::remove_dir_all(&self.ruta).ok();
+        }
+    }
+
+    fn escribir(ruta: &Path, contenido: &str) {
+        if let Some(p) = ruta.parent() {
+            fs::create_dir_all(p).expect("carpetas");
+        }
+        fs::write(ruta, contenido).expect("fichero");
+    }
+
+    /// Heronite, con la estructura confirmada: `GamesConfig/<id>.json`, **un fichero por
+    /// juego**, y la clave de dentro es el propio id.
+    ///
+    /// El juego no existe en disco, así que el escaneo no valida la ruta de instalación: lo que
+    /// se comprueba es que el prefijo y el ejecutable llegan desde la configuración.
+    #[test]
+    fn heronite_lee_gamesconfig_por_juego_desde_el_directorio_real() {
+        let _guardia = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
+        let hogar = HogarTemporal::nuevo("heronite");
+        let base = hogar.ruta.join(".local/share/heronite");
+
+        escribir(
+            &base.join("sideload_apps/library.json"),
+            r#"{"games":{"5WzVLqXjCNJWsvmPCz4M4N":{
+                 "runner":"sideload",
+                 "app_name":"5WzVLqXjCNJWsvmPCz4M4N",
+                 "title":"eslabong",
+                 "install":{"executable":"/home/jugador/Games/Eslabong/eslabong.exe",
+                            "platform":"Windows","is_dlc":false},
+                 "folder_name":"/home/jugador/Games/Eslabong",
+                 "is_installed":true,"is_linux_native":false}}}"#,
+        );
+        // Un **segundo** juego con su propio fichero: si el adaptador leyera uno solo o se
+        // quedara con el primero, este heredaría el prefijo de eslabong.
+        escribir(
+            &base.join("sideload_apps/library.json"),
+            r#"{"games":{
+                 "5WzVLqXjCNJWsvmPCz4M4N":{
+                   "runner":"sideload","app_name":"5WzVLqXjCNJWsvmPCz4M4N","title":"eslabong",
+                   "install":{"executable":"/home/jugador/Games/Eslabong/eslabong.exe","platform":"Windows","is_dlc":false},
+                   "folder_name":"/home/jugador/Games/Eslabong","is_installed":true,"is_linux_native":false},
+                 "OtRoJuEgO0000000000000":{
+                   "runner":"sideload","app_name":"OtRoJuEgO0000000000000","title":"otro",
+                   "install":{"executable":"/home/jugador/Games/Otro/otro.exe","platform":"Windows","is_dlc":false},
+                   "folder_name":"/home/jugador/Games/Otro","is_installed":true,"is_linux_native":false}}}"#,
+        );
+        escribir(
+            &base.join("GamesConfig/5WzVLqXjCNJWsvmPCz4M4N.json"),
+            r#"{"5WzVLqXjCNJWsvmPCz4M4N":{
+                 "wineVersion":{"bin":"/home/jugador/.local/share/Steam/compatibilitytools.d/proton-cachyos-10.0-20260102-slr-x86_64/proton",
+                                "name":"proton-cachyos-10.0-20260102-slr-x86_64","type":"proton"},
+                 "winePrefix":"/home/jugador/Games/Heronite/Prefixes/eslabong"}}"#,
+        );
+        escribir(
+            &base.join("GamesConfig/OtRoJuEgO0000000000000.json"),
+            r#"{"OtRoJuEgO0000000000000":{
+                 "wineVersion":{"bin":"/usr/bin/wine","name":"wine-ge","type":"wine"},
+                 "winePrefix":"/home/jugador/Games/Heronite/Prefixes/otro"}}"#,
+        );
+
+        let juegos = scan_heronite_games();
+
+        let eslabong = juegos
+            .iter()
+            .find(|j| j.name == "eslabong")
+            .expect("eslabong debe estar en el catálogo");
+        assert_eq!(
+            eslabong.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/eslabong")
+        );
+        assert_eq!(
+            eslabong.exec.as_deref(),
+            Some("/home/jugador/Games/Eslabong/eslabong.exe")
+        );
+        assert_eq!(
+            eslabong.runtime_configurado.as_deref(),
+            Some("proton-cachyos-10.0-20260102-slr-x86_64")
+        );
+
+        let otro = juegos
+            .iter()
+            .find(|j| j.name == "otro")
+            .expect("otro juego");
+        assert_eq!(
+            otro.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heronite/Prefixes/otro")
+        );
+        assert_eq!(otro.runtime_configurado.as_deref(), Some("wine-ge"));
+        // Cada uno con el suyo: no se cruzan.
+        assert_ne!(eslabong.wine_prefix, otro.wine_prefix);
+    }
+
+    /// Heroic Epic con la estructura real: `GamesConfig/<app_name>.json`.
+    #[test]
+    fn heroic_lee_gamesconfig_desde_el_directorio_real() {
+        let _guardia = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
+        let hogar = HogarTemporal::nuevo("heroic");
+        let base = hogar.ruta.join(".config/heroic");
+
+        // La carpeta de instalación debe existir: el escáner descarta las huérfanas.
+        let instalado = hogar.ruta.join("Games/Heroic/TattooTycoon");
+        fs::create_dir_all(&instalado).expect("instalación");
+
+        escribir(
+            &base.join("legendaryConfig/legendary/installed.json"),
+            &format!(
+                r#"{{"e75733d7dbb0463f9942ed6a2cd4acfb":{{
+                     "app_name":"e75733d7dbb0463f9942ed6a2cd4acfb",
+                     "title":"Tattoo Tycoon",
+                     "install":{{"executable":"Tattoo Tycoon.exe",
+                                 "install_path":"{}",
+                                 "platform":"Windows","is_dlc":false}}}}}}"#,
+                instalado.display()
+            ),
+        );
+        escribir(
+            &base.join("GamesConfig/e75733d7dbb0463f9942ed6a2cd4acfb.json"),
+            r#"{"e75733d7dbb0463f9942ed6a2cd4acfb":{
+                 "wineVersion":{"bin":"/usr/share/steam/compatibilitytools.d/proton-cachyos-slr/proton",
+                                "name":"proton-cachyos-slr","type":"proton"},
+                 "winePrefix":"/home/jugador/Games/Heroic/Prefixes/default/Tattoo Tycoon"}}"#,
+        );
+
+        let juegos = scan_heroic_epic_games(&base);
+
+        let tattoo = juegos
+            .iter()
+            .find(|j| j.name == "Tattoo Tycoon")
+            .expect("Tattoo Tycoon debe estar en el catálogo");
+        assert_eq!(
+            tattoo.wine_prefix.as_deref(),
+            Some("/home/jugador/Games/Heroic/Prefixes/default/Tattoo Tycoon")
+        );
+        assert_eq!(
+            tattoo.exec.as_deref(),
+            Some(format!("{}/Tattoo Tycoon.exe", instalado.display()).as_str())
+        );
+        assert_eq!(
+            tattoo.runtime_configurado.as_deref(),
+            Some("proton-cachyos-slr")
+        );
+        assert_eq!(
+            tattoo.id_de_lanzador.as_deref(),
+            Some("epic-e75733d7dbb0463f9942ed6a2cd4acfb")
+        );
+        // Sin AppID de Steam: es de Epic.
+        assert_eq!(tattoo.appid, None);
     }
 }

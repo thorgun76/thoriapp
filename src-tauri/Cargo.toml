@@ -1,6 +1,6 @@
 [package]
 name = "thoriapp"
-version = "1.1.0"
+version = "1.2.0"
 description = "Optimizador de juegos para Linux"
 authors = ["Linux Gaming Community"]
 license = "MIT"
@@ -40,3 +40,6 @@ opt-level = 3
 lto = true
 strip = true
 codegen-units = 1
+
+[dev-dependencies]
+proptest = "1.12.0"
