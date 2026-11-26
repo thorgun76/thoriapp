@@ -123,12 +123,14 @@ cargo test --bins
 cargo clippy --bins
 ```
 
-Los tests de `tests/live_api.rs` tocan la API real de pathofexile.com y van con `--ignored`.
+El único test ignorado es `anticheat::tests::manual_descarga_y_busca_appids_reales`: toca la
+red real y se lanza a mano con `--ignored`.
 
 ## 📚 Documentación
 
 - `STATUS.md` — estado por fase, decisiones y correcciones con su evidencia.
 - `docs/sesiones-de-ejecucion.md` — contrato del observador y qué está garantizado.
+- `docs/validacion-real.md` — protocolo de comprobación con juegos reales en el equipo.
 - `docs/planificacion-fases.md` — frontera entre fases.
 - `CHANGELOG.md` — cambios acumulados desde `v1.1.0`.
 

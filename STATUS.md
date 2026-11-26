@@ -895,7 +895,7 @@ Lo que cambió en esta ronda, con motivo:
 
 Nada de esto está validado contra el equipo real. Todo lo anterior son pruebas automáticas
 con fixtures. La validación real en CachyOS sigue pendiente y es la única que puede afirmar
-que la detección funciona; ver el protocolo en `AGENTS.md`.
+que la detección funciona; ver `docs/validacion-real.md`.
 
 ## 5.2 — Qué hay
 
