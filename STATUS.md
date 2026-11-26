@@ -16,8 +16,12 @@ la incidencia se aplaza.
 | **5.1 — Almacenamiento e integridad** | **Cerrada** |
 | **5.2 — Instantáneas de configuración** | **Cerrada** (incluye metadatos de MangoHud) |
 | **5.3 — Captura temprana y evidencias de ejecución** | **Cerrada con limitación conocida.** El observador es **experimental y opcional, apagado por defecto**. Compatibilidad **individual validada en el equipo** en Steam, Heroic, Heronite y Lutris (Wine); simultaneidad validada en **Steam + Steam** (Palworld + Deskrawl) y **Lutris + Steam** (Starsector + Deskrawl). **Heroic + Heronite no garantizada** (ver «Limitación conocida»). |
-| 5.4 — Calidad de comparación | Pendiente |
+| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado** (acta en este fichero), **bloque B en diseño** (diseño entregado, sin código). |
 | 6 — Rediseño visual | Pendiente |
+| 7 — (reservada) | Pendiente |
+| **8 — Internacionalización (i18n)** | **Pendiente, no empezada.** Registrada en `docs/planificacion-fases.md`. |
+| **9 — Seguridad y hardening** | **Pendiente, no empezada.** Auditoría avanzada; **no** autoriza a posponer vulnerabilidades conocidas. |
+| **10 — Distribución pública** | **Pendiente, no empezada.** |
 
 ## Cierre de 5.3 — validación real y limitación conocida
 
@@ -924,10 +928,172 @@ que la detección funciona; ver `docs/validacion-real.md`.
 - El AppID no se toma del juego abierto: si no hay evidencia, queda desconocido.
 - Las grabaciones originales de `tests/fixtures/mangohud/` no se modifican ni se borran.
 
+## 5.4.1.A — Integridad de datos y metodología de cálculo (implementado, pendiente de revisión)
+
+Cierra el defecto de `drop_stuck_samples` que la auditoría 5.4.0 midió sobre las funciones
+reales de v1.2.0. **No se cambia ninguna fórmula estadística**: cambia **qué filas entran**
+en ellas, y eso queda declarado por la metodología v2.
+
+### El defecto que corrige
+
+`drop_stuck_samples` descartaba filas consecutivas con `fps` y `frame_time` idénticos. En una
+serie planchada —limitador de FPS, pausa, tramo lento— esa coincidencia **es el dato**.
+Medido con el código de producción antes del cambio:
+
+| Caso sintético | v1 (antes) | v2 (ahora) |
+|---|---|---|
+| Limitador 60 FPS constante, 600 filas | descarta 599 → 1 muestra → **rechazo por `MIN_SAMPLES`** | 0 descartadas, 500 analizadas |
+| Caída sostenida 20 s a 20 FPS | descarta 597 → 3 muestras → **rechazo** | 0 descartadas, caída conservada |
+| Patrón periódico 6×60,2 ms + 1×16,7 ms | descarta 429 → media **38,2458** (inflada +68,1 % sobre la real 22,7555) | 0 descartadas, media ≈ 22,76 |
+| Mismo patrón invertido | **38,2458** (idéntico) | distinto del anterior (distribuciones distintas) |
+| Duplicado con timestamp idéntico | descarta 600 → 1 → rechazo | conservado y **declarado** como incidencia |
+| Sin `elapsed` | descartaba igual (599 de 600) | conserva las 600, sin deduplicar |
+
+El fallo grave no era el sesgo, sino que **el descarte vaciaba la serie y `MIN_SAMPLES`
+llegaba tarde**: una caída de 20 s se presentaba como «graba más tiempo», mandando al usuario
+a repetir una prueba que habría fallado igual.
+
+### Reglas aplicadas (v2)
+
+- FPS y frametime iguales con **timestamps distintos** → se conservan.
+- Filas **completamente idénticas** (mismo `elapsed`) → se conservan y **se registra la
+  incidencia**. No hay evidencia de que sean doble registro; no se eliminan.
+- Sin `elapsed` → se conserva todo y **no se deduplica**.
+- Timestamps repetidos, desordenados, negativos o no finitos → **se detectan y registran**.
+  No se ordenan, ni se interpolan, ni se corrigen, ni se inventan.
+- Ninguna fila con rendimiento válido se excluye por su timestamp.
+
+### Eje temporal y métricas que dependen del reloj
+
+Un eje se declara fiable solo si la columna existe, **todas** las filas traen reloj, ninguno
+es negativo y el orden es estrictamente creciente. Sin eje fiable:
+
+| Métrica | Comportamiento |
+|---|---|
+| Duración | `duracion_medida = None`; **no se inventa**. `duration_seconds` queda `0.0` por contrato y ese cero significa «no consta» |
+| Calentamiento | **no se aplica**; se declara el motivo en `calentamiento_no_aplicado` |
+| `spikes_per_min` | `None` (sin divisor no hay tasa) |
+| `pct_over_33ms`, `jitter_ms`, `worst_frame_ms` | se calculan (solo dependen de los valores) |
+| Percentiles, medias, `noise_percent` | se calculan (no dependen del reloj) |
+| Ventana de shader, serie temporal con eje X | no disponible |
+
+`noise_percent` se calcula sobre bloques **contiguos** de la serie, así que no depende de
+`elapsed`; su limitación es otra y ya consta: mide la variación **dentro** de una grabación,
+no entre partidas, y no es un intervalo de confianza validado.
+
+### Contabilidad de muestras
+
+`ContabilidadDeMuestras` reparte las filas de datos sin doble conteo:
+
+```
+filas_originales = filas_con_rendimiento_invalido
+                 + excluidas_por_calentamiento
+                 + muestras_analizadas
+
+filas_con_rendimiento_valido = excluidas_por_calentamiento + muestras_analizadas
+```
+
+`filas_originales` cuenta las líneas **entre la cabecera de datos y el final**, sin los
+metadatos iniciales (`OS`, `CPU`, `GPU`…), sin la cabecera y sin líneas en blanco. Las
+incidencias temporales se contabilizan **aparte**: no son exclusiones y una misma fila puede
+acumular varias. El invariante se comprueba en pruebas además de con `debug_assert!`.
+
+### Campo `excluidas_por_reloj_no_fiable`: eliminado
+
+Se descartó por diseño: una fila con FPS y frametime válidos **no se excluye porque su
+timestamp sea inválido**. Los puntos que no pueden representarse en un eje temporal se
+describen con `eje_temporal_fiable = false` e `incidencias`, no como exclusiones de
+rendimiento.
+
+### Compatibilidad histórica
+
+- `metodologia_calculo` es `Option<MetodologiaCalculo>` con `#[serde(default)]` y
+  `skip_serializing_if`. Los benchmarks anteriores quedan en **`None` = «no consta»**: no se
+  rellenan con `v1` ni se recalculan.
+- `MetodologiaCalculo` **solo tiene `V2`**: no queda un segundo pipeline v1 activo.
+- Los campos nuevos ausentes en datos históricos siguen desconocidos; nunca se convierten en
+  cero al releer.
+- Leer un archivo histórico **no cambia sus bytes ni su `mtime`** (hay prueba que lo mide).
+- `EvaluacionPersistida` y `SavedComparison` **no se tocan**: son el bloque B.
+
+### Contrato de duración: una sola regla
+
+`duration_seconds` sigue siendo `f64` por compatibilidad con los JSON guardados, pero **no se
+lee directamente en ningún sitio**. La interpretación vive en un único punto por lenguaje:
+
+- Rust: `Benchmark::duracion()` → `DuracionDeLaGrabacion`.
+- TypeScript: `duracionDe()` en `src/lib/duracion.ts`.
+
+Los tres estados son explícitos:
+
+| Estado | Cuándo | `duration_seconds` | Resultado |
+|---|---|---|---|
+| Histórica | Sin `metodologia_calculo` | Es el valor medido entonces | Se usa tal cual |
+| v2 medida | `metodologia_calculo` y `duracion_medida` | 0 | Se usa `duracion_medida` |
+| v2 desconocida | `metodologia_calculo` sin `duracion_medida` | 0 | **No consta**; **no** se cae a `duration_seconds` |
+
+Consumidores corregidos: `atribuir_a_sesion` (ventana del CSV), el aviso de duración en
+`comparar_benchmarks`, el aviso de duración en `interpretacion.ts`, la marca de grabación
+corta y el texto de duración en `BenchmarksView.tsx`, y las dos duraciones de
+`SavedComparisonDetail.tsx`. La interfaz escribe «duración no registrada» en vez de «0 s».
+
+### Magnitudes: FPS y frametime no son intercambiables
+
+Dos patrones periódicos opuestos —6 muestras de 60,2 ms + 1 de 16,7 ms, y su inverso— dan,
+**tras el calentamiento de 10 s (500 muestras analizadas de 600)**:
+
+| Patrón | Media de **FPS** | Media de **frametime** |
+|---|---|---|
+| A: 6×60,2 ms + 1×16,7 ms | **22,755486** | **54,023** ms |
+| B: 6×16,7 ms + 1×60,2 ms | **53,736049** | **22,877** ms |
+
+Medias de frametime por **ciclo completo** (7 muestras, sin calentamiento): 53,985714 ms
+para A y 22,914286 ms para B. Las dos cifras son correctas y **no se comparan entre sí**:
+una es media de FPS y otra de frametime. v1 daba 38,2458 para ambos patrones.
+
+### Incidencias temporales: el parser ya no las colapsa
+
+`RelojDeFila` distingue `ColumnaAusente`, `CeldaAusente`, `CeldaVacia`, `Malformado`,
+`NoFinito` y `Valor(f64)`. Antes los cuatro primeros casos acababan en el mismo `None` y no
+se podía decir al usuario qué le pasaba a su CSV. `filas_repetidas` cuenta relojes repetidos
+**aunque el resto de la fila no coincida**.
+
+La distinción **se persiste**, no solo se usa durante el parseo: `IncidenciasTemporales` lleva
+`columna_elapsed_ausente`, `celda_reloj_ausente`, `celda_reloj_vacia` y `celda_reloj_ilegible`,
+que suman exactamente `reloj_incompleto`. El invariante se comprueba en `preparar_muestras`.
+
+Las series temporales sin eje fiable **no inventan segundos**: `elapsed_s` queda vacío y el
+gráfico usa el índice de muestra.
+
+### `spikes_per_min` sin reloj: era un cero inventado
+
+`StutterStats::spikes_per_min` era `f64` y devolvía `0.0` cuando la duración no constaba, es
+decir, «ningún pico» sin saberlo. Ahora es `Option<f64>`: `None` = no consta. El campo
+público del `Benchmark` ya era `Option` y el frontend ya lo comprobaba, así que no hay cambio
+de contrato.
+
+### Qué métricas sobreviven sin eje temporal fiable
+
+| Métrica | Sin eje | Por qué |
+|---|---|---|
+| `avg_fps`, percentiles, `frame_time_avg` | Sí | Solo dependen de los valores |
+| `noise_percent` | Sí | Bloques contiguos **por índice**, no por tiempo: mide la variación dentro de la grabación, no un intervalo de confianza validado |
+| `pct_over_33ms`, `jitter_ms`, `worst_frame_ms` | Sí | Solo dependen de los valores |
+| `spikes_per_min` | No (`None`) | Sin duración no hay divisor |
+| Duración | No (`None`) | No se estima a partir de una frecuencia de muestreo supuesta |
+| Calentamiento | No | Se declara `MotivoSinCalentamiento::SinEjeTemporal` |
+
+`MIN_SAMPLES` no cambia y se sigue evaluando sobre las muestras analizadas reales.
+
+### Pendiente (bloques B y C)
+
+Persistencia completa de `Evaluacion` en `SavedComparison` y marca de comparación histórica
+(B); traslado de `interpretar()` a Rust y presentación tipada (C).
+
 ## Pruebas
 
-- Rust: 894 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
-- TypeScript: 1027, en 75 ficheros.
+- Rust: 930 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
+- TypeScript: 1034, en 76 ficheros.
 - `tsc --noEmit` limpio.
 - `cargo clippy --locked --bins -- -D warnings`: **sin avisos**. `save_benchmark` lleva un
   `#[allow(clippy::too_many_arguments)]` localizado porque su firma plana es el contrato IPC

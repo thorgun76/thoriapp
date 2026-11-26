@@ -1,11 +1,12 @@
-# Planificación de fases 5.4 y 6 — requisitos registrados
+# Planificación de fases — requisitos registrados
 
 Este documento existe para que una sesión nueva recupere los requisitos sin depender del
 historial de conversación. **Nada de lo de aquí está implementado salvo donde se diga
 explícitamente.** Registrar una propuesta no es autorización para hacerla.
 
-Estado a fecha de este documento: subfases 1–5.1, 5.2 y 5.3 cerradas. **5.4 y la fase 6 no
-están empezadas.**
+Estado a fecha de este documento: subfases 1–5.1, 5.2 y 5.3 cerradas. **5.4 en curso**
+(5.4.0 y el bloque 5.4.1.A cerrados; bloques B y C pendientes). **Las fases 6 a 10 no están
+empezadas.**
 
 > **5.3 se cierra con una limitación conocida.** El observador es experimental y opcional,
 > apagado por defecto. Validado individualmente en Steam, Heroic, Heronite y Lutris, y en
@@ -146,3 +147,53 @@ Estas ya están implementadas y son anteriores a cualquier rediseño:
 - **Las acciones destructivas respetan el alcance anunciado**, también para las pruebas
   antiguas sin AppID.
 - El formato persistido de perfiles y los benchmarks históricos **no se reescriben**.
+
+---
+
+## Fases futuras registradas (NO implementadas)
+
+Las fases 8, 9 y 10 se registran aquí para que una sesión nueva sepa que existen y qué
+alcance tienen. **Registrarlas no autoriza a empezarlas**: siguen por detrás de 5.4, la fase
+6 y la fase 7 en el orden de trabajo.
+
+### Fase 8 — Internacionalización (i18n)
+
+- Español e inglés.
+- Arquitectura de traducciones extensible.
+- Detección del idioma del sistema.
+- Preferencia de idioma persistente.
+- Traducción de interfaz, errores, advertencias, tooltips y evaluaciones.
+- Documentación bilingüe.
+- **No se traducen** comandos, identificadores ni datos originales: el comando que se
+  ejecuta y el que se muestra tienen que seguir siendo el mismo texto, y los valores
+  registrados (nombres de juego, AppID, rutas, salidas de herramientas) se conservan tal cual.
+
+Consecuencia de diseño ya registrada para 5.4.1.B: los estados y motivos de una evaluación
+persistida usan **identificadores semánticos estables** (no frases en español) y parámetros
+tipados. Una decisión se guarda como significado, no como una frase ya traducida.
+
+### Fase 9 — Seguridad y hardening
+
+- Modelo de amenazas.
+- Inyección de comandos y argumentos.
+- Validación de entradas e importaciones.
+- Permisos IPC, capabilities y CSP de Tauri.
+- Principio de mínimo privilegio.
+- Path traversal y enlaces simbólicos.
+- Seguridad de archivos y escrituras.
+- Privacidad de registros y variables de entorno.
+- Auditoría de dependencias y cadena de suministro.
+- Pruebas de seguridad, fuzzing y análisis estático.
+
+**La fase 9 es una auditoría avanzada, no una autorización para posponer vulnerabilidades
+conocidas hasta entonces.** Un defecto de seguridad conocido se trata cuando aparece; la
+fase 9 no es una excusa para dejarlo abierto.
+
+### Fase 10 — Distribución pública
+
+- Empaquetado e instaladores.
+- Integridad y autenticidad de artefactos.
+- Publicación de releases.
+- Documentación de instalación.
+- Licencias y avisos de terceros.
+- Guías de contribución y comunicación de vulnerabilidades.

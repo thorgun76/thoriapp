@@ -364,6 +364,88 @@ pub struct Benchmark {
     /// antes de que existiera este campo (y en las que se analizaron sin guardarlo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muestras_temporales: Option<MuestrasTemporales>,
+    /// Duración **medida con reloj fiable**, en segundos. `None` = no hay eje temporal
+    /// en el que confiar [5.4.1.A].
+    ///
+    /// `duration_seconds` se conserva como `f64` porque forma parte del contrato con los
+    /// JSON ya guardados y con el frontend; sin reloj fiable vale `0.0`, y **quien lo
+    /// consuma debe comprobar `duracion_medida` antes de tratarlo como una duración**. El
+    /// cero ahí significa «no consta», no «cero segundos de grabación».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duracion_medida: Option<f64>,    /// Con qué metodología **de cálculo** se obtuvieron estos números.
+    ///
+    /// `None` = grabación anterior a este campo: **no consta**, no se deduce `v1` ni se
+    /// recalcula. Un cambio de metodología cambia los números, así que dos grabaciones
+    /// con versiones distintas no son directamente comparables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metodologia_calculo: Option<MetodologiaCalculo>,
+    /// De dónde salen las muestras que han entrado en el cálculo: filas leídas,
+    /// excluidas por calentamiento, analizadas, e incidencias temporales encontradas.
+    ///
+    /// `None` en las grabaciones históricas: no se reconstruye a posteriori lo que el
+    /// código de entonces no registró.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contabilidad_muestras: Option<ContabilidadDeMuestras>,
+    /// Apoyo real de cada percentil: sobre cuántas muestras se calculó y qué cola usó la
+    /// interpolación. Sirve para no presentar una cifra apoyada en dos observaciones como
+    /// si tuviera cientos detrás.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apoyo_metricas: Option<ApoyoDeMetricas>,
+}
+
+/// De dónde sale —o por qué no se conoce— la duración de una grabación.
+///
+/// Existe para que la regla se aplique **en un solo sitio**. Antes, cada consumidor
+/// decidía por su cuenta si miraba `duracion_medida` o `duration_seconds`, y eso permitía
+/// que un cero de compatibilidad se presentara como «cero segundos».
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DuracionDeLaGrabacion {
+    /// Grabación anterior a `metodologia_calculo` (o que no la declaró). Su
+    /// `duration_seconds` es lo único que hay y se usa tal cual: **no es un cero de
+    /// compatibilidad**, es el valor que se midió con la metodología de entonces.
+    Historica { segundos: f64 },
+    /// Grabación v2 con reloj fiable: duración medida.
+    Medida { segundos: f64 },
+    /// Grabación v2 que **no** pudo medir duración (sin eje temporal fiable, o con una
+    /// duración que no es un dato utilizable). No es «cero segundos»: es «no consta».
+    Desconocida,
+}
+
+impl Benchmark {
+    /// Duración de la grabación, con su procedencia. **Es el único punto donde se decide
+    /// qué significa `duration_seconds`.**
+    ///
+    /// Reglas, en este orden:
+    ///
+    /// 1. Si hay `duracion_medida`, manda ella. Es duración medida de verdad.
+    /// 2. Si la grabación **declara** la metodología v2 y no hay `duracion_medida`, la
+    ///    duración es **desconocida**. No se cae a `duration_seconds`: en v2 ese campo
+    ///    vale 0 precisamente cuando no había eje, y leerlo sería inventar cero segundos.
+    /// 3. Si no declara metodología (histórica), `duration_seconds` es el valor medido
+    ///    entonces. Un valor no utilizable (≤0, no finito) sigue siendo desconocido.
+    pub fn duracion(&self) -> DuracionDeLaGrabacion {
+        if let Some(segundos) = self.duracion_medida.filter(|d| d.is_finite() && *d > 0.0) {
+            return DuracionDeLaGrabacion::Medida { segundos };
+        }
+        if self.metodologia_calculo.is_some() {
+            // v2 declarada sin duración medida: no hay respaldo legítimo.
+            return DuracionDeLaGrabacion::Desconocida;
+        }
+        match Some(self.duration_seconds).filter(|d| d.is_finite() && *d > 0.0) {
+            Some(segundos) => DuracionDeLaGrabacion::Historica { segundos },
+            None => DuracionDeLaGrabacion::Desconocida,
+        }
+    }
+
+    /// Segundos de grabación **solo si constan**. `None` = no consta, nunca un cero que
+    /// se pueda confundir con una grabación vacía.
+    pub fn duracion_en_segundos(&self) -> Option<f64> {
+        match self.duracion() {
+            DuracionDeLaGrabacion::Historica { segundos }
+            | DuracionDeLaGrabacion::Medida { segundos } => Some(segundos),
+            DuracionDeLaGrabacion::Desconocida => None,
+        }
+    }
 }
 
 /// Serie temporal de una grabación, para dibujar el frametime en el tiempo.
@@ -459,7 +541,8 @@ pub const MAX_BENCHMARKS_PER_GAME: usize = 10;
 
 /// Métricas que miden los "tirones" (stutter) a partir de los frame times (en ms).
 struct StutterStats {
-    spikes_per_min: f64,
+    /// `None` = no se puede calcular la tasa porque no consta la duración.
+    spikes_per_min: Option<f64>,
     pct_over_33ms: f64,
     jitter_ms: f64,
     worst_frame_ms: f64,
@@ -483,32 +566,488 @@ fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
 }
 
 /// Una fila válida del log de MangoHud.
+#[derive(Clone, Debug)]
 struct Sample {
     fps: f64,
     frame_time: f64,
     elapsed_ns: Option<f64>,
 }
 
-/// MangoHud repite el último valor cuando el juego no entrega frames nuevos
-/// (pantalla de carga, alt-tab, pausa). Esas filas "pegadas" no son frames reales y
-/// distorsionan el promedio, así que se descartan las repetidas consecutivas.
-/// Con 6 decimales es prácticamente imposible que dos muestras reales sean idénticas.
-fn drop_stuck_samples(samples: Vec<Sample>) -> (Vec<Sample>, usize) {
-    let total = samples.len();
-    let mut cleaned: Vec<Sample> = Vec::with_capacity(total);
+// ==================== Metodología de cálculo (5.4.1.A) ====================
 
-    for s in samples {
-        let is_repeat = cleaned
-            .last()
-            .map(|prev| prev.fps == s.fps && prev.frame_time == s.frame_time)
-            .unwrap_or(false);
-        if !is_repeat {
-            cleaned.push(s);
+/// Versión de la metodología **de cálculo** con la que se obtuvieron los números.
+///
+/// No es la versión del esquema (esa describe la *forma* del JSON) ni la de
+/// interpretación (esa describe cómo se leen los números). Esta dice **qué filas
+/// entraron en las fórmulas**: dos grabaciones con metodologías distintas pueden tener
+/// números correctos y aun así no ser comparables entre sí.
+///
+/// `v2` deja de descartar muestras por coincidencia de FPS y frametime (ver
+/// [`preparar_muestras`]). Las grabaciones anteriores a este campo quedan con
+/// `None` = **«no consta»**, nunca `v1` deducido: sus números se calcularon con un
+/// código que ya no existe y no se reconstruye.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MetodologiaCalculo {
+    /// Conserva todas las muestras con rendimiento válido y registra las incidencias
+    /// temporales en vez de descartarlas.
+    #[serde(rename = "v2")]
+    V2,
+}
+
+/// Qué clases de incidencia temporal se han encontrado en un archivo.
+///
+/// Son **recuentos de diagnóstico**, no un juicio: tener incidencias no invalida la
+/// grabación por sí mismo. Sirven para que el número que se presenta pueda auditarse
+/// sabiendo con qué datos se calculó.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidenciasTemporales {
+    /// Filas con `elapsed` idéntico al de una fila anterior.
+    #[serde(default)]
+    pub filas_repetidas: u32,
+    /// Filas cuyo `elapsed` es menor que el de la anterior.
+    #[serde(default)]
+    pub orden_invertido: u32,
+    /// Filas con `elapsed` negativo.
+    #[serde(default)]
+    pub negativas: u32,
+    /// Filas cuyo `elapsed` no pudo leerse o no es finito (`NaN`, `inf`).
+    #[serde(default)]
+    pub no_finitas: u32,
+    /// Total de filas sin un valor de reloj utilizable. Es la suma de los cuatro
+    /// desgloses de abajo, que dicen **por qué** falta en cada una.
+    #[serde(default)]
+    pub reloj_incompleto: u32,
+    /// La cabecera del CSV no traía columna `elapsed`.
+    #[serde(default)]
+    pub columna_elapsed_ausente: u32,
+    /// La fila tenía menos columnas que las que declara la cabecera.
+    #[serde(default)]
+    pub celda_reloj_ausente: u32,
+    /// La celda del reloj existía pero estaba vacía.
+    #[serde(default)]
+    pub celda_reloj_vacia: u32,
+    /// La celda del reloj tenía texto que no es un número, o un número no finito.
+    #[serde(default)]
+    pub celda_reloj_ilegible: u32,
+}
+
+impl IncidenciasTemporales {
+    pub fn total(&self) -> u32 {
+        self.filas_repetidas
+            + self.orden_invertido
+            + self.negativas
+            + self.no_finitas
+            + self.reloj_incompleto
+    }
+
+    pub fn hay_algunas(&self) -> bool {
+        self.total() > 0
+    }
+
+    /// El total de filas sin reloj debe ser exactamente la suma de sus causas. Si no
+    /// cuadra, el desglose y el total dicen cosas distintas y no se puede auditar nada.
+    pub fn desglose_de_reloj_cuadra(&self) -> bool {
+        self.columna_elapsed_ausente
+            + self.celda_reloj_ausente
+            + self.celda_reloj_vacia
+            + self.celda_reloj_ilegible
+            == self.reloj_incompleto
+    }
+}
+
+/// Un eje temporal en el que se puede confiar para cortar por tiempo.
+///
+/// Se construye solo si **todas** las muestras traen reloj, es **monótono estricto** y
+/// todos los valores son **finitos y no negativos**. Si no, una métrica que dependa del
+/// reloj no se calcula: se declara no disponible en vez de inventar un eje.
+#[derive(Debug, Clone, Copy)]
+struct EjeTemporal {
+    inicio_ns: f64,
+    fin_ns: f64,
+}
+
+impl EjeTemporal {
+    fn duracion_segundos(self) -> f64 {
+        ((self.fin_ns - self.inicio_ns) / 1e9).max(0.0)
+    }
+}
+
+/// Cuántas filas hay en cada etapa del análisis.
+///
+/// Las etapas son **disjuntas**: cada fila se cuenta exactamente en una, así que
+/// sumar no cuenta dos veces la misma exclusión.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContabilidadDeMuestras {
+    /// Filas de datos del CSV: las que están entre la cabecera de datos y el final. No
+    /// cuentan las líneas de metadatos iniciales (`OS`, `CPU`, `GPU`…) ni la cabecera.
+    /// Es el total de partida, sumen o no rendimiento válido.
+    #[serde(default)]
+    pub filas_originales: u32,
+    /// Filas con `fps` y `frametime` legibles y positivos (candidatas al análisis).
+    #[serde(default)]
+    pub filas_con_rendimiento_valido: u32,
+    /// Filas de datos cuyo `fps` o `frametime` no es utilizable (vacío, no numérico,
+    /// negativo, cero o no finito). No entran en ninguna métrica de rendimiento.
+    #[serde(default)]
+    pub filas_con_rendimiento_invalido: u32,
+    /// De las válidas, las excluidas por el calentamiento.
+    #[serde(default)]
+    pub excluidas_por_calentamiento: u32,
+    /// Las que llegan al cálculo de las métricas. Es el `n` real de los percentiles.
+    #[serde(default)]
+    pub muestras_analizadas: u32,
+    /// Incidencias temporales encontradas. **No son exclusiones**: una fila puede tener
+    /// varias a la vez y aun así entrar en el cálculo. Se contabilizan aparte.
+    #[serde(default)]
+    pub incidencias: IncidenciasTemporales,
+    /// Si hay un eje temporal en el que se pueda confiar (para duración, calentamiento y
+    /// series por tiempo).
+    #[serde(default)]
+    pub eje_temporal_fiable: bool,
+    /// La columna `elapsed` existía en la cabecera del CSV.
+    #[serde(default)]
+    pub columna_elapsed_presente: bool,
+    /// Se ha solicitado calentamiento pero **no se ha aplicado**. `None` cuando se aplicó
+    /// o cuando no se pidió.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calentamiento_no_aplicado: Option<MotivoSinCalentamiento>,
+}
+
+/// Por qué no se pudo aplicar el calentamiento solicitado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotivoSinCalentamiento {
+    /// No se pidió calentamiento (`warmup_seconds <= 0`).
+    NoSolicitado,
+    /// El log no trae un eje temporal en el que confiar.
+    SinEjeTemporal,
+    /// Hay tan pocas muestras que el corte no saldría de sitio.
+    PocasMuestras,
+    /// Tras el corte quedarían menos de `MIN_STEADY_SECONDS` segundos.
+    QuedariaDemasiadoCorto,
+    /// El corte no deja `MIN_SAMPLES` muestras analizables.
+    QuedarianPocasMuestras,
+}
+
+impl ContabilidadDeMuestras {
+    /// Las filas de datos se reparten enteras entre inválidas, excluidas por
+    /// calentamiento y analizadas. Ninguna fila se cuenta dos veces.
+    pub fn cuadra(&self) -> bool {
+        self.filas_originales as i64
+            == self.filas_con_rendimiento_invalido as i64
+                + self.excluidas_por_calentamiento as i64
+                + self.muestras_analizadas as i64
+            && self.filas_con_rendimiento_valido as i64
+                == self.excluidas_por_calentamiento as i64 + self.muestras_analizadas as i64
+    }
+}
+
+/// Valor del reloj de una fila, **sin colapsar los casos distintos** [5.4.1.A].
+///
+/// Antes todo acababa en `Option<f64>::None`, y así «la columna no existe», «la celda
+/// está vacía», «el texto no es un número» y «es NaN/inf» eran indistinguibles: no se
+/// podía decir al usuario qué le pasa a su CSV. No se corrige ni se convierte nada:
+/// solo se nombra lo que hay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RelojDeFila {
+    /// La cabecera del CSV no trae columna `elapsed`.
+    ColumnaAusente,
+    /// La fila tiene menos columnas que las que la cabecera declara.
+    CeldaAusente,
+    /// La celda existe pero está vacía o solo tiene espacios.
+    CeldaVacia,
+    /// La celda tiene texto que no es un número.
+    Malformado,
+    /// Es un número, pero NaN o infinito.
+    NoFinito,
+    /// Un número finito. Puede ser negativo o repetido: eso se clasifica aparte.
+    Valor(f64),
+}
+
+impl RelojDeFila {
+    /// El valor utilizable para comparar, si lo hay.
+    fn valor(self) -> Option<f64> {
+        match self {
+            RelojDeFila::Valor(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// Fila leída del CSV antes de decidir nada: conserva **por qué** falta el `elapsed`.
+struct FilaLeida {
+    fps: f64,
+    frame_time: f64,
+    reloj: RelojDeFila,
+}
+
+/// Resultado de preparar las muestras para el cálculo.
+struct MuestrasPreparadas {
+    /// Lo que llega a las fórmulas.
+    muestras: Vec<Sample>,
+    contabilidad: ContabilidadDeMuestras,
+    /// Duración según el eje temporal fiable. `None` si no hay eje fiable.
+    duracion: Option<f64>,
+    /// Eje utilizable, para las métricas que cortan por tiempo.
+    eje: Option<EjeTemporal>,
+    /// Segundos de calentamiento descartados de verdad (0.0 si no se aplicó).
+    warmup_applied: f64,
+}
+
+/// Clasifica las incidencias del reloj de una serie de filas, en el orden en que vienen.
+///
+/// **No reordena, no interpola, no corrige**: solo cuenta lo que encuentra. Un desorden
+/// detectado deja el eje no fiable pero no elimina ninguna fila.
+fn detectar_incidencias(filas: &[FilaLeida]) -> IncidenciasTemporales {
+    let mut inc = IncidenciasTemporales::default();
+    // Último reloj **visto**, aunque sea inválido: sirve para detectar el desorden de una
+    // fila válida respecto a la anterior que traía reloj.
+    let mut anterior: Option<f64> = None;
+
+    for fila in filas {
+        match fila.reloj.valor() {
+            None => {
+                // Una fila sin reloj no puede ser repetida ni desordenada: no hay valor
+                // que comparar. Se cuenta **una vez por fila sin reloj**, no las filas
+                // posteriores: que falte en una fila no hace que las siguientes carezcan
+                // de reloj. Se guarda además **por qué** falta, para no perder la causa
+                // al persistir: el total solo no distingue una columna ausente de una
+                // celda vacía.
+                inc.reloj_incompleto += 1;
+                match fila.reloj {
+                    RelojDeFila::ColumnaAusente => inc.columna_elapsed_ausente += 1,
+                    RelojDeFila::CeldaAusente => inc.celda_reloj_ausente += 1,
+                    RelojDeFila::CeldaVacia => inc.celda_reloj_vacia += 1,
+                    RelojDeFila::Malformado | RelojDeFila::NoFinito => inc.celda_reloj_ilegible += 1,
+                    RelojDeFila::Valor(_) => unreachable!("ya filtrado por reloj.valor()"),
+                }
+            }
+            Some(v) => {
+                if v < 0.0 {
+                    inc.negativas += 1;
+                }
+                if let Some(prev) = anterior {
+                    // Comparación exacta: iguales = repetido; menor = invertido.
+                    if v == prev {
+                        inc.filas_repetidas += 1;
+                    } else if v < prev {
+                        inc.orden_invertido += 1;
+                    }
+                }
+                anterior = Some(v);
+            }
         }
     }
 
-    let removed = total - cleaned.len();
-    (cleaned, removed)
+    // La columna existía pero alguna fila no trajo valor legible: el eje queda incompleto
+    // aunque no haya huecos de orden. `reloj_incompleto` ya cuenta esas filas.
+
+    inc
+}
+
+/// Decide si hay un eje temporal en el que se pueda confiar.
+///
+/// Requiere: la columna existía, **todas** las filas traen reloj, ninguno es negativo y
+/// el orden es estrictamente creciente. Cualquier otra cosa deja el eje no fiable.
+fn eje_de_confianza(filas: &[FilaLeida], columna_elapsed_presente: bool) -> Option<EjeTemporal> {
+    if !columna_elapsed_presente || filas.is_empty() {
+        return None;
+    }
+    let mut anterior: Option<f64> = None;
+    for fila in filas {
+        let v = fila.reloj.valor()?;
+        if v < 0.0 {
+            return None;
+        }
+        if let Some(prev) = anterior {
+            if v <= prev {
+                return None;
+            }
+        }
+        anterior = Some(v);
+    }
+    let inicio = filas.first()?.reloj.valor()?;
+    let fin = filas.last()?.reloj.valor()?;
+    Some(EjeTemporal { inicio_ns: inicio, fin_ns: fin })
+}
+
+/// Prepara las muestras según la metodología **v2** y calcula la contabilidad.
+///
+/// Reglas (5.4.1.A):
+///
+/// - **No se descarta ninguna fila por coincidencia de FPS y frametime.** Dos ventanas
+///   distintas pueden medir lo mismo sin ser la misma fila, y en una serie planchada
+///   (limitador, pausa, tramo lento) esa coincidencia es el dato, no un artefacto.
+/// - Hasta las filas **completamente idénticas** (mismo `elapsed`) se conservan: no hay
+///   evidencia de que sean un doble registro en vez de dos ventanas del mismo instante.
+/// - Sin `elapsed` **no se deduplica** nada: no hay forma de saber si dos filas iguales
+///   son la misma o son un rendimiento plano.
+/// - Las filas con rendimiento válido pero reloj raro **se conservan**: entran en las
+///   métricas que solo dependen de los valores (promedios, percentiles). Lo que se pierde
+///   es el eje temporal, no los datos de rendimiento. No se excluye ninguna fila por su
+///   timestamp.
+/// - El calentamiento solo se aplica si hay **eje fiable**. Si no hay eje, no se corta
+///   nada: cortar por índice (suponiendo 100 ms por fila) sería inventar tiempo. El
+///   motivo por el que no se aplicó queda registrado.
+fn preparar_muestras(
+    filas: Vec<FilaLeida>,
+    warmup_seconds: f64,
+    columna_elapsed_presente: bool,
+    filas_originales: u32,
+    filas_con_rendimiento_invalido: u32,
+) -> MuestrasPreparadas {
+    let incidencias = detectar_incidencias(&filas);
+    // El desglose debe sumar exactamente el total de filas sin reloj: si no, se estaría
+    // persistiendo un total que no explica sus propias causas.
+    debug_assert!(
+        incidencias.desglose_de_reloj_cuadra(),
+        "el desglose de reloj no cuadra con reloj_incompleto: {incidencias:?}"
+    );
+    let eje = eje_de_confianza(&filas, columna_elapsed_presente);
+    let filas_con_rendimiento_valido = filas.len() as u32;
+    let duracion = eje.map(|e| e.duracion_segundos());
+
+    // Todas las filas con rendimiento válido son candidatas: v2 no elimina ninguna por
+    // coincidencia de valores ni por reloj.
+    let muestras_validas: Vec<Sample> = filas
+        .into_iter()
+        .map(|f| Sample {
+            fps: f.fps,
+            frame_time: f.frame_time,
+            elapsed_ns: f.reloj.valor(),
+        })
+        .collect();
+
+    // La regla del corte es una sola (`indice_de_corte`, la misma que usa `split_warmup`).
+    // Aquí solo se decide si procede y, si no, por qué.
+    let corte = if eje.is_none() {
+        None
+    } else {
+        indice_de_corte(&muestras_validas, warmup_seconds)
+    };
+
+    let motivo = if corte.is_some() {
+        None
+    } else if warmup_seconds <= 0.0 {
+        Some(MotivoSinCalentamiento::NoSolicitado)
+    } else if eje.is_none() {
+        Some(MotivoSinCalentamiento::SinEjeTemporal)
+    } else if muestras_validas.len() < MIN_SAMPLES {
+        Some(MotivoSinCalentamiento::PocasMuestras)
+    } else {
+        // Las dos condiciones que quedan, en el orden en que las comprueba el corte.
+        let first = muestras_validas.first().and_then(|s| s.elapsed_ns);
+        let last = muestras_validas.last().and_then(|s| s.elapsed_ns);
+        let total = match (first, last) {
+            (Some(a), Some(b)) => (b - a) / 1e9,
+            _ => 0.0,
+        };
+        if total - warmup_seconds < MIN_STEADY_SECONDS {
+            Some(MotivoSinCalentamiento::QuedariaDemasiadoCorto)
+        } else {
+            Some(MotivoSinCalentamiento::QuedarianPocasMuestras)
+        }
+    };
+
+    let (muestras, excluidas_calentamiento, warmup_applied) = if corte.is_some() {
+        let total = muestras_validas.len() as u32;
+        let (restantes, aplicado) = split_warmup(muestras_validas, warmup_seconds);
+        let excluidas = total - restantes.len() as u32;
+        (restantes, excluidas, aplicado)
+    } else {
+        (muestras_validas, 0u32, 0.0)
+    };
+
+    let contabilidad = ContabilidadDeMuestras {
+        filas_originales,
+        filas_con_rendimiento_valido,
+        filas_con_rendimiento_invalido,
+        excluidas_por_calentamiento: excluidas_calentamiento,
+        muestras_analizadas: muestras.len() as u32,
+        incidencias,
+        eje_temporal_fiable: eje.is_some(),
+        columna_elapsed_presente,
+        calentamiento_no_aplicado: motivo,
+    };
+    // El invariante se comprueba también en las pruebas con `cuadra()`, no solo aquí.
+    debug_assert!(contabilidad.cuadra(), "la contabilidad de muestras no cuadra");
+
+    MuestrasPreparadas {
+        muestras,
+        contabilidad,
+        duracion,
+        eje,
+        warmup_applied,
+    }
+}
+
+/// Cómo se ha calculado un percentil concreto: hace falta para no presentar una medida
+/// apoyada en dos observaciones como si tuviera cientos detrás.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ApoyoDePercentil {
+    /// Muestras sobre las que se calculó (`n`).
+    pub muestras: u32,
+    /// Tamaño nominal de la cola para ese percentil (`n × (1−p)`), en unidades de
+    /// muestra. Con `n` pequeño puede ser menor que 1.
+    pub cola_nominal: f64,
+    /// Observaciones distintas que usó la **interpolación** del percentil.
+    pub observaciones_interpoladas: u32,
+    /// Muestras incluidas de verdad en la media de cola, cuando la métrica es una media.
+    /// `None` si la métrica es un percentil puro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muestras_en_la_media: Option<u32>,
+}
+
+/// Calcula el apoyo de un percentil interpolado sobre una serie ya ordenada.
+fn apoyo_de_percentil(sorted: &[f64], p: f64) -> ApoyoDePercentil {
+    let n = sorted.len();
+    if n == 0 {
+        return ApoyoDePercentil {
+            muestras: 0,
+            cola_nominal: 0.0,
+            observaciones_interpoladas: 0,
+            muestras_en_la_media: None,
+        };
+    }
+    let rank = (p / 100.0).clamp(0.0, 1.0) * (n - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    ApoyoDePercentil {
+        muestras: n as u32,
+        cola_nominal: n as f64 * (1.0 - p / 100.0),
+        // `lo == hi`, un solo elemento del vector, pero en `p = 50` la interpolación
+        // puede tocar dos. Se cuentan las filas distintas: `hi - lo + 1`.
+        observaciones_interpoladas: (hi - lo + 1) as u32,
+        muestras_en_la_media: None,
+    }
+}
+
+/// Apoyo de las métricas de un benchmark: con qué se calculó cada percentil.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApoyoDeMetricas {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps_1_percent_low: Option<ApoyoDePercentil>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps_0_1_percent_low: Option<ApoyoDePercentil>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fps: Option<ApoyoDePercentil>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_fps: Option<ApoyoDePercentil>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_time_1_percent_high: Option<ApoyoDePercentil>,
+}
+
+impl ApoyoDeMetricas {
+}
+
+/// Muestras incluidas en la media de cola `ft >= P99`.
+///
+/// Se separa en su propia función porque el filtro `>=` incluye **empates**: en una serie
+/// constante todas las muestras valen lo mismo y `P99` es ese valor, así que entran
+/// **todas**, no el 1 %. Es un comportamiento derivado de la fórmula existente, no un
+/// error nuevo, y por eso se mide en vez de corregirse aquí.
+fn muestras_en_media_de_cola(sorted_ft: &[f64], p99_ft: f64) -> Vec<f64> {
+    sorted_ft.iter().cloned().filter(|&f| f >= p99_ft).collect()
 }
 
 /// Descarta las muestras de los primeros `seconds` segundos de la grabación.
@@ -517,40 +1056,56 @@ fn drop_stuck_samples(samples: Vec<Sample>) -> (Vec<Sample>, usize) {
 /// nada (y devuelve 0) cuando no hay columna `elapsed` —sin reloj real no se sabe dónde
 /// cae el corte—, cuando quedarían menos de [`MIN_STEADY_SECONDS`] segundos, o cuando
 /// quedarían menos de [`MIN_SAMPLES`] muestras.
+///
+/// **Es la única implementación del corte por calentamiento**: `preparar_muestras` la
+/// llama en vez de repetir la regla, para que el corte no pueda divergir entre los dos
+/// caminos.
 fn split_warmup(samples: Vec<Sample>, seconds: f64) -> (Vec<Sample>, f64) {
+    match indice_de_corte(&samples, seconds) {
+        Some(c) => {
+            let aplicado = (samples_at(&samples, c) - samples_at(&samples, 0)) / 1e9;
+            (samples.into_iter().skip(c).collect(), aplicado)
+        }
+        None => (samples, 0.0),
+    }
+}
+
+/// Índice de la primera muestra que cae en o después del corte, o `None` si el
+/// calentamiento no procede.
+///
+/// Es la regla **única**: `split_warmup` la usa para cortar y `preparar_muestras` para
+/// saber cuántas filas excluye y si el calentamiento solicitado pudo aplicarse.
+fn indice_de_corte(samples: &[Sample], seconds: f64) -> Option<usize> {
     if seconds <= 0.0 || samples.len() < MIN_SAMPLES {
-        return (samples, 0.0);
+        return None;
     }
 
     let (Some(first), Some(last)) = (
         samples.first().and_then(|s| s.elapsed_ns),
         samples.last().and_then(|s| s.elapsed_ns),
     ) else {
-        return (samples, 0.0);
+        return None;
     };
 
     let total = (last - first) / 1e9;
     // Si el corte deja menos de lo exigible, es mejor analizar todo que analizar un
     // trozo diminuto y presentarlo como si fuera representativo.
     if total - seconds < MIN_STEADY_SECONDS {
-        return (samples, 0.0);
+        return None;
     }
 
     let cutoff = first + seconds * 1e9;
     let cut = samples
         .iter()
-        .position(|s| s.elapsed_ns.map(|e| e >= cutoff).unwrap_or(false));
-
-    let Some(cut) = cut else {
-        return (samples, 0.0);
-    };
+        .position(|s| s.elapsed_ns.map(|e| e >= cutoff).unwrap_or(false))?;
     if cut == 0 || samples.len() - cut < MIN_SAMPLES {
-        return (samples, 0.0);
+        return None;
     }
+    Some(cut)
+}
 
-    let applied = (samples[cut].elapsed_ns.unwrap_or(cutoff) - first) / 1e9;
-    let kept = samples.into_iter().skip(cut).collect();
-    (kept, applied)
+fn samples_at(samples: &[Sample], idx: usize) -> f64 {
+    samples.get(idx).and_then(|s| s.elapsed_ns).unwrap_or(0.0)
 }
 
 /// Parte las muestras en (primera ventana, resto).
@@ -650,6 +1205,18 @@ pub fn shader_stutter(early: &[f64], steady: &[f64], window_seconds: f64) -> Opt
 /// (un tirón afecta a varias filas seguidas) no se cuenta como si fueran muestras
 /// independientes, que es el error de usar el desvío estándar por muestra.
 ///
+/// **No necesita reloj** [5.4.1.A]: solo usa el orden de las filas y sus valores. Lo que
+/// representa, entonces, es la variación del FPS medio **a lo largo de la grabación**, en
+/// el orden en que se registró. Sus límites, que conviene no olvidar al leerlo:
+///
+/// - Los bloques son contiguos **por índice**, no por tiempo. Sin `elapsed` no se puede
+///   afirmar que cada bloque cubra ~6 s ni que todos duren lo mismo; si la grabación
+///   tuviera huecos, un bloque podría abarcar más tiempo real que otro.
+/// - La aproximación normal sobre ~8 medias de bloque es gruesa: es una **estimación de
+///   dispersión**, no un intervalo de confianza validado (ver `docs/mangohud-summary.md`).
+/// - Mide la variación **dentro** de una grabación; no dice nada de la variación entre
+///   partidas distintas.
+///
 /// `None` si hay muy pocas muestras para estimarlo con un mínimo de rigor.
 fn noise_percent(fps: &[f64]) -> Option<f64> {
     let n = fps.len();
@@ -727,9 +1294,9 @@ fn serie_temporal(
     let frame_time_ms: Vec<f32> = recogidas
         .iter()
         .map(|s| {
-            // Un frametime negativo o no finito es un dato corrupto: se descarta la
-            // muestra entera antes de llegar aquí (drop_stuck_samples) pero se protege
-            // igualmente para que un log raro no produzca NaN en el JSON.
+            // Un frametime negativo o no finito es un dato corrupto: esas filas no
+            // llegan aquí (se cuentan como rendimiento inválido al leerlas) pero se
+            // protege igualmente para que un log raro no produzca NaN en el JSON.
             if s.frame_time.is_finite() && s.frame_time > 0.0 {
                 s.frame_time as f32
             } else {
@@ -782,10 +1349,12 @@ fn compute_stutter(frame_times: &[f64], duration_seconds: f64) -> StutterStats {
     let idx = (((n as f64) * 0.999) as usize).min(n - 1);
 
     StutterStats {
+        // Sin duración conocida no hay divisor: la tasa **no consta**. Antes se devolvía
+        // 0.0, que se leía como «ningún pico» cuando en realidad no se sabía.
         spikes_per_min: if duration_seconds > 0.0 {
-            spikes as f64 / (duration_seconds / 60.0)
+            Some(spikes as f64 / (duration_seconds / 60.0))
         } else {
-            0.0
+            None
         },
         pct_over_33ms: over_33 as f64 / n as f64 * 100.0,
         jitter_ms,
@@ -1362,7 +1931,8 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
     let content = fs::read_to_string(&file_path)
         .map_err(|e| format!("Error al leer el archivo {:?}: {}", file_path, e))?;
 
-    let mut raw_samples: Vec<Sample> = Vec::new();
+    let mut filas_leidas: Vec<FilaLeida> = Vec::new();
+    let mut filas_con_rendimiento_invalido: u32 = 0;
 
     let mut fps_column: usize = 0;
     let mut frametime_column: usize = 1;
@@ -1403,66 +1973,139 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
         return Err("No se encontró el header de datos (fps,frametime) en el archivo CSV. ¿Es un log válido de MangoHud?".to_string());
     }
 
+    // Filas **originales de datos**: las que hay entre la cabecera de datos y el final.
+    // No cuentan las líneas de metadatos (`OS`, `CPU`, `GPU`…) ni la propia cabecera: no
+    // son datos de rendimiento. Tampoco las líneas en blanco del final.
+    let mut filas_originales: u32 = 0;
     for line in content.lines().skip(data_start_line) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        filas_originales += 1;
+
         let parts: Vec<&str> = line.split(',').collect();
 
-        if parts.len() > fps_column && parts.len() > frametime_column {
-            if let (Ok(fps), Ok(frame_time)) = (
-                parts[fps_column].trim().parse::<f64>(),
-                parts[frametime_column].trim().parse::<f64>(),
-            ) {
-                // is_finite descarta NaN/inf, que romperían los ordenamientos más abajo
-                if fps.is_finite() && frame_time.is_finite() && fps > 0.0 && frame_time > 0.0 {
-                    let elapsed_ns = elapsed_column
-                        .and_then(|c| parts.get(c))
-                        .and_then(|s| s.trim().parse::<f64>().ok())
-                        .filter(|v| v.is_finite());
+        if parts.len() <= fps_column || parts.len() <= frametime_column {
+            // Fila de datos con menos columnas de las necesarias: no es utilizable.
+            filas_con_rendimiento_invalido += 1;
+            continue;
+        }
 
-                    raw_samples.push(Sample {
-                        fps,
-                        frame_time,
-                        elapsed_ns,
-                    });
-                }
+        if let (Ok(fps), Ok(frame_time)) = (
+            parts[fps_column].trim().parse::<f64>(),
+            parts[frametime_column].trim().parse::<f64>(),
+        ) {
+            // is_finite descarta NaN/inf, que romperían los ordenamientos más abajo.
+            // Un valor de rendimiento no finito o no positivo no es una muestra: no
+            // entra en ninguna métrica y se cuenta aparte, para poder explicar luego
+            // por qué quedan pocas muestras.
+            if fps.is_finite() && frame_time.is_finite() && fps > 0.0 && frame_time > 0.0 {
+                // El reloj se guarda tal cual: `None` si no era legible o no era
+                // finito. La fila entra igualmente; el reloj es otra cosa.
+                // El reloj se clasifica **sin colapsar** los casos: columna ausente,
+                // celda ausente, celda vacía, texto malformado y valor no finito son
+                // situaciones distintas y el usuario merece saber cuál tiene.
+                let reloj = match elapsed_column {
+                    None => RelojDeFila::ColumnaAusente,
+                    Some(c) => match parts.get(c) {
+                        None => RelojDeFila::CeldaAusente,
+                        Some(celda) => {
+                            let celda = celda.trim();
+                            if celda.is_empty() {
+                                RelojDeFila::CeldaVacia
+                            } else {
+                                match celda.parse::<f64>() {
+                                    Ok(v) if v.is_finite() => RelojDeFila::Valor(v),
+                                    Ok(_) => RelojDeFila::NoFinito,
+                                    Err(_) => RelojDeFila::Malformado,
+                                }
+                            }
+                        }
+                    },
+                };
+
+                filas_leidas.push(FilaLeida {
+                    fps,
+                    frame_time,
+                    reloj,
+                });
+            } else {
+                filas_con_rendimiento_invalido += 1;
             }
+        } else {
+            // `fps` o `frametime` vacíos o no numéricos: fila inválida.
+            filas_con_rendimiento_invalido += 1;
         }
     }
 
-    // La duración se mide con el reloj real de la grabación (columna `elapsed`, en
-    // nanosegundos) ANTES de limpiar muestras repetidas, para no acortarla.
-    // MangoHud guarda ~1 fila cada 100 ms, así que sumar los frametimes (lo que se hacía
-    // antes) daba ~7 s en una grabación de 60 s.
-    let elapsed_only: Vec<f64> = raw_samples.iter().filter_map(|s| s.elapsed_ns).collect();
-    // ¿El log trae tiempos reales? Si no, la serie temporal se guarda sin eje X.
-    let con_tiempos = elapsed_only.len() >= 2;
-    let duration_seconds = if elapsed_only.len() >= 2 {
-        let first = elapsed_only[0];
-        let last = elapsed_only[elapsed_only.len() - 1];
-        ((last - first) / 1e9).max(0.0)
-    } else {
-        // Respaldo para logs sin columna `elapsed`
-        raw_samples.iter().map(|s| s.frame_time).sum::<f64>() / 1000.0
-    };
-
-    let (samples, stuck_removed) = drop_stuck_samples(raw_samples);
+    // ==================== Preparación con metodología v2 ====================
+    //
+    // v2 (5.4.1.A) **no descarta muestras por coincidencia de FPS y frametime**. La
+    // versión anterior lo hacía, y en una serie planchada (limitador, pausa, tramo lento)
+    // esa coincidencia es el propio dato: el resultado era borrar justo lo que se quería
+    // medir, hasta dejar la grabación sin muestras suficientes.
+    let preparadas = preparar_muestras(
+        filas_leidas,
+        warmup_seconds,
+        elapsed_column.is_some(),
+        filas_originales,
+        filas_con_rendimiento_invalido,
+    );
+    let contabilidad = preparadas.contabilidad.clone();
+    // Compatibilidad: si la duración está medida, el campo legado lleva **el mismo valor**
+    // (misma magnitud, en segundos), porque así lo esperan los JSON y el frontend ya
+    // guardados. Si no está medida, vale 0.0 por contrato y ese cero **no** es una
+    // duración: `duracion_medida` queda en `None` y `Benchmark::duracion()` responde
+    // «no consta». La fuente de verdad para v2 sigue siendo `duracion_medida`.
+    let duration_seconds = preparadas.duracion.unwrap_or(0.0);
+    let con_tiempos = preparadas.eje.is_some();
 
     println!(
-        "[Benchmark] Muestras válidas: {} (descartadas {} repetidas/pegadas)",
-        samples.len(),
-        stuck_removed
+        "[Benchmark] Filas de datos: {} ({} con rendimiento válido, {} con valores no utilizables)",
+        contabilidad.filas_originales,
+        contabilidad.filas_con_rendimiento_valido,
+        contabilidad.filas_con_rendimiento_invalido
     );
-    println!("[Benchmark] Duración real de la grabación: {:.1} s", duration_seconds);
+    if let Some(motivo) = contabilidad.calentamiento_no_aplicado {
+        if motivo != MotivoSinCalentamiento::NoSolicitado {
+            println!(
+                "[Benchmark] Calentamiento no aplicado: {:?}",
+                motivo
+            );
+        }
+    }
+    println!(
+        "[Benchmark] Excluidas por calentamiento: {} · analizadas: {}",
+        contabilidad.excluidas_por_calentamiento, contabilidad.muestras_analizadas
+    );
+    if contabilidad.incidencias.hay_algunas() {
+        println!(
+            "[Benchmark] Incidencias temporales: repetidos={} invertidos={} negativos={} no_finitos={} reloj_incompleto={}",
+            contabilidad.incidencias.filas_repetidas,
+            contabilidad.incidencias.orden_invertido,
+            contabilidad.incidencias.negativas,
+            contabilidad.incidencias.no_finitas,
+            contabilidad.incidencias.reloj_incompleto
+        );
+    }
+    println!(
+        "[Benchmark] Duración real de la grabación: {:.1} s{}",
+        duration_seconds,
+        if con_tiempos { "" } else { " (sin eje temporal fiable)" }
+    );
 
-    // La ventana inicial se guarda ANTES de descartar el calentamiento: es justo el
-    // trozo que se tira, y compararlo con el resto es lo que dice cuánto cuesta compilar
-    // shaders la primera vez. La ventana busca su propio corte por tiempo sobre las
-    // muestras completas, así que las dos mitades salen disjuntas por construcción y el
-    // trozo que se compara como "arranque" es el mismo que luego se descarta.
-    let (early_frames, steady_frames) = sample_window(&samples, SHADER_WINDOW_SECONDS);
+    // La ventana inicial se guarda con las muestras completas antes del calentamiento: es
+    // justo el trozo que se tira, y compararlo con el resto es lo que dice cuánto cuesta
+    // compilar shaders la primera vez. Sin eje fiable no hay ventana que recortar.
+    let (early_frames, steady_frames) = if preparadas.eje.is_some() {
+        sample_window(&preparadas.muestras, SHADER_WINDOW_SECONDS)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
-    // El arranque (carga del nivel, compilación inicial de shaders) no representa el
-    // rendimiento en juego y estropea sobre todo los percentiles bajos.
-    let (samples, warmup_applied) = split_warmup(samples, warmup_seconds);
+    let samples = preparadas.muestras;
+    let warmup_applied = preparadas.warmup_applied;
     if warmup_applied > 0.0 {
         println!(
             "[Benchmark] Calentamiento descartado: {:.1} s (quedan {:.1} s de estado estable)",
@@ -1472,12 +2115,34 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
     }
 
     if samples.len() < MIN_SAMPLES {
-        return Err(format!(
-            "El log tiene muy pocas muestras ({} útiles, mínimo {} requeridas).\n\n\
-            Graba el log durante al menos 30 segundos (lo ideal es 60).",
-            samples.len(),
-            MIN_SAMPLES
-        ));
+        // El mensaje nombra la causa real: no es lo mismo un archivo corto que uno cuyas
+        // filas no valen. Recomendar «graba más tiempo» cuando el problema es la calidad
+        // del archivo manda al usuario a repetir una prueba que volverá a fallar.
+        let cuenta = &contabilidad;
+        let causa = if cuenta.filas_con_rendimiento_valido == 0 {
+            format!(
+                "El archivo tiene {} filas de datos, pero ninguna con valores de rendimiento \
+                 utilizables (FPS o frametime vacíos, no numéricos, negativos, cero o infinitos). \
+                 Revisa que el archivo sea un log de MangoHud completo.",
+                cuenta.filas_originales
+            )
+        } else if cuenta.excluidas_por_calentamiento > 0 {
+            format!(
+                "La grabación tiene {} filas con rendimiento válido, pero tras descartar el \
+                 calentamiento ({} muestras) solo quedan {} analizables y el mínimo es {}.",
+                cuenta.filas_con_rendimiento_valido,
+                cuenta.excluidas_por_calentamiento,
+                samples.len(),
+                MIN_SAMPLES
+            )
+        } else {
+            format!(
+                "La grabación tiene {} filas con rendimiento válido y el mínimo es {}.",
+                samples.len(),
+                MIN_SAMPLES
+            )
+        };
+        return Err(format!("No hay muestras suficientes para analizar. {}", causa));
     }
 
     let fps_values: Vec<f64> = samples.iter().map(|s| s.fps).collect();
@@ -1513,15 +2178,41 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
     let fps_0_1_percent_low = 1000.0 / p999_ft;
 
     // Promedio de los frametimes que superan el percentil 99 (el "1% más lento").
-    let worst: Vec<f64> = sorted_ft.iter().cloned().filter(|&f| f >= p99_ft).collect();
+    //
+    // El filtro es `>=`, así que los empates entran: en una serie constante `P99` es el
+    // propio valor y acaban entrando **todas** las muestras. Es lo que ya hacía la
+    // fórmula (no se cambia); lo que se añade es el recuento real, para que el apoyo de
+    // la métrica no mienta.
+    let worst = muestras_en_media_de_cola(&sorted_ft, p99_ft);
     let frame_time_1_percent_high = if worst.is_empty() {
         p99_ft
     } else {
         worst.iter().sum::<f64>() / worst.len() as f64
     };
 
-    let steady_duration = (duration_seconds - warmup_applied).max(0.0);
-    let stutter = compute_stutter(&frame_times, steady_duration);
+    // Apoyo de cada métrica: sobre cuántas muestras se calculó y qué cola usó la
+    // interpolación. No es un tamaño efectivo estadístico: solo describe el cálculo.
+    let apoyo = ApoyoDeMetricas {
+        fps_1_percent_low: Some(apoyo_de_percentil(&sorted_ft, 99.0)),
+        fps_0_1_percent_low: Some(apoyo_de_percentil(&sorted_ft, 99.9)),
+        max_fps: Some(apoyo_de_percentil(&sorted_fps, 99.9)),
+        min_fps: Some(apoyo_de_percentil(&sorted_fps, 0.1)),
+        frame_time_1_percent_high: Some(ApoyoDePercentil {
+            muestras_en_la_media: Some(worst.len() as u32),
+            ..apoyo_de_percentil(&sorted_ft, 99.0)
+        }),
+    };
+
+    // El stutter reparte picos por minuto: sin una duración medida con un reloj fiable no
+    // hay divisor y el dato sería inventado. Jitter, porcentaje de muestras lentas y peor
+    // frametime solo dependen de los valores, así que sí se calculan.
+    let stable_duration = if con_tiempos {
+        (duration_seconds - warmup_applied).max(0.0)
+    } else {
+        0.0
+    };
+    let stutter = compute_stutter(&frame_times, stable_duration);
+    let spikes_per_min = stutter.spikes_per_min;
     let noise = noise_percent(&fps_values);
     let shader = shader_stutter(&early_frames, &steady_frames, SHADER_WINDOW_SECONDS);
 
@@ -1533,7 +2224,10 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
     println!("[Benchmark]    FPS promedio: {:.1}", avg_fps);
     println!("[Benchmark]    1% Low: {:.1}", fps_1_percent_low);
     println!("[Benchmark]    0.1% Low: {:.1}", fps_0_1_percent_low);
-    println!("[Benchmark]    Picos/min: {:.1}", stutter.spikes_per_min);
+    match stutter.spikes_per_min {
+        Some(v) => println!("[Benchmark]    Picos/min: {v:.1}"),
+        None => println!("[Benchmark]    Picos/min: no consta (sin eje temporal fiable)"),
+    }
     if let Some(n) = noise {
         println!("[Benchmark]    Margen de ruido: ±{:.1} %", n);
     }
@@ -1555,6 +2249,7 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
         appid: 0,
         timestamp: file_timestamp,
         duration_seconds,
+        duracion_medida: preparadas.duracion,
         avg_fps,
         fps_1_percent_low,
         fps_0_1_percent_low,
@@ -1565,7 +2260,7 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
         total_frames,
         notes: None,
         launch_command: String::new(),
-        spikes_per_min: Some(stutter.spikes_per_min),
+        spikes_per_min,
         pct_over_33ms: Some(stutter.pct_over_33ms),
         jitter_ms: Some(stutter.jitter_ms),
         worst_frame_ms: Some(stutter.worst_frame_ms),
@@ -1588,6 +2283,12 @@ pub fn analyze_mangohud_log(log_path: &str, warmup_seconds: f64) -> Result<Bench
         // El análisis del CSV no sabe nada de la configuración: se rellena al guardar, y
         // solo con datos que el frontend pudo leer en su momento.
         snapshot: None,
+        // 5.4.1.A: estas grabaciones se calculan con la metodología v2 (sin descartar
+        // muestras por coincidencia de valores) y llevan su contabilidad para poder
+        // auditar de dónde sale cada número.
+        metodologia_calculo: Some(MetodologiaCalculo::V2),
+        contabilidad_muestras: Some(contabilidad),
+        apoyo_metricas: Some(apoyo),
     })
 }
 
@@ -2198,10 +2899,7 @@ fn atribuir_a_sesion(benchmark: &Benchmark) -> Option<String> {
     if ruta_csv.is_empty() {
         return None;
     }
-    let ventana = crate::sessions_service::ventana_de_csv(
-        ruta_csv,
-        Some(benchmark.duration_seconds).filter(|d| *d > 0.0),
-    );
+    let ventana = crate::sessions_service::ventana_de_csv(ruta_csv, benchmark.duracion_en_segundos());
     ventana.inicio.as_ref()?;
     let (id, _asociacion) = crate::sessions_service::servicio().asociar_grabacion(
         benchmark.appid,
@@ -2575,10 +3273,19 @@ pub fn compare_benchmarks(
     );
 
     // Avisos que ayudan a no sacar conclusiones erróneas
-    if baseline.duration_seconds < 20.0 || test.duration_seconds < 20.0 {
-        conclusion.push_str(
+    //
+    // `duration_seconds` vale 0.0 cuando la grabación no trae eje temporal fiable
+    // [5.4.1.A]; ahí el cero significa «no consta», no «cero segundos». La regla vive en
+    // `Benchmark::duracion_en_segundos`, no aquí, para que no se duplique.
+    match (baseline.duracion_en_segundos(), test.duracion_en_segundos()) {
+        (None, _) | (_, None) => conclusion.push_str(
+            "\nⓘ Alguna grabación no trae un eje temporal fiable: su duración no consta y \
+             el resultado puede no ser comparable con otra de duración conocida.",
+        ),
+        (Some(a), Some(b)) if a < 20.0 || b < 20.0 => conclusion.push_str(
             "\nℹ️ Alguna grabación dura menos de 20 s: el resultado puede no ser fiable.",
-        );
+        ),
+        _ => {}
     }
 
     let iguales = comandos_iguales(&baseline.launch_command, &test.launch_command);
@@ -3246,6 +3953,10 @@ mod tests {
             log_path: String::new(),
             sample_count: None,
             muestras_temporales: None,
+            metodologia_calculo: None,
+            contabilidad_muestras: None,
+            apoyo_metricas: None,
+            duracion_medida: None,
         }
     }
 
@@ -3784,25 +4495,622 @@ mod tests {
         assert_eq!(percentile_sorted(&v, 500.0), 3.0);
     }
 
-    #[test]
-    fn descarta_muestras_repetidas_consecutivas() {
-        let (out, removed) = drop_stuck_samples(vec![
-            sample(60.0, 16.6),
-            sample(60.0, 16.6), // repetida
-            sample(59.0, 16.9),
-            sample(59.0, 16.9), // repetida
-            sample(60.0, 16.6), // no es consecutiva: se conserva
-        ]);
-        assert_eq!(removed, 2);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[2].fps, 60.0);
+    // ==================== 5.4.1.A: metodología v2 ====================
+
+    /// Fila de datos con reloj, para las pruebas de preparación.
+    fn fila(fps: f64, frame_time: f64, elapsed_ns: Option<f64>) -> FilaLeida {
+        FilaLeida {
+            fps,
+            frame_time,
+            reloj: match elapsed_ns {
+                Some(v) => RelojDeFila::Valor(v),
+                None => RelojDeFila::CeldaVacia,
+            },
+        }
+    }
+
+    /// Cambia el reloj de una fila en una prueba, sin tocar su rendimiento.
+    fn poner_reloj(f: &mut FilaLeida, reloj: RelojDeFila) {
+        f.reloj = reloj;
+    }
+
+    /// 600 filas a 10 Hz, todas con el mismo rendimiento, con reloj perfecto.
+    fn serie_constante(n: usize, fps: f64) -> Vec<FilaLeida> {
+        let ft = 1000.0 / fps;
+        (0..n)
+            .map(|i| fila(fps, ft, Some(i as f64 * 100_000_000.0)))
+            .collect()
     }
 
     #[test]
-    fn sin_repetidas_no_descarta_nada() {
-        let (out, removed) = drop_stuck_samples(vec![sample(60.0, 16.6), sample(70.0, 14.2)]);
-        assert_eq!(removed, 0);
-        assert_eq!(out.len(), 2);
+    fn v2_no_descarta_un_limitador_constante() {
+        // El caso que rompía v1: 600 filas idénticas con timestamps distintos son 600
+        // ventanas reales de un juego limitado a 60 fps, no 599 duplicados.
+        let preparadas = preparar_muestras(serie_constante(600, 60.0), 10.0, true, 600, 0);
+        assert_eq!(preparadas.contabilidad.filas_con_rendimiento_valido, 600);
+        // El calentamiento sí se aplica: 10 s de 60 s son 100 filas.
+        assert_eq!(preparadas.contabilidad.excluidas_por_calentamiento, 100);
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 500);
+        assert!(preparadas.contabilidad.cuadra());
+        assert!(preparadas.muestras.iter().all(|s| s.fps == 60.0));
+    }
+
+    #[test]
+    fn v2_conserva_una_caida_sostenida() {
+        // 30 s a 60 fps y 20 s a 20 fps: la caída es el dato que el usuario quiere ver,
+        // no un artefacto repetido que haya que borrar.
+        let mut filas = serie_constante(300, 60.0);
+        for i in 0..200 {
+            filas.push(fila(20.0, 50.0, Some((300 + i) as f64 * 100_000_000.0)));
+        }
+        let preparadas = preparar_muestras(filas, 10.0, true, 500, 0);
+        assert_eq!(preparadas.contabilidad.filas_con_rendimiento_valido, 500);
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 400);
+        assert!(preparadas.contabilidad.cuadra());
+        // La caída sigue entera en las muestras analizadas.
+        assert_eq!(preparadas.muestras.iter().filter(|s| s.fps == 20.0).count(), 200);
+    }
+
+    #[test]
+    fn v2_conserva_una_caida_moderada() {
+        // Caída suave a 45 fps: tampoco es un duplicado.
+        let mut filas = serie_constante(300, 60.0);
+        let ft45 = 1000.0 / 45.0;
+        for i in 0..200 {
+            filas.push(fila(45.0, ft45, Some((300 + i) as f64 * 100_000_000.0)));
+        }
+        let preparadas = preparar_muestras(filas, 10.0, true, 500, 0);
+        // 500 filas, 100 de calentamiento -> 400 analizadas; las 200 lentas siguen ahí
+        // porque el calentamiento corta por delante, no por valor.
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 400);
+        assert_eq!(preparadas.muestras.iter().filter(|s| s.fps == 45.0).count(), 200);
+        let media = preparadas.muestras.iter().map(|s| s.fps).sum::<f64>() / 400.0;
+        // Las 300 a 60 y las 200 a 45 son **antes** del calentamiento. Tras descartar
+        // las 100 primeras quedan 200 a 60 y 200 a 45: (200·60 + 200·45)/400 = 52,5.
+        assert!((media - 52.5).abs() < 1e-9, "media: {media}");
+        assert!(preparadas.contabilidad.cuadra());
+    }
+
+    #[test]
+    fn v2_conserva_un_patron_periodico_y_su_invertido_con_resultados_distintos() {
+        // Patrón A: 6 ventanas a 60,2 ms y 1 a 16,7 ms. Patrón B: lo contrario.
+        // v1 colapsaba ambos al mismo número (38,2458). v2 los conserva y da distintos.
+        let a: Vec<FilaLeida> = (0..600)
+            .map(|i| {
+                // A = patrón LENTO: seis muestras de 60,2 ms y una de 16,7 ms.
+                let ft = if i % 7 == 6 { 16.7 } else { 60.2 };
+                fila(1000.0 / ft, ft, Some(i as f64 * 100_000_000.0))
+            })
+            .collect();
+        let b: Vec<FilaLeida> = (0..600)
+            .map(|i| {
+                // B = el invertido: seis de 16,7 ms y una de 60,2 ms.
+                let ft = if i % 7 == 6 { 60.2 } else { 16.7 };
+                fila(1000.0 / ft, ft, Some(i as f64 * 100_000_000.0))
+            })
+            .collect();
+
+        let pa = preparar_muestras(a, 10.0, true, 600, 0);
+        let pb = preparar_muestras(b, 10.0, true, 600, 0);
+
+        assert_eq!(pa.contabilidad.muestras_analizadas, 500);
+        assert_eq!(pb.contabilidad.muestras_analizadas, 500);
+
+        let media = |m: &[Sample]| m.iter().map(|s| s.fps).sum::<f64>() / m.len() as f64;
+        let ma = media(&pa.muestras);
+        let mb = media(&pb.muestras);
+        // Valores calculados aparte con las mismas reglas (500 muestras tras el
+        // calentamiento). Con v1 ambas daban 38,2458: el mismo número para dos
+        // distribuciones distintas.
+        assert!((ma - 22.755486).abs() < 1e-5, "media A: {ma}");
+        assert!((mb - 53.736049).abs() < 1e-5, "media B: {mb}");
+        let ft_medio = |m: &[Sample]| m.iter().map(|s| s.frame_time).sum::<f64>() / m.len() as f64;
+        // Ojo con las magnitudes: las cifras de arriba son medias de **FPS**. La media de
+        // **frametime** es su inversa aproximada y NO es el inverso exacto: 54,023 ms de
+        // A corresponde a 22,755 fps solo porque 1/fps se promedia distinto que ft.
+        // Las medias de frametime por ciclo completo (7 muestras, sin calentamiento) son
+        // 53,985714 ms para A y 22,914286 ms para B.
+        assert!((ft_medio(&pa.muestras) - 54.023).abs() < 1e-9, "ft medio A");
+        assert!((ft_medio(&pb.muestras) - 22.877).abs() < 1e-9, "ft medio B");
+    }
+
+    #[test]
+    fn v2_conserva_fps_y_frametime_iguales_si_el_timestamp_es_distinto() {
+        let filas = serie_constante(300, 60.0);
+        let preparadas = preparar_muestras(filas, 0.0, true, 300, 0);
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 300);
+        assert_eq!(preparadas.contabilidad.excluidas_por_calentamiento, 0);
+    }
+
+    #[test]
+    fn v2_conserva_filas_identicas_con_timestamp_identico_y_lo_registra() {
+        // No hay evidencia de que dos filas iguales con el mismo reloj sean un doble
+        // registro: se conservan y se declara la incidencia.
+        let mut filas = serie_constante(300, 60.0);
+        filas.insert(150, fila(60.0, 1000.0 / 60.0, Some(149.0 * 100_000_000.0)));
+        let preparadas = preparar_muestras(filas, 0.0, true, 301, 0);
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 301);
+        assert_eq!(preparadas.contabilidad.incidencias.filas_repetidas, 1);
+        // La incidencia no invalida el eje por sí sola para el rendimiento, pero el eje
+        // deja de ser estrictamente creciente.
+        assert!(!preparadas.contabilidad.eje_temporal_fiable);
+    }
+
+    #[test]
+    fn v2_sin_elapsed_conserva_todo_y_no_deduplica() {
+        let filas: Vec<FilaLeida> = (0..400).map(|_| fila(60.0, 16.6, None)).collect();
+        let preparadas = preparar_muestras(filas, 10.0, false, 400, 0);
+        // Las 400 filas entran: rendimiento válido, sin deduplicar.
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 400);
+        // Y no se inventa duración: 400 filas a 60 fps no son «6,6 s» sin un reloj.
+        assert_eq!(preparadas.duracion, None);
+        let media = preparadas.muestras.iter().map(|s| s.fps).sum::<f64>() / 400.0;
+        assert!((media - 60.0).abs() < 1e-12);
+        assert_eq!(preparadas.contabilidad.excluidas_por_calentamiento, 0);
+        assert!(!preparadas.contabilidad.eje_temporal_fiable);
+        assert!(preparadas.contabilidad.cuadra());
+        assert_eq!(
+            preparadas.contabilidad.calentamiento_no_aplicado,
+            Some(MotivoSinCalentamiento::SinEjeTemporal)
+        );
+    }
+
+    #[test]
+    fn v2_conserva_el_rendimiento_aunque_el_reloj_sea_invalido() {
+        // Timestamps con saltos hacia atrás: el eje no es fiable, pero las 300 muestras
+        // de rendimiento son válidas y deben conservarse todas.
+        let mut filas = serie_constante(300, 60.0);
+        poner_reloj(&mut filas[100], RelojDeFila::Valor(5_000_000_000.0));
+        poner_reloj(&mut filas[150], RelojDeFila::Valor(1_000_000_000.0));
+        let preparadas = preparar_muestras(filas, 10.0, true, 300, 0);
+        assert_eq!(preparadas.contabilidad.excluidas_por_calentamiento, 0);
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 300);
+        assert!(!preparadas.contabilidad.eje_temporal_fiable);
+        assert!(preparadas.contabilidad.incidencias.orden_invertido > 0);
+        assert!(preparadas.contabilidad.cuadra());
+    }
+
+    #[test]
+    fn v2_detecta_timestamps_negativos() {
+        let mut filas = serie_constante(300, 60.0);
+        poner_reloj(&mut filas[10], RelojDeFila::Valor(-1.0));
+        let preparadas = preparar_muestras(filas, 0.0, true, 300, 0);
+        assert_eq!(preparadas.contabilidad.incidencias.negativas, 1);
+        assert!(!preparadas.contabilidad.eje_temporal_fiable);
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 300);
+    }
+
+    #[test]
+    fn v2_contabiliza_filas_sin_reloj_como_reloj_incompleto() {
+        let mut filas = serie_constante(300, 60.0);
+        poner_reloj(&mut filas[42], RelojDeFila::CeldaVacia);
+        let preparadas = preparar_muestras(filas, 0.0, true, 300, 0);
+        // Exactamente una fila carece de reloj: se cuenta una vez, no las posteriores.
+        assert_eq!(preparadas.contabilidad.incidencias.reloj_incompleto, 1);
+        assert!(!preparadas.contabilidad.eje_temporal_fiable);
+        // La fila sin reloj sigue contando como muestra analizada.
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 300);
+    }
+
+    #[test]
+    fn el_parser_distingue_por_que_falta_el_reloj() {
+        // Cada caso deja el eje inservible, pero por un motivo distinto. La suma de
+        // `reloj_incompleto` cuenta las filas sin valor, no las posteriores.
+        let base = || serie_constante(120, 60.0);
+
+        let mut sin_columna = base();
+        for f in &mut sin_columna {
+            poner_reloj(f, RelojDeFila::ColumnaAusente);
+        }
+        let p = preparar_muestras(sin_columna, 0.0, false, 120, 0);
+        assert_eq!(p.contabilidad.incidencias.reloj_incompleto, 120);
+        assert!(!p.contabilidad.columna_elapsed_presente);
+
+        // Una sola fila vacía: se cuenta una, no 120.
+        let mut una_vacia = base();
+        poner_reloj(&mut una_vacia[7], RelojDeFila::CeldaVacia);
+        let p = preparar_muestras(una_vacia, 0.0, true, 120, 0);
+        assert_eq!(p.contabilidad.incidencias.reloj_incompleto, 1);
+        assert!(p.contabilidad.columna_elapsed_presente);
+
+        // Malformado y no finito también son «sin reloj» y se cuentan igual.
+        for reloj in [RelojDeFila::Malformado, RelojDeFila::NoFinito] {
+            let mut filas = base();
+            poner_reloj(&mut filas[3], reloj);
+            let p = preparar_muestras(filas, 0.0, true, 120, 0);
+            assert_eq!(p.contabilidad.incidencias.reloj_incompleto, 1, "{reloj:?}");
+            // En ningún caso se pierde la muestra de rendimiento.
+            assert_eq!(p.contabilidad.muestras_analizadas, 120);
+        }
+    }
+
+    #[test]
+    fn spikes_per_min_historico_se_lee_y_distingue_cero_de_desconocido() {
+        // JSON con `spikes_per_min` numérico (como los guardados antes del cambio) y otro
+        // sin el campo. Un `Option<f64>` acepta ambos y no confunde 0.0 con ausente.
+        let con_cero = r#"{"benchmarks":[{"id":"a","profile_id":"","game_name":"P","appid":1,
+            "timestamp":"2024-01-01 10:00:00","duration_seconds":60.0,"avg_fps":60.0,
+            "fps_1_percent_low":50.0,"fps_0_1_percent_low":40.0,"max_fps":70.0,"min_fps":30.0,
+            "frame_time_avg":16.6,"frame_time_1_percent_high":20.0,"total_frames":600,
+            "notes":null,"spikes_per_min":0.0}],"counters":{}}"#;
+        let con_valor = con_cero.replace("\"spikes_per_min\":0.0", "\"spikes_per_min\":2.5");
+        let sin_campo = con_cero.replace(",\"spikes_per_min\":0.0", "");
+
+        let a: BenchmarksData = serde_json::from_str(&con_cero).expect("cero");
+        assert_eq!(a.benchmarks[0].spikes_per_min, Some(0.0));
+        // Cero medido y desconocido son estados distintos.
+        assert_ne!(a.benchmarks[0].spikes_per_min, None);
+
+        let b: BenchmarksData = serde_json::from_str(&con_valor).expect("valor");
+        assert_eq!(b.benchmarks[0].spikes_per_min, Some(2.5));
+
+        let c: BenchmarksData = serde_json::from_str(&sin_campo).expect("sin campo");
+        assert_eq!(c.benchmarks[0].spikes_per_min, None);
+
+        // Y al serializar, el desconocido **no se convierte en 0**: sale `null`, que es
+        // inequívoco. (`spikes_per_min` no lleva `skip_serializing_if`, a diferencia de
+        // los campos nuevos: se mantiene el contrato existente, no se cambia aquí.)
+        let json = serde_json::to_string(&c).expect("serializar");
+        assert!(json.contains("\"spikes_per_min\":null"), "json: {json}");
+        let releido: BenchmarksData = serde_json::from_str(&json).expect("releer");
+        assert_eq!(releido.benchmarks[0].spikes_per_min, None);
+    }
+
+    #[test]
+    fn el_campo_legado_solo_lleva_el_cero_cuando_no_hay_duracion() {
+        // Con eje fiable, el campo legado y `duracion_medida` llevan **el mismo valor**:
+        // así los JSON y el frontend antiguos siguen leyendo una duración de verdad.
+        let ruta = format!(
+            "{}/../tests/fixtures/mangohud/Palworld-Win64-Shipping_2026-11-24_18-19-57.csv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let b = analyze_mangohud_log(&ruta, 10.0).expect("análisis");
+        let medida = b.duracion_medida.expect("duración medida");
+        assert!((b.duration_seconds - medida).abs() < 1e-12, "legado y medido deben coincidir");
+        assert!(b.duration_seconds > 0.0);
+        assert_eq!(b.duracion(), DuracionDeLaGrabacion::Medida { segundos: medida });
+    }
+
+    #[test]
+    fn sin_duracion_el_campo_legado_es_cero_y_no_se_lee_como_duracion() {
+        // 300 filas válidas sin reloj: no se puede medir la duración.
+        let filas: Vec<FilaLeida> = (0..300).map(|_| fila(60.0, 16.6, None)).collect();
+        let p = preparar_muestras(filas, 0.0, false, 300, 0);
+        assert_eq!(p.duracion, None);
+
+        // Lo que hace `analyze_mangohud_log` con el campo legado.
+        let legado = p.duracion.unwrap_or(0.0);
+        assert_eq!(legado, 0.0);
+        let b = Benchmark {
+            duration_seconds: legado,
+            duracion_medida: p.duracion,
+            metodologia_calculo: Some(MetodologiaCalculo::V2),
+            ..bench(0, "Palworld")
+        };
+        // El cero existe en el campo, pero el contrato lo interpreta como «no consta».
+        assert_eq!(b.duracion_en_segundos(), None);
+        assert_eq!(b.duracion(), DuracionDeLaGrabacion::Desconocida);
+    }
+
+    #[test]
+    fn duracion_distingue_los_tres_estados() {
+        let mut b = bench(0, "Palworld");
+
+        // 1. Histórica: sin metodología declarada. `duration_seconds` es lo medido entonces.
+        b.metodologia_calculo = None;
+        b.duration_seconds = 59.7;
+        b.duracion_medida = None;
+        assert_eq!(b.duracion(), DuracionDeLaGrabacion::Historica { segundos: 59.7 });
+        assert_eq!(b.duracion_en_segundos(), Some(59.7));
+
+        // 2. v2 con duración medida.
+        b.metodologia_calculo = Some(MetodologiaCalculo::V2);
+        b.duracion_medida = Some(59.85);
+        assert_eq!(b.duracion(), DuracionDeLaGrabacion::Medida { segundos: 59.85 });
+        assert_eq!(b.duracion_en_segundos(), Some(59.85));
+
+        // 3. v2 sin duración medible: desconocida, **nunca** se cae al cero de
+        //    compatibilidad ni a un `duration_seconds` que hubiera quedado ahí.
+        b.duracion_medida = None;
+        b.duration_seconds = 0.0;
+        assert_eq!(b.duracion(), DuracionDeLaGrabacion::Desconocida);
+        assert_eq!(b.duracion_en_segundos(), None);
+        b.duration_seconds = 42.0;
+        assert_eq!(b.duracion_en_segundos(), None, "en v2 no hay respaldo");
+    }
+
+    #[test]
+    fn duracion_historica_no_utilizable_sigue_siendo_desconocida() {
+        let mut b = bench(0, "Palworld");
+        b.metodologia_calculo = None;
+        for valor in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            b.duration_seconds = valor;
+            assert_eq!(
+                b.duracion_en_segundos(),
+                None,
+                "duration_seconds={valor} no es una duración"
+            );
+        }
+    }
+
+    #[test]
+    fn sin_eje_fiable_no_se_inventan_segundos_ni_tasas() {
+        // 300 filas válidas a 10 Hz, pero con el reloj roto: la serie de rendimiento es
+        // perfectamente utilizable y la temporal no lo es.
+        let mut filas = serie_constante(300, 60.0);
+        poner_reloj(&mut filas[10], RelojDeFila::CeldaVacia);
+        let p = preparar_muestras(filas, 10.0, true, 300, 0);
+        let c = &p.contabilidad;
+
+        // Duración: no consta (no se estima a partir de 10 Hz).
+        assert_eq!(p.duracion, None);
+        assert!(p.eje.is_none());
+        // Calentamiento: no se aplica, y se dice por qué.
+        assert_eq!(p.warmup_applied, 0.0);
+        assert_eq!(
+            c.calentamiento_no_aplicado,
+            Some(MotivoSinCalentamiento::SinEjeTemporal)
+        );
+        // Las 300 muestras siguen ahí.
+        assert_eq!(c.muestras_analizadas, 300);
+        assert!(c.cuadra());
+    }
+
+    #[test]
+    fn sin_reloj_siguen_saliendo_las_metricas_que_no_dependen_del_tiempo() {
+        // Serie con una caída al 50 % en la mitad: sin reloj, las métricas de valores
+        // siguen siendo calculables y correctas; la tasa por minuto no.
+        let mut filas = serie_constante(300, 60.0);
+        for f in filas.iter_mut() {
+            poner_reloj(f, RelojDeFila::ColumnaAusente);
+        }
+        for (i, f) in filas.iter_mut().enumerate() {
+            if i >= 150 {
+                f.fps = 25.0;
+                f.frame_time = 40.0;
+            }
+        }
+        let p = preparar_muestras(filas, 0.0, false, 300, 0);
+        let muestras: Vec<f64> = p.muestras.iter().map(|s| s.frame_time).collect();
+
+        // Medias y percentiles salen de los valores, no del reloj.
+        let media = p.muestras.iter().map(|s| s.fps).sum::<f64>() / p.muestras.len() as f64;
+        assert!((media - 42.5).abs() < 1e-9, "media {media}");
+        // `compute_stutter` con duración desconocida (0.0) no inventa picos por minuto.
+        let st = compute_stutter(&muestras, 0.0);
+        assert_eq!(st.spikes_per_min, None);
+        // Pero sí cuenta fotogramas lentos y da jitter: no dependen del reloj.
+        assert!(st.pct_over_33ms > 0.0);
+        assert!(st.jitter_ms > 0.0);
+    }
+
+    #[test]
+    fn el_parser_clasifica_las_celdas_del_reloj_del_csv() {
+        use std::fs;
+        // CSV mínimo con la cabecera real y una fila por caso. Las de rendimiento son
+        // todas válidas: lo único que cambia es la celda de `elapsed`.
+        // 105 filas: 100 con reloj correcto y las 5 patológicas, para pasar el mínimo
+        // de muestras y poder observar la clasificación en el pipeline completo.
+        let mut csv = String::from("OS,Linux\nCPU,AMD\nGPU,AMD\nfps,frametime,gpu_load,elapsed\n");
+        for i in 0..100u64 {
+            csv.push_str(&format!("60.0,16.6,10,{}\n", (i + 1) * 1_000_000));
+        }
+        csv.push_str("60.0,16.6,10,\n");
+        csv.push_str("60.0,16.6,10,   \n");
+        csv.push_str("60.0,16.6,10,no-es-un-numero\n");
+        csv.push_str("60.0,16.6,10,NaN\n");
+        csv.push_str("60.0,16.6,10,inf\n");
+        let dir = std::env::temp_dir().join("thoriapp_5_4_1a_reloj_csv");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir");
+        let ruta = dir.join("log.csv");
+        fs::write(&ruta, csv).expect("escribir");
+
+        let b = analyze_mangohud_log(&ruta.to_string_lossy(), 0.0).expect("análisis");
+        let c = b.contabilidad_muestras.as_ref().expect("contabilidad");
+        // Las 105 filas tienen rendimiento válido: no se descarta ninguna.
+        assert_eq!(c.filas_con_rendimiento_valido, 105);
+        assert_eq!(c.muestras_analizadas, 105);
+        // 5 filas sin reloj utilizable: vacía, espacios, texto, NaN e inf.
+        assert_eq!(c.incidencias.reloj_incompleto, 5);
+        // Sin eje no hay duración que declarar.
+        assert!(!c.eje_temporal_fiable);
+        assert_eq!(b.duracion_medida, None);
+        assert!(c.cuadra());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn el_desglose_de_reloj_persiste_la_causa_no_solo_el_total() {
+        // Un CSV con una fila de cada causa. `CeldaAusente` sí es reproducible: una fila
+        // con menos columnas que la cabecera (aquí, sin la última columna).
+        let mut csv = String::from("OS,Linux\nfps,frametime,gpu_load,elapsed\n");
+        for i in 0..100u64 {
+            csv.push_str(&format!("60.0,16.6,10,{}\n", (i + 1) * 1_000_000));
+        }
+        csv.push_str("60.0,16.6,10,\n");          // celda vacía
+        csv.push_str("60.0,16.6,10,   \n");       // celda en blanco
+        csv.push_str("60.0,16.6,10,no-numero\n"); // malformado
+        csv.push_str("60.0,16.6,10,NaN\n");       // no finito
+        csv.push_str("60.0,16.6,10\n");           // fila corta: celda ausente
+
+        let dir = std::env::temp_dir().join("thoriapp_541a_desglose");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir");
+        let ruta = dir.join("log.csv");
+        fs::write(&ruta, csv).expect("escribir");
+
+        let b = analyze_mangohud_log(&ruta.to_string_lossy(), 0.0).expect("análisis");
+        let inc = &b.contabilidad_muestras.as_ref().expect("contabilidad").incidencias;
+        assert_eq!(inc.reloj_incompleto, 5);
+        assert_eq!(inc.celda_reloj_vacia, 2, "vacía y en blanco");
+        assert_eq!(inc.celda_reloj_ilegible, 2, "texto y NaN");
+        assert_eq!(inc.celda_reloj_ausente, 1, "fila con menos columnas");
+        assert_eq!(inc.columna_elapsed_ausente, 0);
+        assert!(inc.desglose_de_reloj_cuadra(), "{inc:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn la_columna_ausente_se_persiste_como_tal() {
+        let mut csv = String::from("OS,Linux\nfps,frametime,gpu_load\n");
+        for _ in 0..100 {
+            csv.push_str("60.0,16.6,10\n");
+        }
+        let dir = std::env::temp_dir().join("thoriapp_541a_sin_columna");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir");
+        let ruta = dir.join("log.csv");
+        fs::write(&ruta, csv).expect("escribir");
+
+        let b = analyze_mangohud_log(&ruta.to_string_lossy(), 0.0).expect("análisis");
+        let inc = &b.contabilidad_muestras.as_ref().expect("contabilidad").incidencias;
+        assert_eq!(inc.columna_elapsed_ausente, 100);
+        assert_eq!(inc.reloj_incompleto, 100);
+        assert!(inc.desglose_de_reloj_cuadra());
+        // Y la serie temporal no inventa un eje en segundos.
+        assert!(b.muestras_temporales.as_ref().is_none_or(|m| m.elapsed_s.is_empty()));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filas_repetidas_no_exige_que_toda_la_fila_sea_identica() {
+        // Mismo timestamp pero rendimiento distinto: es un reloj repetido, no una fila
+        // duplicada. Se cuenta igual, y **no** se descarta ninguna de las dos.
+        let mut filas = serie_constante(200, 60.0);
+        let ns = filas[60].reloj;
+        filas[61] = FilaLeida {
+            fps: 45.0,
+            frame_time: 22.2,
+            reloj: ns,
+        };
+        let p = preparar_muestras(filas, 0.0, true, 200, 0);
+        assert_eq!(p.contabilidad.incidencias.filas_repetidas, 1);
+        assert!(!p.contabilidad.eje_temporal_fiable);
+        // Las dos filas entran: el rendimiento no se toca por repetir el reloj.
+        assert_eq!(p.contabilidad.muestras_analizadas, 200);
+    }
+
+    #[test]
+    fn v2_registra_varias_incidencias_simultaneas_en_la_misma_fila() {
+        let mut filas = serie_constante(300, 60.0);
+        poner_reloj(&mut filas[50], RelojDeFila::Valor(-3.0)); // negativa + invertida
+        let reloj_79 = filas[79].reloj;
+        poner_reloj(&mut filas[80], reloj_79); // repetida
+        let preparadas = preparar_muestras(filas, 0.0, true, 300, 0);
+        let inc = &preparadas.contabilidad.incidencias;
+        assert_eq!(inc.negativas, 1);
+        assert_eq!(inc.filas_repetidas, 1);
+        assert!(inc.total() >= 2);
+        // Las incidencias no son exclusiones: siguen las 300 muestras.
+        assert_eq!(preparadas.contabilidad.muestras_analizadas, 300);
+    }
+
+    #[test]
+    fn v2_la_contabilidad_cuadra_con_filas_invalidas() {
+        // 500 filas de datos: 460 válidas y 40 inválidas.
+        // Las 460 válidas van a 10 Hz (100 ms) desde 0: llegan hasta 45.9 s, así que el
+        // corte de 10 s cae en la fila índice 100 y quedan 360 analizables.
+        let preparadas = preparar_muestras(serie_constante(460, 60.0), 10.0, true, 500, 40);
+        let c = &preparadas.contabilidad;
+        assert_eq!(c.filas_originales, 500);
+        assert_eq!(c.filas_con_rendimiento_valido, 460);
+        assert_eq!(c.filas_con_rendimiento_invalido, 40);
+        assert_eq!(c.excluidas_por_calentamiento, 100);
+        assert_eq!(c.muestras_analizadas, 360);
+        assert!(c.cuadra(), "la contabilidad debe cuadrar: {c:?}");
+    }
+
+    #[test]
+    fn v2_el_calentamiento_no_sale_donde_no_procede_y_declara_el_motivo() {
+        // Pocas muestras: no se aplica y se dice por qué.
+        let preparadas = preparar_muestras(serie_constante(50, 60.0), 10.0, true, 50, 0);
+        assert_eq!(preparadas.contabilidad.excluidas_por_calentamiento, 0);
+        assert_eq!(
+            preparadas.contabilidad.calentamiento_no_aplicado,
+            Some(MotivoSinCalentamiento::PocasMuestras)
+        );
+
+        // Sin calentamiento pedido: se declara como no solicitado.
+        let preparadas = preparar_muestras(serie_constante(500, 60.0), 0.0, true, 500, 0);
+        assert_eq!(
+            preparadas.contabilidad.calentamiento_no_aplicado,
+            Some(MotivoSinCalentamiento::NoSolicitado)
+        );
+        assert!(preparadas.contabilidad.calentamiento_no_aplicado.is_some() || true);
+    }
+
+    #[test]
+    fn v2_el_calculo_de_la_media_de_cola_incluye_los_empates() {
+        // Serie constante: P99 es el propio valor y el filtro `>=` deja entrar todas las
+        // muestras, no el 1 %.
+        let ft = vec![16.0_f64; 400];
+        let p99 = percentile_sorted(&ft, 99.0);
+        assert_eq!(p99, 16.0);
+        let incluidas = muestras_en_media_de_cola(&ft, p99);
+        assert_eq!(incluidas.len(), 400);
+
+        let apoyo = ApoyoDePercentil {
+            muestras_en_la_media: Some(incluidas.len() as u32),
+            ..apoyo_de_percentil(&ft, 99.0)
+        };
+        assert_eq!(apoyo.muestras, 400);
+        assert_eq!(apoyo.muestras_en_la_media, Some(400));
+    }
+
+    #[test]
+    fn apoyo_de_percentil_declara_la_cola_y_la_interpolacion() {
+        let valores: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        let apoyo = apoyo_de_percentil(&valores, 99.9);
+        assert_eq!(apoyo.muestras, 1000);
+        // Cola nominal: 1000 * 0.001 = 1 muestra.
+        assert!((apoyo.cola_nominal - 1.0).abs() < 1e-9);
+        assert_eq!(apoyo.observaciones_interpoladas, 2);
+        assert_eq!(apoyo.muestras_en_la_media, None);
+    }
+
+    #[test]
+    fn apoyo_de_percentil_con_pocas_muestras_declara_cola_menor_que_uno() {
+        let valores: Vec<f64> = (0..500).map(|i| i as f64).collect();
+        let apoyo = apoyo_de_percentil(&valores, 99.9);
+        assert!(apoyo.cola_nominal < 1.0, "cola nominal: {}", apoyo.cola_nominal);
+    }
+
+    #[test]
+    fn el_corte_de_calentamiento_respeta_los_limites() {
+        // 60 s a 10 Hz = 600 filas; con 10 s de calentamiento salen 100 filas.
+        let filas: Vec<Sample> = serie_constante(600, 60.0)
+            .into_iter()
+            .map(|f| Sample {
+                fps: f.fps,
+                frame_time: f.frame_time,
+                elapsed_ns: f.reloj.valor(),
+            })
+            .collect();
+        let (restantes, aplicado) = split_warmup(filas, 10.0);
+        assert_eq!(restantes.len(), 500);
+        assert!((aplicado - 10.0).abs() < 1e-6);
+        // El corte cae exactamente en el primer timestamp >= 10 s.
+        assert!((restantes[0].elapsed_ns.unwrap() - 10_000_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn el_corte_de_calentamiento_no_aplica_si_dejaria_menos_de_lo_minimo() {
+        // 25 s totales: con 10 s de calentamiento quedarían 15 s < MIN_STEADY_SECONDS.
+        let filas: Vec<Sample> = serie_constante(250, 60.0)
+            .into_iter()
+            .map(|f| Sample {
+                fps: f.fps,
+                frame_time: f.frame_time,
+                elapsed_ns: f.reloj.valor(),
+            })
+            .collect();
+        let (restantes, aplicado) = split_warmup(filas, 10.0);
+        assert_eq!(restantes.len(), 250);
+        assert_eq!(aplicado, 0.0);
     }
 
     #[test]
@@ -3814,7 +5122,7 @@ mod tests {
         let s = compute_stutter(&ft, 60.0);
 
         // mediana 16 → umbral max(32, 25) = 32 → los dos de 100 son picos
-        assert_eq!(s.spikes_per_min, 2.0); // 2 picos en 1 minuto
+        assert_eq!(s.spikes_per_min, Some(2.0)); // 2 picos en 1 minuto
         assert!((s.pct_over_33ms - 20.0).abs() < 1e-9); // 2 de 10
         assert!(s.jitter_ms > 0.0);
         assert!((s.worst_frame_ms - 100.0).abs() < 1e-9);
@@ -3824,15 +5132,19 @@ mod tests {
     fn stutter_con_frame_times_uniformes_no_hay_jitter() {
         let ft = vec![16.0; 60];
         let s = compute_stutter(&ft, 60.0);
-        assert_eq!(s.spikes_per_min, 0.0);
+        assert_eq!(s.spikes_per_min, Some(0.0));
         assert_eq!(s.pct_over_33ms, 0.0);
         assert_eq!(s.jitter_ms, 0.0);
     }
 
     #[test]
     fn stutter_con_duracion_cero_no_divide_por_cero() {
+        // Duración desconocida (0.0 = «no consta»): no hay tasa que dar. Antes se
+        // devolvía 0.0, que se leía como «ningún pico» sin serlo.
         let s = compute_stutter(&[16.0, 200.0], 0.0);
-        assert_eq!(s.spikes_per_min, 0.0);
+        assert_eq!(s.spikes_per_min, None);
+        // Lo que no depende del reloj se sigue calculando.
+        assert!(s.pct_over_33ms > 0.0);
     }
 
     #[test]
@@ -5893,6 +7205,10 @@ mod pruebas_quinta_correccion {
             log_path: String::new(),
             sample_count: None,
             muestras_temporales: None,
+            metodologia_calculo: None,
+            contabilidad_muestras: None,
+            apoyo_metricas: None,
+            duracion_medida: None,
         }
     }
 
@@ -6028,6 +7344,10 @@ mod pruebas_aislamiento {
             log_path: String::new(),
             sample_count: None,
             muestras_temporales: None,
+            metodologia_calculo: None,
+            contabilidad_muestras: None,
+            apoyo_metricas: None,
+            duracion_medida: None,
         }
     }
 
@@ -6382,5 +7702,193 @@ mod pruebas_identidad_por_nombre {
             sobran.iter().all(|x| x.game_name == "Palworld"),
             "ninguna prueba de Palworld puede caer"
         );
+    }
+}
+
+// ==================== 5.4.1.A: CSV reales e históricos ====================
+
+/// Los dos CSV reales deben conservar **exactamente** los números que ya daban antes de
+/// la metodología v2. Aquí no había filas que descartar (0 duplicados en ambos), así que
+/// la corrección del descarte no puede mover ni un decimal.
+///
+/// Si alguno de estos valores cambia, o el pipeline cambió de comportamiento sobre datos
+/// reales, o la tolerancia deja de ser suficiente: las dos cosas hay que explicarlas.
+#[cfg(test)]
+mod pruebas_v2_csv_reales {
+    use super::*;
+
+    const LOG_23: &str = "Palworld-Win64-Shipping_2026-11-23_16-54-52.csv";
+    const LOG_24: &str = "Palworld-Win64-Shipping_2026-11-24_18-19-57.csv";
+
+    fn ruta(nombre: &str) -> String {
+        format!(
+            "{}/../tests/fixtures/mangohud/{nombre}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    /// Tolerancia para los contrastes numéricos: los valores están fijados con 4 decimales
+    /// y el cálculo es determinista en el mismo binario, así que la discrepancia admisible
+    /// es solo la del redondeo del literal (5e-5). Se deja 1e-4 como margen de impresión.
+    const TOL: f64 = 1e-4;
+
+    fn cerca(obtenido: f64, esperado: f64, que: &str) {
+        assert!(
+            (obtenido - esperado).abs() <= TOL,
+            "{que}: obtenido {obtenido}, esperado {esperado}"
+        );
+    }
+
+    #[test]
+    fn v2_conserva_los_numeros_del_csv_23_11() {
+        let b = analyze_mangohud_log(&ruta(LOG_23), 10.0).expect("análisis 23-11");
+        cerca(b.avg_fps, 75.0244, "avg_fps");
+        cerca(b.fps_1_percent_low, 69.9924, "fps_1_percent_low");
+        cerca(b.fps_0_1_percent_low, 37.1773, "fps_0_1_percent_low");
+        cerca(b.max_fps, 103.7825, "max_fps");
+        cerca(b.min_fps, 39.3372, "min_fps");
+        cerca(b.frame_time_1_percent_high, 19.9119, "frame_time_1_percent_high");
+        cerca(b.noise_percent.expect("ruido"), 0.2276, "noise_percent");
+        cerca(b.duracion_medida.expect("duración"), 59.8517, "duración");
+        assert_eq!(b.total_frames, 499);
+    }
+
+    #[test]
+    fn v2_conserva_los_numeros_del_csv_24_11() {
+        let b = analyze_mangohud_log(&ruta(LOG_24), 10.0).expect("análisis 24-11");
+        cerca(b.avg_fps, 66.2282, "avg_fps");
+        cerca(b.fps_1_percent_low, 41.3128, "fps_1_percent_low");
+        cerca(b.fps_0_1_percent_low, 18.2874, "fps_0_1_percent_low");
+        cerca(b.frame_time_1_percent_high, 38.4127, "frame_time_1_percent_high");
+        cerca(b.noise_percent.expect("ruido"), 8.8420, "noise_percent");
+        cerca(b.duracion_medida.expect("duración"), 59.7554, "duración");
+        assert_eq!(b.total_frames, 498);
+    }
+
+    #[test]
+    fn v2_los_csv_reales_no_tienen_incidencias_temporales() {
+        for nombre in [LOG_23, LOG_24] {
+            let b = analyze_mangohud_log(&ruta(nombre), 10.0).expect("análisis");
+            let c = b.contabilidad_muestras.as_ref().expect("contabilidad");
+            assert!(c.eje_temporal_fiable, "{nombre}: el eje debe ser fiable");
+            assert!(
+                !c.incidencias.hay_algunas(),
+                "{nombre}: no se esperaban incidencias, hay {:?}",
+                c.incidencias
+            );
+            assert!(c.cuadra(), "{nombre}: la contabilidad no cuadra");
+            // Todas las filas del CSV tienen rendimiento válido.
+            assert_eq!(c.filas_con_rendimiento_invalido, 0, "{nombre}");
+        }
+    }
+
+    #[test]
+    fn v2_declara_la_metodologia_y_el_apoyo_de_las_metricas() {
+        let b = analyze_mangohud_log(&ruta(LOG_24), 10.0).expect("análisis");
+        assert_eq!(b.metodologia_calculo, Some(MetodologiaCalculo::V2));
+
+        let apoyo = b.apoyo_metricas.as_ref().expect("apoyo");
+        let p1 = apoyo.fps_1_percent_low.expect("apoyo 1% low");
+        assert_eq!(p1.muestras, b.total_frames as u32);
+        // La cola nominal del 1 % sobre ~500 muestras ronda las 5 muestras.
+        assert!((p1.cola_nominal - 4.98).abs() < 0.02, "cola {}", p1.cola_nominal);
+
+        // El 0,1 % sobre menos de 1000 muestras declara una cola menor que una muestra.
+        let p01 = apoyo.fps_0_1_percent_low.expect("apoyo 0,1% low");
+        assert!(p01.cola_nominal < 1.0);
+        assert_eq!(p01.observaciones_interpoladas, 2);
+
+        // La media de cola declara cuántas muestras entraron de verdad (el ~1 %, no todas).
+        // Sobre las 498 muestras analizadas tras el calentamiento entran 5 (1,004 %).
+        // Ojo: contarlas sobre las 598 filas del CSV da 6; el n que manda es el analizado.
+        let media = apoyo.frame_time_1_percent_high.expect("apoyo media de cola");
+        let incluidas = media.muestras_en_la_media.expect("muestras en la media");
+        assert_eq!(incluidas, 5, "en el 24-11 (n=498) entran 5 muestras");
+    }
+
+    #[test]
+    fn v2_el_csv_real_mapea_gpu_y_comando_igual_que_antes() {
+        // El pipeline completo sigue produciendo un Benchmark guardable: la ruta, el
+        // nombre del juego y la duración se conservan.
+        let b = analyze_mangohud_log(&ruta(LOG_24), 10.0).expect("análisis");
+        assert_eq!(b.game_name, "Palworld");
+        assert!(!b.log_path.is_empty());
+        assert!(b.duracion_medida.unwrap() > 0.0);
+        // El valor guardado es el corte real (el primer timestamp >= 10 s), no el
+        // solicitado: se declara lo que se descartó de verdad.
+        let w = b.warmup_seconds.unwrap();
+        assert!((w - 10.0).abs() < 0.2, "calentamiento aplicado: {w}");
+    }
+}
+
+/// Compatibilidad con archivos históricos: leerlos no cambia ni sus bytes ni su epoch de
+/// modificación, y los campos nuevos quedan desconocidos (nunca cero inventado).
+#[cfg(test)]
+mod pruebas_v2_compatibilidad {
+    use super::*;
+    use std::fs;
+
+    /// JSON con la forma exacta que se guardaba antes de 5.4.1.A (sin los campos nuevos).
+    const HISTORICO: &str = r#"{"benchmarks":[{"id":"b1","profile_id":"","game_name":"Palworld","appid":1623730,"timestamp":"2024-01-01 10:00:00","duration_seconds":60.0,"avg_fps":60.0,"fps_1_percent_low":50.0,"fps_0_1_percent_low":40.0,"max_fps":70.0,"min_fps":30.0,"frame_time_avg":16.6,"frame_time_1_percent_high":20.0,"total_frames":600,"notes":null}],"counters":{"appid:1623730":1}}"#;
+
+    fn dir_de_prueba(nombre: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("thoriapp_v2_compat_{nombre}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("crear dir");
+        d
+    }
+
+    #[test]
+    fn un_benchmark_historico_queda_sin_metodologia_y_sin_apoyo() {
+        let leido: BenchmarksData = serde_json::from_str(HISTORICO).expect("JSON histórico");
+        let b = &leido.benchmarks[0];
+        // «No consta» es `None`, no un v1 deducido ni un cero.
+        assert_eq!(b.metodologia_calculo, None);
+        assert_eq!(b.contabilidad_muestras, None);
+        assert_eq!(b.apoyo_metricas, None);
+        assert_eq!(b.duracion_medida, None);
+        // Los números que tenía se leen tal cual.
+        assert_eq!(b.avg_fps, 60.0);
+    }
+
+    #[test]
+    fn leer_un_historico_no_cambia_sus_bytes_ni_su_mtime() {
+        use std::time::SystemTime;
+
+        let dir = dir_de_prueba("mtime");
+        let ruta = dir.join("benchmarks.json");
+        fs::write(&ruta, HISTORICO).expect("escribir");
+
+        let antes_bytes = fs::read(&ruta).expect("leer");
+        let antes_mtime: SystemTime = fs::metadata(&ruta).and_then(|m| m.modified()).expect("mtime");
+
+        // Se lee como hace la app al abrir el histórico.
+        let leido: BenchmarksData =
+            serde_json::from_str(&fs::read_to_string(&ruta).expect("texto")).expect("JSON");
+        assert_eq!(leido.benchmarks.len(), 1);
+        assert_eq!(leido.benchmarks[0].metodologia_calculo, None);
+
+        // Leer no escribe: ni bytes ni mtime cambian.
+        let despues_bytes = fs::read(&ruta).expect("leer");
+        let despues_mtime: SystemTime = fs::metadata(&ruta).and_then(|m| m.modified()).expect("mtime");
+        assert_eq!(antes_bytes, despues_bytes, "los bytes no deben cambiar");
+        assert_eq!(antes_mtime, despues_mtime, "el mtime no debe cambiar");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn los_campos_nuevos_no_se_inventan_al_serializar_un_historico() {
+        let leido: BenchmarksData = serde_json::from_str(HISTORICO).expect("JSON histórico");
+        let json = serde_json::to_string(&leido).expect("serializar");
+        // `skip_serializing_if = Option::is_none`: los desconocidos no aparecen.
+        assert!(!json.contains("metodologia_calculo"));
+        assert!(!json.contains("contabilidad_muestras"));
+        assert!(!json.contains("apoyo_metricas"));
+        assert!(!json.contains("duracion_medida"));
+        // Y siguen siendo desconocidos al volver a leerlos: igualdad semántica.
+        let releido: BenchmarksData = serde_json::from_str(&json).expect("releer");
+        assert_eq!(releido.benchmarks[0].metodologia_calculo, None);
+        assert_eq!(releido.benchmarks[0].avg_fps, 60.0);
     }
 }

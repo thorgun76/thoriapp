@@ -30,6 +30,7 @@ import {
 } from './estabilidad';
 import { tieThreshold, marginLabel } from './noise';
 import type { Benchmark, BenchmarkComparison } from './types';
+import { duracionEnSegundos } from './duracion';
 
 /**
  * Nombres por defecto de las dos grabaciones.
@@ -276,8 +277,9 @@ export function interpretar(c: BenchmarkComparison, etiquetas?: Etiquetas): Inte
   // ── Avisos de calidad de datos ──────────────────────────────────────────────
   const avisos: string[] = [];
 
-  const durAntes = num(antes.duration_seconds);
-  const durDespues = num(despues.duration_seconds);
+  // La duración puede no constar (grabación sin eje temporal): no se convierte en 0.
+  const durAntes = duracionEnSegundos(antes);
+  const durDespues = duracionEnSegundos(despues);
   if (durAntes != null && durDespues != null && durAntes > 0) {
     const ratio = Math.abs(durAntes - durDespues) / durAntes;
     if (ratio > 0.3) {

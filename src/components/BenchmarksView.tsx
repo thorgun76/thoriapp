@@ -12,6 +12,7 @@ import { useConfirm, useToast } from '../hooks/useConfirm';
 import { ConfirmDialog } from './ConfirmDialog';
 import { fmtDuration, formatTimestamp } from '../lib/format';
 import { tieThreshold, marginLabel } from '../lib/noise';
+import { duraMenosDe, textoDeDuracion } from '../lib/duracion';
 import { MIN_TIE_PERCENT } from '../lib/umbrales';
 import {
   interpretar, ANTES, DESPUES,
@@ -1287,7 +1288,8 @@ export function BenchmarksView({
               // idx 0 = la grabación más reciente, y es contra la que se compara.
               const isLatest = idx === 0;
               const score = smoothScore(bench);
-              const isShort = bench.duration_seconds < SHORT_SECONDS;
+              // `duration_seconds` vale 0 cuando no hay reloj fiable: ese cero no es «dura 0 s».
+              const isShort = duraMenosDe(bench, SHORT_SECONDS);
 
               return (
                 <div
@@ -1328,7 +1330,7 @@ export function BenchmarksView({
                         <Clock className="w-3.5 h-3.5" />
                         <span>{formatTimestamp(bench.timestamp)}</span>
                         <span>•</span>
-                        <span>Duró {fmtDuration(bench.duration_seconds)}</span>
+                        <span>Duró {textoDeDuracion(bench, fmtDuration)}</span>
                         {bench.warmup_seconds != null && bench.warmup_seconds > 0 && (
                           <>
                             <span>•</span>

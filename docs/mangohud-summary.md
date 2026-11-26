@@ -45,13 +45,36 @@ Esto es lo que hace que los números no cuadren aunque uno intente compararlos:
 - **`0.1% Min FPS` es el máximo absoluto del frametime**, no un percentil.
   Con 598 muestras, el 0.1 % son 0,6 muestras. Comprobado: `55.981 ms → 17.8632`, exacto
   hasta el cuarto decimal.
-- **`1% Min FPS` es una media de los ~9-10 peores frametimes.**
-  Comprobado: media de los 9 peores `= 37.8991 ms → 26.3858` (resumen: 26.4349).
-  Un percentil interpolado al 99 % daría `29.7762 ms → 33.58`, que no coincide.
+- **`1% Min FPS` no coincide con ningún percentil de Thoriapp, y su fórmula exacta sigue
+  sin verificarse.** Que sea una media de los ~9-10 peores frametimes es una
+  **hipótesis plausible, no un hecho comprobado**: la media de los 9 peores da
+  `37.8991 ms → 26.3858` y el resumen publica `26.4349`, así que **la casilla no cierra**.
+  Un percentil interpolado al 99 % daría `33.58`, que tampoco coincide.
+
+  Lo único que se puede afirmar: **no es un percentil de Thoriapp** y **no se conoce su
+  algoritmo**. Para determinarlo habría que leer el código de MangoHud, que no se ha
+  hecho.
+
+  ⚠️ Las coincidencias numéricas de dos grabaciones **no demuestran el algoritmo
+  general**: dos series del mismo juego en el mismo equipo pueden coincidir con varias
+  fórmulas distintas. Toda afirmación sobre «cómo calcula MangoHud» es una inferencia a
+  partir de la evidencia disponible, no una verificación.
 - **`97% Percentile FPS`** sí es un percentil, con *nearest-rank*: `79.1689`, exacto.
 
 Thoriapp usa percentiles con interpolación lineal sobre el frametime (p99 y p99.9). Son
 definiciones distintas con nombres parecidos.
+
+### Lo que no se sabe
+
+- **Qué agrega exactamente cada fila del CSV**: las filas están espaciadas ~100 ms de
+  forma muy regular (598 de 598 deltas en 100 ms ±1 ms), pero eso **no demuestra** que
+  cada fila sea la media de los fotogramas de esa ventana. No se ha leído el código de
+  MangoHud, así que **se declara desconocido**. Si fuera una media, la varianza dentro de
+  la ventana sería invisible y el «peor fotograma» real podría ser peor que cualquiera
+  registrado.
+- **La fórmula de `1% Min FPS`** (ver arriba).
+- Ninguna afirmación de este documento atribuye a MangoHud ni a otras herramientas
+  (CapFrameX y similares) una fórmula concreta: lo que no se ha verificado, no se afirma.
 
 ## Unidades de la serie temporal
 

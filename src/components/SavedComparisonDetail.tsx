@@ -11,6 +11,7 @@ import {
   type Interpretacion, type MetricaInterpretada, type Tono,
 } from '../lib/interpretacion';
 import { estabilidadDe, estabilidadLabel } from '../lib/estabilidad';
+import { textoDeDuracion } from '../lib/duracion';
 import { GraficoTemporal } from './GraficoTemporal';
 import { PruebaN } from './PruebaN';
 import { InstantaneaCard } from './InstantaneaCard';
@@ -909,9 +910,9 @@ export function SavedComparisonDetail({
               </p>
               <p>
                 <strong className="text-[var(--text)]">Duración:</strong><br />
-                {f(comparison.baseline.duration_seconds)} s{' '}
+                {textoDeDuracion(comparison.baseline, (v) => `${f(v)} s`)}{' '}
                 <span className={SERIE.antes.texto}>({etiquetas.antes})</span> ·{' '}
-                {f(comparison.test.duration_seconds)} s{' '}
+                {textoDeDuracion(comparison.test, (v) => `${f(v)} s`)}{' '}
                 <span className={SERIE.despues.texto}>({etiquetas.despues})</span>
               </p>
               <p>

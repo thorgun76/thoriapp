@@ -332,6 +332,18 @@ export interface Benchmark {
   appid: number;
   timestamp: string;
   duration_seconds: number;
+  /**
+   * Duración medida con reloj fiable, en segundos. `null`/ausente = no hay eje temporal
+   * en el que confiar. **Cuando falta, `duration_seconds` vale 0 y ese cero significa
+   * «no consta», no «cero segundos»**: comprobar este campo antes de mostrar la duración.
+   */
+  duracion_medida?: number | null;
+  /** Con qué metodología de cálculo se obtuvieron los números. Ausente = no consta. */
+  metodologia_calculo?: 'v2' | null;
+  /** De dónde salen las muestras que entraron en el cálculo. */
+  contabilidad_muestras?: ContabilidadDeMuestras | null;
+  /** Apoyo real de cada percentil (sobre cuántas muestras se calculó). */
+  apoyo_metricas?: ApoyoDeMetricas | null;
   avg_fps: number;
   fps_1_percent_low: number;
   fps_0_1_percent_low: number;
@@ -416,6 +428,91 @@ export interface MuestrasTemporales {
   frame_time_ms: number[];
   /** Instante de cada muestra en segundos desde el inicio. Vacío si el log no traía `elapsed`. */
   elapsed_s?: number[];
+}
+
+/**
+ * Incidencias del reloj de la grabación (metodología v2).
+ *
+ * Son recuentos de diagnóstico, **no exclusiones**: una misma fila puede acumular varias
+ * y aun así entrar en el cálculo de las métricas de rendimiento.
+ */
+export interface IncidenciasTemporales {
+  filas_repetidas: number;
+  orden_invertido: number;
+  negativas: number;
+  no_finitas: number;
+  /** Total de filas sin un valor de reloj utilizable. */
+  reloj_incompleto: number;
+  /** Desglose del total anterior: la cabecera no traía columna `elapsed`. */
+  columna_elapsed_ausente?: number;
+  /** Desglose: la fila tenía menos columnas que la cabecera. */
+  celda_reloj_ausente?: number;
+  /** Desglose: la celda existía pero estaba vacía. */
+  celda_reloj_vacia?: number;
+  /** Desglose: texto no numérico o número no finito (NaN, inf). */
+  celda_reloj_ilegible?: number;
+}
+
+/** Por qué no se pudo aplicar el calentamiento solicitado. */
+export type MotivoSinCalentamiento =
+  | 'no_solicitado'
+  | 'sin_eje_temporal'
+  | 'pocas_muestras'
+  | 'quedaria_demasiado_corto'
+  | 'quedarian_pocas_muestras';
+
+/**
+ * De dónde salen las muestras que han entrado en el cálculo.
+ *
+ * `filas_originales` son las filas de datos del CSV (sin cabecera ni metadatos) y se
+ * reparten enteras entre inválidas, excluidas por calentamiento y analizadas: ninguna
+ * fila se cuenta dos veces.
+ */
+export interface ContabilidadDeMuestras {
+  /** Filas de datos del CSV: no cuentan metadatos ni cabecera. */
+  filas_originales: number;
+  /** Filas con FPS y frametime utilizables. */
+  filas_con_rendimiento_valido: number;
+  /** Filas con FPS o frametime vacíos, no numéricos, negativos, cero o infinitos. */
+  filas_con_rendimiento_invalido: number;
+  /** De las válidas, las del calentamiento descartado. */
+  excluidas_por_calentamiento: number;
+  /** Las que llegan a las fórmulas. Es el `n` real de los percentiles. */
+  muestras_analizadas: number;
+  incidencias: IncidenciasTemporales;
+  /** Si hay un eje temporal en el que se pueda confiar. */
+  eje_temporal_fiable: boolean;
+  /** La columna `elapsed` existía en la cabecera del CSV. */
+  columna_elapsed_presente: boolean;
+  /** Se pidió calentamiento y no se aplicó. Ausente si se aplicó o no se pidió. */
+  calentamiento_no_aplicado?: MotivoSinCalentamiento | null;
+}
+
+/**
+ * Cómo se calculó un percentil concreto.
+ *
+ * **No es un tamaño efectivo estadístico**: describe el cálculo, nada más. En una
+ * grabación corta, el «0,1 % low» puede apoyarse en una cola nominal menor que una
+ * muestra y en dos observaciones interpoladas.
+ */
+export interface ApoyoDePercentil {
+  /** Muestras sobre las que se calculó (`n`). */
+  muestras: number;
+  /** Tamaño nominal de la cola (`n × (1−p)`), en unidades de muestra. */
+  cola_nominal: number;
+  /** Observaciones distintas que usó la interpolación del percentil. */
+  observaciones_interpoladas: number;
+  /** Muestras incluidas de verdad en la media de cola. Ausente si es un percentil puro. */
+  muestras_en_la_media?: number | null;
+}
+
+/** Apoyo real de cada percentil del benchmark. */
+export interface ApoyoDeMetricas {
+  fps_1_percent_low?: ApoyoDePercentil | null;
+  fps_0_1_percent_low?: ApoyoDePercentil | null;
+  max_fps?: ApoyoDePercentil | null;
+  min_fps?: ApoyoDePercentil | null;
+  frame_time_1_percent_high?: ApoyoDePercentil | null;
 }
 
 /** Arranque vs resto de una grabación (lo calcula el backend). */
