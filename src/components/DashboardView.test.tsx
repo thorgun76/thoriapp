@@ -141,8 +141,9 @@ describe('Mis pruebas: filas de la lista', () => {
     expect(container.querySelectorAll('ul.divide-y')).toHaveLength(1);
   });
 
-  it('el veredicto lo pone el intérprete, no la resta de FPS', () => {
-    // Mejora general: los tres valores suben, así que el intérprete la llama mejora.
+  it('una prueba guardada sin evaluación no inventa un veredicto', () => {
+    // Aunque los tres valores suban y el intérprete la llamaría mejora, la prueba se
+    // guardó sin evaluación registrada: el listado lo dice y no concluye nada.
     guardadas.push(
       guardada(
         '1',
@@ -153,21 +154,34 @@ describe('Mis pruebas: filas de la lista', () => {
     );
     render(<DashboardView />);
     const fila = filaDe();
-    expect(fila.getAttribute('aria-label')).toMatch(/Prueba 4 rinde mejor/);
+    expect(fila.getAttribute('aria-label')).toContain('Sin evaluación registrada');
+    expect(fila.getAttribute('aria-label')).not.toMatch(/rinde mejor|rinde peor/i);
   });
 
-  it('un caso mixto se anuncia como «Resultado mixto», aunque suba el FPS medio', () => {
-    guardadas.push(
-      guardada(
-        '1',
-        { avg_fps: 55.1, fps_1_percent_low: 48, number: 7 },
-        { avg_fps: 59.4, id: 'b2', fps_1_percent_low: 30, number: 8 },
-        7.8
-      )
+  it('una prueba guardada con evaluación muestra la registrada, no una nueva', () => {
+    // Los datos dirían «mejora», pero lo registrado fue «resultado mixto»: manda lo
+    // guardado.
+    const c = guardada(
+      '1',
+      { avg_fps: 55.1, fps_1_percent_low: 48, number: 7 },
+      { avg_fps: 59.4, id: 'b2', fps_1_percent_low: 30, number: 8 },
+      7.8
     );
+    c.evaluacion = {
+      metodologia_interpretacion: 'v1',
+      evaluada_en: '2026-01-02 11:00:00',
+      referencia: { id: c.comparison.baseline.id },
+      candidata: { id: c.comparison.test.id },
+      estado: 'mixto',
+      confianza: 'provisional',
+      condiciones: { compatibilidad_metodologica: 'establecida' },
+    };
+    c.estado_de_la_evaluacion = 'soportada';
+    guardadas.push(c);
+
     render(<DashboardView />);
     const fila = filaDe();
-    expect(fila.getAttribute('aria-label')).toMatch(/Resultado mixto/i);
+    expect(fila.getAttribute('aria-label')).toContain('Resultado mixto');
     expect(fila.getAttribute('aria-label')).not.toMatch(/rinde mejor/i);
   });
 

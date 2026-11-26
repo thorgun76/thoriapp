@@ -16,7 +16,7 @@ la incidencia se aplaza.
 | **5.1 — Almacenamiento e integridad** | **Cerrada** |
 | **5.2 — Instantáneas de configuración** | **Cerrada** (incluye metadatos de MangoHud) |
 | **5.3 — Captura temprana y evidencias de ejecución** | **Cerrada con limitación conocida.** El observador es **experimental y opcional, apagado por defecto**. Compatibilidad **individual validada en el equipo** en Steam, Heroic, Heronite y Lutris (Wine); simultaneidad validada en **Steam + Steam** (Palworld + Deskrawl) y **Lutris + Steam** (Starsector + Deskrawl). **Heroic + Heronite no garantizada** (ver «Limitación conocida»). |
-| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado** (acta en este fichero), **bloque B en diseño** (diseño entregado, sin código). |
+| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado**, **bloque B cerrado** (persistencia de evaluaciones); bloque C sin comenzar. |
 | 6 — Rediseño visual | Pendiente |
 | 7 — (reservada) | Pendiente |
 | **8 — Internacionalización (i18n)** | **Pendiente, no empezada.** Registrada en `docs/planificacion-fases.md`. |
@@ -1037,6 +1037,86 @@ Consumidores corregidos: `atribuir_a_sesion` (ventana del CSV), el aviso de dura
 corta y el texto de duración en `BenchmarksView.tsx`, y las dos duraciones de
 `SavedComparisonDetail.tsx`. La interfaz escribe «duración no registrada» en vez de «0 s».
 
+### 5.4.1.B — Evaluaciones persistidas
+
+`SavedComparison` gana `evaluacion: Option<EvaluacionPersistida>`. **`None` no es un
+veredicto neutro**: significa *no registrada* (comparación histórica), y es distinto de
+`estado: datos_insuficientes`, que es una evaluación que sí existe.
+
+**El bloque B no genera evaluaciones.** `save_comparison` solo recibe dos ids: no hay
+parámetro por el que React pueda colar una evaluación, y no existe ningún motor
+provisional. Las escribirá el motor Rust del bloque C, en la misma operación que crea la
+comparación.
+
+**La clasificación va en la lectura, no en un comando aparte.** `load_comparisons()`
+devuelve cada comparación con su `estado_de_la_evaluacion` ya calculado:
+`no_registrada` (no hay evaluación), `soportada` (se entiende), `no_soportada` (existe,
+pero con códigos o metodología que esta versión no conoce) o `malformada` (existe, pero no
+se puede leer: el resto de la comparación y el JSON original se conservan). Lo decide el
+backend; la interfaz lo pinta y no lo deduce.
+
+No existe un comando aparte para preguntarlo. Lo hubo durante la implementación, sin
+consumidor real, y se eliminó: un `invoke` más para leer un dato que la lista ya trae no aportaba
+nada, y su único efecto era callar un aviso de código muerto.
+
+### Limitaciones aceptadas
+
+- **Concurrencia entre procesos independientes**: `CERROJO_COMPARACIONES` es un `Mutex`
+  estático y protege el ciclo completo lectura-modificación-escritura **dentro del
+  proceso**. Dos instancias de Thoriapp a la vez no están cubiertas por él. La escritura
+  atómica evita un archivo a medias, **no** una actualización perdida. Se revisará en la
+  fase 9 (seguridad y hardening).
+- **El bloque B no escribe evaluaciones**: ningún camino de producción las genera todavía;
+  solo se leen y se conservan. Lo hará C, de forma atómica con la creación de la
+  comparación.
+
+### Cuatro versiones que no evolucionan juntas
+
+| Versión | Dónde | Valor |
+|---|---|---|
+| Esquema de `saved_comparisons.json` | constante global | **2** |
+| Esquema de `benchmarks.json` | constante global | 1 |
+| Metodología de cálculo | por benchmark | `v2` o ausente |
+| Metodología de interpretación | por evaluación | `v1` |
+| Aplicación | `Cargo.toml` / `package.json` | 1.2.0 |
+
+Subir el esquema de comparaciones a 2 no migra nada: los ficheros v1 se leen igual y **no
+se reescriben al leerlos**. El cambio de versión se escribe solo cuando aparece contenido
+que exige v2. Un fichero v2 **nunca baja a v1**, ni aunque se borren todas sus
+evaluaciones: si bajara, una versión antigua volvería a abrirlo y descartaría en silencio
+lo que no entiende.
+
+### Escribir sin perder lo que esta versión no entiende
+
+El riesgo era real: `save_saved_data` reescribía el archivo **entero** desde structs
+tipados, así que cualquier campo de una versión futura desaparecía. Y no era teórico:
+borrar una comparación con Thoriapp v1.2.0 habría eliminado la `evaluacion` de **todas las
+demás**.
+
+Cómo se resuelve, sin infraestructura genérica:
+
+- La lectura guarda el `serde_json::Value` **original** de cada comparación y del nivel
+  raíz.
+- Al escribir, si el id ya estaba en disco se emite **ese `Value`**, no una
+  reserialización del struct. Los registros nuevos, y solo ellos, se serializan.
+- La conservación es **semántica, del JSON entero**: tipos, orden de claves que importa,
+  campos desconocidos a cualquier profundidad — dentro de `evaluacion`, de los snapshots
+  y de los arrays anidados —. No es conservación byte a byte del fichero: se reindenta con
+  `to_string_pretty`, y comparar bytes como criterio sería equivocado. Lo que se fija con
+  pruebas es que **leer y volver a escribir no pierde ni inventa ningún dato**.
+- La guarda de `VersionFutura` deja de ser decorativa: al escribir v2, v1.2.0 rechaza el
+  archivo en vez de destruirlo.
+
+No hay fusión recursiva de campos ni mecanismo para añadir una evaluación a posteriori.
+Ningún camino de producción modifica un registro existente: `save_comparison` solo añade,
+`delete_comparison` y `delete_all_comparisons` solo quitan. Por eso el código de fusión
+preventiva que llegó a escribirse se **eliminó**: era complejidad para un camino que no
+existe. Cuando el bloque C cree la comparación con su evaluación, ambas se guardarán
+juntas, de una vez.
+
+Un id duplicado en disco se detecta y se reporta como archivo corrupto: no se adivina cuál
+vale. Las escrituras siguen siendo atómicas y pasan por `CERROJO_COMPARACIONES`.
+
 ### Magnitudes: FPS y frametime no son intercambiables
 
 Dos patrones periódicos opuestos —6 muestras de 60,2 ms + 1 de 16,7 ms, y su inverso— dan,
@@ -1092,7 +1172,7 @@ Persistencia completa de `Evaluacion` en `SavedComparison` y marca de comparaci�
 
 ## Pruebas
 
-- Rust: 930 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
+- Rust: 948 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
 - TypeScript: 1034, en 76 ficheros.
 - `tsc --noEmit` limpio.
 - `cargo clippy --locked --bins -- -D warnings`: **sin avisos**. `save_benchmark` lleva un

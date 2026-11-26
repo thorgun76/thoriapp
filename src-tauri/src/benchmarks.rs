@@ -1428,7 +1428,15 @@ pub const BENCHMARKS_SCHEMA_VERSION: u32 = 1;
 /// Va por separado del de benchmarks a propósito: son dos archivos con ciclos de vida
 /// distintos y una comparación guardada puede seguir siendo válida aunque el esquema de
 /// las grabaciones cambie (embute copias completas de las dos grabaciones).
-pub const COMPARISONS_SCHEMA_VERSION: u32 = 1;
+///
+/// **v2** añade `evaluacion` a cada comparación. Un archivo v1 se lee igual y **no se
+/// reescribe al leerlo**: sube a v2 solo cuando se guarda una comparación que ya trae
+/// evaluación. Un archivo v2 **no vuelve nunca a v1**, ni siquiera si se borran todas las
+/// evaluaciones: si lo hiciera, una versión antigua de la app volvería a poder abrirlo y
+/// descartaría en silencio lo que no entiende.
+///
+/// La versión del esquema no es la versión de la aplicación ni la metodología de cálculo.
+pub const COMPARISONS_SCHEMA_VERSION: u32 = 2;
 
 fn get_benchmarks_dir() -> std::path::PathBuf {
     let config_dir = dirs::config_dir()
@@ -3701,6 +3709,283 @@ pub struct SavedComparison {
     pub after_fps: f64,
     pub fps_change_percent: f64,
     pub comparison: BenchmarkComparison,
+    /// Evaluación registrada al guardar, si la hay.
+    ///
+    /// `None` significa **no registrada** (comparación histórica), que no es lo mismo que
+    /// una evaluación con `datos_insuficientes`: esa existe y se conserva. El bloque B no
+    /// genera evaluaciones; las escribirá el motor del bloque C.
+    ///
+    /// Se lee de forma **tolerante**: si la evaluación viene malformada, se guarda el valor
+    /// original y `evaluacion` queda en `None`, pero el resto de la comparación (medidas,
+    /// deltas, snapshots) se sigue leyendo. Perder la evaluación no puede costar el resto
+    /// del archivo, y decir «no registrada» sin más ocultaría que hay algo ahí.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluacion: Option<EvaluacionPersistida>,
+    /// Evaluación que hay en disco pero esta versión no sabe leer (malformada).
+    ///
+    /// Solo se rellena al leer; nunca se escribe (el JSON original ya la conserva). Es lo
+    /// que permite distinguir «no hay evaluación» de «hay una y no se entiende».
+    #[serde(skip)]
+    pub evaluacion_ilegible: Option<serde_json::Value>,
+}
+
+// ==================== Evaluación persistida (5.4.1.B) ====================
+//
+// Esto es **formato de datos**, no un motor: ningún tipo de aquí decide nada. El bloque C
+// será quien calcule una evaluación en Rust y la escriba dentro de la misma operación que
+// crea la comparación. El bloque B solo define cómo se guarda, cómo se lee sin perder
+// nada y cómo se presenta lo guardado.
+//
+// Identificadores en español a propósito: son códigos de dominio estables, nunca frases
+// traducibles. La fase 8 traducirá los textos de la interfaz a partir del código, y por
+// eso un cambio de redacción o un idioma nuevo **no** cambia la metodología.
+
+/// Versión de la metodología de interpretación, tal como consta en disco.
+///
+/// Se guarda como texto para **conservar literalmente** un valor que esta versión no
+/// conozca (`"v9"`). Convertirlo a un enum cerrado obligaría a rechazar el archivo entero
+/// o a inventar un valor: las dos cosas serían perder el dato.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VersionDeInterpretacion(pub String);
+
+impl VersionDeInterpretacion {
+    pub const V1: &'static str = "v1";
+
+    /// `true` si esta versión de la app sabe interpretarla.
+    pub fn es_soportada(&self) -> bool {
+        self.0 == Self::V1
+    }
+}
+
+/// Estado de una evaluación.
+///
+/// Igual que la versión, es texto y no un enum cerrado: un estado futuro debe poder
+/// conservarse y presentarse como no soportado, no perderse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CodigoDeEvaluacion(pub String);
+
+impl CodigoDeEvaluacion {
+    pub const MEJORA: &'static str = "mejora";
+    pub const EMPEORA: &'static str = "empeora";
+    pub const MIXTO: &'static str = "mixto";
+    pub const SIN_CAMBIO: &'static str = "sin_cambio";
+    pub const DATOS_INSUFICIENTES: &'static str = "datos_insuficientes";
+    /// Metodologías no comparables: solo cabe describir, no concluir.
+    pub const SOLO_DESCRIPTIVA: &'static str = "solo_descriptiva";
+
+    /// `true` si es uno de los estados que esta versión entiende.
+    pub fn es_conocido(&self) -> bool {
+        matches!(
+            self.0.as_str(),
+            Self::MEJORA
+                | Self::EMPEORA
+                | Self::MIXTO
+                | Self::SIN_CAMBIO
+                | Self::DATOS_INSUFICIENTES
+                | Self::SOLO_DESCRIPTIVA
+        )
+    }
+}
+
+/// Qué grabación es cada lado. Solo el identificador: la metodología de cálculo y el resto
+/// de hechos ya están en `comparison.baseline` / `comparison.test`, que son inmutables.
+/// Duplicarlos aquí crearía dos copias del mismo hecho que pueden divergir.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdDeBenchmark {
+    pub id: String,
+}
+
+/// Dirección **numérica** del cambio. No dice si eso es bueno: subir el frametime es peor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DireccionDeCambio {
+    Sube,
+    Baja,
+    Igual,
+    #[serde(rename = "no_consta")]
+    NoConsta,
+}
+
+/// Qué prefirió el criterio aplicado. Separado de la dirección a propósito: `DireccionDeCambio`
+/// describe el número y esto describe la regla con la que se juzgó.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferenciaDeMetrica {
+    FavorDeCandidata,
+    FavorDeReferencia,
+    Indistinto,
+    NoEstablecida,
+}
+
+/// Apoyo estadístico de **una** grabación en **una** métrica.
+///
+/// Reutiliza `ApoyoDePercentil` del bloque A para no redefinir la misma información, y
+/// solo lleva los campos que aplican a esa métrica: no se copia `ApoyoDeMetricas` entero
+/// en cada casilla.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApoyoDeMetrica {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentil: Option<ApoyoDePercentil>,
+}
+
+/// Una métrica dentro de una evaluación.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluacionDeMetrica {
+    /// Código de la métrica (`avg_fps`, `fps_1_percent_low`, …).
+    pub clave: String,
+    /// Magnitudes observadas. `None` = no consta; **nunca** 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antes: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub despues: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diferencia: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diferencia_pct: Option<f64>,
+    pub direccion: DireccionDeCambio,
+    pub preferencia: PreferenciaDeMetrica,
+    /// Confianza **de esta métrica**, no la global copiada.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confianza: Option<CodigoDeEvaluacion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apoyo_referencia: Option<ApoyoDeMetrica>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apoyo_candidata: Option<ApoyoDeMetrica>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motivos: Vec<CodigoDeEvaluacion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitaciones: Vec<CodigoDeEvaluacion>,
+}
+
+/// Resultado de las comprobaciones de comparabilidad metodológica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilidadMetodologica {
+    /// Ambas partes declaran la **misma** metodología de cálculo y esta versión la conoce.
+    Establecida,
+    /// Alguna parte no la declara (histórico), o son distintas, o son desconocidas.
+    /// Dos desconocidas **no** se presuponen iguales.
+    NoEstablecida,
+}
+
+/// Criterios aplicados y resultado de las comprobaciones.
+///
+/// No repite nombres, AppID, hardware, comandos ni duraciones: todo eso ya está en los
+/// benchmarks inmutables que la comparación embute. Aquí solo va lo que **resulta** de
+/// aplicarlos, que es lo que no se puede recalcular sin las reglas de su momento.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CondicionesDeComparacion {
+    pub compatibilidad_metodologica: CompatibilidadMetodologica,
+    /// Margen de la aplicación usado al evaluar (%). `None` = no consta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margen_porcentaje: Option<f64>,
+    /// Ruido combinado de las dos grabaciones (%). `None` = no consta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruido_combinado_porcentaje: Option<f64>,
+    /// `true` solo si los dos comandos registrados son exactamente el mismo texto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comandos_iguales: Option<bool>,
+    /// Variable evaluada **declarada por el usuario**. Sin declaración no se infiere: queda
+    /// desconocida (`None`), nunca «la que parece».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variable_evaluada: Option<VariableEvaluada>,
+}
+
+/// Declaración explícita del usuario sobre qué se estaba probando.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableEvaluada {
+    /// Identificador estable de lo declarado. Texto libre porque la lista de variables
+    /// futuras no está cerrada, pero **nunca** es una frase ya traducida.
+    pub codigo: String,
+}
+
+/// Evaluación guardada junto a una comparación.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluacionPersistida {
+    pub metodologia_interpretacion: VersionDeInterpretacion,
+    /// Cuándo se evaluó. No es la fecha de la prueba ni la de guardado.
+    pub evaluada_en: String,
+    pub referencia: IdDeBenchmark,
+    pub candidata: IdDeBenchmark,
+    pub estado: CodigoDeEvaluacion,
+    pub confianza: CodigoDeEvaluacion,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metricas: Vec<EvaluacionDeMetrica>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motivos: Vec<CodigoDeEvaluacion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitaciones: Vec<CodigoDeEvaluacion>,
+    pub condiciones: CondicionesDeComparacion,
+}
+
+impl SavedComparison {
+    /// Qué se puede afirmar sobre la evaluación de esta comparación guardada.
+    ///
+    /// Es el **único** sitio donde se decide, para que la interfaz no tenga que adivinar y
+    /// para que una evaluación no soportada no se confunda con una ausente.
+    ///
+    /// Una evaluación cuyos ids no coinciden con los benchmarks que la comparación embute
+    /// no describe a esta comparación: se trata como no soportada en vez de presentarla
+    /// como si lo fuera.
+    pub fn estado_de_la_evaluacion(&self) -> EstadoDeLaEvaluacion {
+        // Una evaluación ilegible **no** es «no registrada»: hay algo, y no se puede
+        // presentar como si no existiera.
+        if self.evaluacion.is_none() && self.evaluacion_ilegible.is_some() {
+            return EstadoDeLaEvaluacion::Malformada;
+        }
+        match &self.evaluacion {
+            None => EstadoDeLaEvaluacion::NoRegistrada,
+            Some(ev) => {
+                if ev.es_soportada() && ev.corresponde_a(&self.comparison) {
+                    EstadoDeLaEvaluacion::Soportada(Box::new(ev.clone()))
+                } else {
+                    EstadoDeLaEvaluacion::NoSoportada(Box::new(ev.clone()))
+                }
+            }
+        }
+    }
+}
+
+/// Qué se puede decir de la evaluación de una comparación guardada.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EstadoDeLaEvaluacion {
+    /// No se registró ninguna evaluación. Comparación **histórica**: se muestran sus datos,
+    /// sus snapshots, sus deltas y su narrativa heredada, pero **no** se emite un veredicto
+    /// nuevo llamando a `interpretar()`.
+    NoRegistrada,
+    /// Evaluación registrada y comprensible por esta versión.
+    Soportada(Box<EvaluacionPersistida>),
+    /// Evaluación registrada con una metodología que esta versión no conoce. Se conserva
+    /// tal cual y **no se reinterpreta**: el contenido original sigue en disco.
+    NoSoportada(Box<EvaluacionPersistida>),
+    /// Hay una evaluación en disco, pero no tiene la forma esperada. Se conserva el JSON
+    /// original; no se presenta como veredicto ni se descarta.
+    Malformada,
+}
+
+impl EvaluacionPersistida {
+    /// Esta versión sabe interpretarla? Una evaluación con metodología desconocida **no**
+    /// es la misma cosa que una ausente: la primera existe y se conserva; la segunda nunca
+    /// se registró.
+    pub fn es_soportada(&self) -> bool {
+        // La metodología debe ser de esta versión y el **estado** debe estar en el
+        // vocabulario conocido: presentar `mejora` cuando el archivo dice otra cosa sería
+        // inventar un veredicto.
+        //
+        // Los **motivos** y **limitaciones** no se validan: son códigos abiertos por
+        // diseño (cada regla futura añade los suyos) y un motivo desconocido se conserva y
+        // se muestra como código, sin traducirlo a otro.
+        self.metodologia_interpretacion.es_soportada() && self.estado.es_conocido()
+    }
+
+    /// La referencia y la candidata deben ser exactamente los dos benchmarks que la
+    /// comparación embute. Si no cuadra, la evaluación no describe a esta comparación.
+    pub fn corresponde_a(&self, comparacion: &BenchmarkComparison) -> bool {
+        self.referencia.id == comparacion.baseline.id
+            && self.candidata.id == comparacion.test.id
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3709,6 +3994,20 @@ struct SavedComparisonsData {
     #[serde(default)]
     version: Option<u32>,
     comparisons: Vec<SavedComparison>,
+    /// El JSON **original** de cada comparación, tal cual estaba en disco, indexado por id.
+    ///
+    /// Se conserva porque esta versión no entiende todos los campos que puede haber (los
+    /// de una versión futura) y al reescribir el archivo se perderían. Las comparaciones
+    /// son inmutables, así que el registro original sigue siendo válido: solo se sustituye
+    /// el que se ha añadido o eliminado de verdad.
+    ///
+    /// No se serializa: es un testigo de lectura, no parte del formato. Al escribir se
+    /// fusiona con lo que produce el struct tipado.
+    #[serde(skip)]
+    crudos: serde_json::Map<String, serde_json::Value>,
+    /// Campos desconocidos del **nivel raíz** del archivo. Mismo motivo.
+    #[serde(skip)]
+    crudo_raiz: serde_json::Map<String, serde_json::Value>,
 }
 
 fn get_saved_comparisons_file() -> std::path::PathBuf {
@@ -3721,19 +4020,118 @@ fn get_saved_comparisons_file() -> std::path::PathBuf {
 /// sobrescribía: las pruebas guardadas desaparecían sin avisar. La copia de seguridad que
 /// se hacía no servía de nada, porque nadie le decía al usuario que existía.
 fn try_load_saved_data() -> Result<SavedComparisonsData, ErrorDatos> {
-    leer_datos::<SavedComparisonsData>(
-        &get_saved_comparisons_file(),
+    try_load_saved_data_de(&get_saved_comparisons_file())
+}
+
+/// La lectura de verdad, sobre una ruta concreta: así se puede probar con archivos de
+/// verdad en un directorio temporal sin depender de dónde viva la configuración.
+///
+/// Se lee **primero** como `Value` porque el JSON original hace falta para no perder los
+/// campos que esta versión no conoce; el tipado viene después.
+fn try_load_saved_data_de(ruta: &Path) -> Result<SavedComparisonsData, ErrorDatos> {
+    let crudo = leer_datos::<serde_json::Value>(
+        ruta,
         "saved_comparisons.json",
         COMPARISONS_SCHEMA_VERSION,
         |v| v.get("version").and_then(|x| x.as_u64()).map(|x| x as u32),
-        serde_json::from_value,
-    )
-    .map(|o| {
-        o.unwrap_or(SavedComparisonsData {
-            version: None,
-            comparisons: Vec::new(),
-        })
+        Ok,
+    )?;
+
+    let Some(crudo) = crudo else {
+        return Ok(vacio());
+    };
+
+    interpretar_fichero_de_comparaciones(crudo)
+}
+
+/// Convierte el JSON del archivo en los datos tipados, guardando los registros originales.
+fn interpretar_fichero_de_comparaciones(
+    crudo: serde_json::Value,
+) -> Result<SavedComparisonsData, ErrorDatos> {
+    let objeto = crudo.as_object().ok_or_else(|| ErrorDatos::Corrupto {
+        detalle: "se esperaba un objeto en la raíz".to_string(),
+        copia: None,
+    })?;
+
+    let version = objeto.get("version").and_then(|x| x.as_u64()).map(|x| x as u32);
+
+    let lista = objeto
+        .get("comparisons")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| ErrorDatos::Corrupto {
+            detalle: "falta la lista `comparisons`".to_string(),
+            copia: None,
+        })?;
+
+    let mut comparisons = Vec::with_capacity(lista.len());
+    let mut crudos = serde_json::Map::new();
+
+    for valor in lista {
+        let mut guardada: SavedComparison = match serde_json::from_value(valor.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                // Puede fallar por la evaluación, que es lo único que esta versión no
+                // conoce del todo. Se reintenta sin ella: el resto de la comparación es
+                // dato medido y no puede perderse por un campo opcional ilegible.
+                let mut sin_evaluacion = valor.clone();
+                let tenia = sin_evaluacion
+                    .as_object_mut()
+                    .map(|o| o.remove("evaluacion").is_some())
+                    .unwrap_or(false);
+                match serde_json::from_value::<SavedComparison>(sin_evaluacion) {
+                    Ok(mut c) if tenia => {
+                        c.evaluacion_ilegible = valor.get("evaluacion").cloned();
+                        c
+                    }
+                    _ => {
+                        return Err(ErrorDatos::Corrupto {
+                            detalle: format!(
+                                "una comparación guardada no tiene el formato esperado: {e}"
+                            ),
+                            copia: None,
+                        })
+                    }
+                }
+            }
+        };
+        guardada.evaluacion_ilegible = guardada
+            .evaluacion_ilegible
+            .or_else(|| valor.get("evaluacion").cloned());
+
+        // Dos comparaciones con el mismo id harían que «borrar una» borrase dos y que el
+        // testigo de escritura no supiera cuál es cuál. No se adivina: se avisa.
+        if crudos.contains_key(&guardada.id) {
+            return Err(ErrorDatos::Corrupto {
+                detalle: format!("hay dos comparaciones con el mismo id «{}»", guardada.id),
+                copia: None,
+            });
+        }
+
+        crudos.insert(guardada.id.clone(), valor.clone());
+        comparisons.push(guardada);
+    }
+
+    let crudo_raiz = objeto
+        .iter()
+        .filter(|(k, _)| k.as_str() != "version" && k.as_str() != "comparisons")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    Ok(SavedComparisonsData {
+        version,
+        comparisons,
+        crudos,
+        crudo_raiz,
     })
+}
+
+fn vacio() -> SavedComparisonsData {
+    SavedComparisonsData {
+        version: None,
+        comparisons: Vec::new(),
+        crudos: serde_json::Map::new(),
+        crudo_raiz: serde_json::Map::new(),
+    }
 }
 
 /// Variante para **modificar**: aborta si el archivo existe y no se puede interpretar.
@@ -3741,12 +4139,67 @@ fn load_saved_data_para_editar() -> Result<SavedComparisonsData, String> {
     try_load_saved_data().map_err(|e| e.mensaje("Tus pruebas guardadas"))
 }
 
+
+/// Construye el JSON que se va a escribir.
+///
+/// Regla: **ningún registro que ya estaba se reconstruye**. Si el id estaba en disco, se
+/// reescribe tal como se leyó, con sus campos anidados aunque esta versión no los
+/// entienda. Solo los registros **nuevos** se serializan desde su struct.
+///
+/// Esto basta porque las comparaciones guardadas son **inmutables**: en producción solo se
+/// añaden (`save_comparison`) o se quitan (`delete_comparison`, `delete_all_comparisons`).
+/// No hay ningún camino que edite una ya guardada, así que no hace falta distinguir «está
+/// igual» de «ha cambiado»: si estaba, se conserva; si no estaba, es nueva.
+///
+/// Si algún día C necesitara modificar una, además de añadir su ruta habría que traer de
+/// vuelta una fusión de campos desconocidos. Hoy sería código muerto, y por eso no está.
+fn construir_json_de_comparaciones(
+    data: &SavedComparisonsData,
+) -> Result<serde_json::Value, String> {
+    let mut lista = Vec::with_capacity(data.comparisons.len());
+
+    for guardada in &data.comparisons {
+        let valor = match data.crudos.get(&guardada.id) {
+            // Estaba en disco: se conserva el JSON original, sin reconstruirlo.
+            Some(original) => original.clone(),
+            // Alta nueva: es el único caso que se serializa desde el struct.
+            None => serde_json::to_value(guardada)
+                .map_err(|e| format!("No se pudo preparar la comparación guardada: {e}"))?,
+        };
+        lista.push(valor);
+    }
+
+    let mut raiz = data.crudo_raiz.clone();
+    raiz.insert("version".to_string(), serde_json::json!(version_a_escribir(data)));
+    raiz.insert("comparisons".to_string(), serde_json::Value::Array(lista));
+    Ok(serde_json::Value::Object(raiz))
+}
+
+/// Qué versión se escribe.
+///
+/// Un archivo que ya era v2 **sigue siendo v2** aunque se queden sin evaluaciones: bajar a
+/// v1 permitiría que una versión antigua lo abriese y descartase lo que no entiende. Un
+/// archivo v1 sube a v2 solo cuando aparece contenido que necesita v2.
+fn version_a_escribir(data: &SavedComparisonsData) -> u32 {
+    let ya_era_v2 = data.version.is_some_and(|v| v >= 2);
+    let hay_evaluacion = data.comparisons.iter().any(|c| c.evaluacion.is_some());
+    if ya_era_v2 || hay_evaluacion {
+        2
+    } else {
+        1
+    }
+}
+
 fn save_saved_data(data: &SavedComparisonsData) -> Result<(), String> {
-    let mut data = data.clone();
-    data.version = Some(COMPARISONS_SCHEMA_VERSION);
-    let content =
-        serde_json::to_string_pretty(&data).map_err(|e| format!("Error al serializar: {}", e))?;
-    escribir_atomico(&get_saved_comparisons_file(), &content).map_err(|e| {
+    save_saved_data_en(&get_saved_comparisons_file(), data)
+}
+
+/// La escritura de verdad, sobre una ruta concreta (ver `try_load_saved_data_de`).
+fn save_saved_data_en(ruta: &Path, data: &SavedComparisonsData) -> Result<(), String> {
+    let json = construir_json_de_comparaciones(data)?;
+    let content = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("Error al serializar: {}", e))?;
+    escribir_atomico(ruta, &content).map_err(|e| {
         format!(
             "No se pudieron guardar las pruebas ({}). Las que ya tenías siguen intactas.",
             e
@@ -3787,6 +4240,10 @@ pub fn save_comparison(baseline_id: String, test_id: String) -> Result<SavedComp
         after_fps,
         fps_change_percent,
         comparison,
+        // El bloque B no genera evaluaciones: las escribirá el motor del bloque C, en la
+        // misma operación que crea la comparación. Aquí nace como «no registrada».
+        evaluacion: None,
+        evaluacion_ilegible: None,
     };
 
     data.comparisons.push(saved.clone());
@@ -3796,12 +4253,55 @@ pub fn save_comparison(baseline_id: String, test_id: String) -> Result<SavedComp
     Ok(saved)
 }
 
+/// Cómo se leyó la evaluación de una comparación guardada.
+///
+/// Viaja con la comparación en **la misma lectura**, para que la interfaz no tenga que
+/// clasificar nada ni pedir un segundo comando por cada fila.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstadoDeLaEvaluacionLeida {
+    /// No se registró evaluación: comparación histórica.
+    NoRegistrada,
+    /// Registrada y comprensible por esta versión.
+    Soportada,
+    /// Registrada con códigos o metodología que esta versión no entiende.
+    NoSoportada,
+    /// Hay una evaluación, pero no se puede interpretar su forma.
+    Malformada,
+}
+
+/// Una comparación guardada tal como se entrega a la interfaz.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComparacionLeida {
+    #[serde(flatten)]
+    pub guardada: SavedComparison,
+    pub estado_de_la_evaluacion: EstadoDeLaEvaluacionLeida,
+}
+
 #[tauri::command]
-pub fn load_comparisons() -> Result<Vec<SavedComparison>, String> {
+pub fn load_comparisons() -> Result<Vec<ComparacionLeida>, String> {
     // Lectura de pantalla: si el archivo está roto hay que decirlo, no pintar una lista
     // vacía. Antes esto devolvía `Ok(vec![])` y «Mis pruebas» decía «no tienes ninguna».
     try_load_saved_data()
-        .map(|d| d.comparisons)
+        .map(|d| {
+            d.comparisons
+                .into_iter()
+                .map(|c| {
+                    // Clasificar aquí, y no en el frontend, es lo que mantiene la regla en
+                    // un solo sitio: qué se puede afirmar de una evaluación guardada es
+                    // dominio, no presentación.
+                    let estado = match c.estado_de_la_evaluacion() {
+                        EstadoDeLaEvaluacion::NoRegistrada => EstadoDeLaEvaluacionLeida::NoRegistrada,
+                        EstadoDeLaEvaluacion::Soportada(_) => EstadoDeLaEvaluacionLeida::Soportada,
+                        EstadoDeLaEvaluacion::NoSoportada(_) => {
+                            EstadoDeLaEvaluacionLeida::NoSoportada
+                        }
+                        EstadoDeLaEvaluacion::Malformada => EstadoDeLaEvaluacionLeida::Malformada,
+                    };
+                    ComparacionLeida { guardada: c, estado_de_la_evaluacion: estado }
+                })
+                .collect()
+        })
         .map_err(|e| e.mensaje("Tus pruebas guardadas"))
 }
 
@@ -3818,11 +4318,11 @@ pub fn delete_all_comparisons() -> Result<(), String> {
     let _turno = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
     // Borrar todo también es destructivo: si no se puede leer lo que hay, no se vacía a
     // ciegas (un archivo ilegible podría ser uno perfectamente válido con otro formato).
-    load_saved_data_para_editar()?;
-    let data = SavedComparisonsData {
-        version: None,
-        comparisons: Vec::new(),
-    };
+    let mut data = load_saved_data_para_editar()?;
+    // Se vacían las comparaciones, pero se conserva lo demás del archivo (incluidos los
+    // campos que esta versión no conoce, vía `crudo_raiz`) y su versión de esquema.
+    data.comparisons.clear();
+    data.crudos.clear();
     save_saved_data(&data)
 }
 
@@ -4754,6 +5254,561 @@ mod tests {
         assert!(json.contains("\"spikes_per_min\":null"), "json: {json}");
         let releido: BenchmarksData = serde_json::from_str(&json).expect("releer");
         assert_eq!(releido.benchmarks[0].spikes_per_min, None);
+    }
+
+    // ============ Bloque 5.4.1.B: persistencia de evaluaciones ============
+
+    /// Una comparación guardada mínima, con ids propios.
+    fn comparacion(id: &str, base: &str, test: &str) -> SavedComparison {
+        let mut b = bench(1, "Palworld");
+        b.id = base.to_string();
+        let mut t = bench(1, "Palworld");
+        t.id = test.to_string();
+        SavedComparison {
+            id: id.to_string(),
+            saved_at: "2026-01-01 10:00:00".to_string(),
+            game_name: "Palworld".to_string(),
+            before_fps: b.avg_fps,
+            after_fps: t.avg_fps,
+            fps_change_percent: 0.0,
+            comparison: BenchmarkComparison {
+                baseline: b,
+                test: t,
+                fps_change_percent: 0.0,
+                fps_1_percent_change_percent: 0.0,
+                fps_0_1_percent_change_percent: 0.0,
+                frame_time_change_percent: 0.0,
+                conclusion: "narrativa histórica".to_string(),
+                noise_percent: Some(3.0),
+                within_noise: false,
+                comandos_iguales: Some(true),
+            },
+            evaluacion: None,
+            evaluacion_ilegible: None,
+        }
+    }
+
+    fn evaluacion_de(id_ref: &str, id_cand: &str) -> EvaluacionPersistida {
+        EvaluacionPersistida {
+            metodologia_interpretacion: VersionDeInterpretacion("v1" .to_string()),
+            evaluada_en: "2026-01-02 11:00:00".to_string(),
+            referencia: IdDeBenchmark { id: id_ref.to_string() },
+            candidata: IdDeBenchmark { id: id_cand.to_string() },
+            estado: CodigoDeEvaluacion(CodigoDeEvaluacion::MEJORA.to_string()),
+            confianza: CodigoDeEvaluacion("observada".to_string()),
+            metricas: vec![EvaluacionDeMetrica {
+                clave: "avg_fps".to_string(),
+                antes: Some(60.0),
+                despues: Some(66.0),
+                diferencia: Some(6.0),
+                diferencia_pct: Some(10.0),
+                direccion: DireccionDeCambio::Sube,
+                preferencia: PreferenciaDeMetrica::FavorDeCandidata,
+                confianza: Some(CodigoDeEvaluacion("observada".to_string())),
+                apoyo_referencia: None,
+                apoyo_candidata: None,
+                motivos: vec![CodigoDeEvaluacion("velocidad_mejora".to_string())],
+                limitaciones: vec![],
+            }],
+            motivos: vec![CodigoDeEvaluacion("velocidad_mejora".to_string())],
+            limitaciones: vec![],
+            condiciones: CondicionesDeComparacion {
+                compatibilidad_metodologica: CompatibilidadMetodologica::Establecida,
+                margen_porcentaje: Some(5.0),
+                ruido_combinado_porcentaje: Some(3.0),
+                comandos_iguales: Some(true),
+                variable_evaluada: None,
+            },
+        }
+    }
+
+    /// Escribe un archivo y devuelve su ruta.
+    fn escribir(ruta: &Path, json: &str) {
+        fs::write(ruta, json).expect("escribir fixture");
+    }
+
+    #[test]
+    fn leer_no_reescribe_ni_cambia_bytes_ni_mtime() {
+        let dir = tmp_dir("b541-lectura");
+        let ruta = dir.join("saved_comparisons.json");
+        escribir(
+            &ruta,
+            &format!(
+                r#"{{"version":1,"comparisons":[{{"id":"c1","saved_at":"x","game_name":"P",
+                   "before_fps":1.0,"after_fps":2.0,"fps_change_percent":100.0,
+                   "comparison":{{"campo_futuro":"se conserva","baseline":{},"test":{},
+                     "fps_change_percent":0.0,"fps_1_percent_change_percent":0.0,
+                     "fps_0_1_percent_change_percent":0.0,"frame_time_change_percent":0.0,
+                     "conclusion":"","within_noise":false}}}}]}}"#,
+                serde_json::to_string(&bench(1, "P")).unwrap(),
+                serde_json::to_string(&bench(1, "P")).unwrap()
+            ),
+        );
+        let antes = fs::read(&ruta).expect("leer bytes");
+        let mtime_antes = fs::metadata(&ruta).and_then(|m| m.modified()).expect("mtime");
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = try_load_saved_data_de(&ruta).expect("lectura");
+
+        let despues = fs::read(&ruta).expect("leer bytes");
+        let mtime_despues = fs::metadata(&ruta).and_then(|m| m.modified()).expect("mtime");
+        assert_eq!(antes, despues, "leer no puede cambiar los bytes");
+        assert_eq!(mtime_antes, mtime_despues, "leer no puede tocar el mtime");
+    }
+
+    #[test]
+    fn la_serializacion_es_igualdad_semantica() {
+        // No se compara byte a byte: el orden de claves y el sangrado no son contrato.
+        let mut c = comparacion("c1", "b1", "t1");
+        c.evaluacion = Some(evaluacion_de("b1", "t1"));
+        let json = serde_json::to_string(&c).expect("serializar");
+        let vuelta: SavedComparison = serde_json::from_str(&json).expect("deserializar");
+        // Igualdad semántica campo a campo (no byte a byte).
+        assert_eq!(c.id, vuelta.id);
+        assert_eq!(c.saved_at, vuelta.saved_at);
+        assert_eq!(c.game_name, vuelta.game_name);
+        assert_eq!(c.before_fps, vuelta.before_fps);
+        assert_eq!(c.after_fps, vuelta.after_fps);
+        assert_eq!(c.fps_change_percent, vuelta.fps_change_percent);
+        assert_eq!(c.evaluacion, vuelta.evaluacion);
+        assert_eq!(c.comparison.baseline.id, vuelta.comparison.baseline.id);
+        assert_eq!(c.comparison.test.id, vuelta.comparison.test.id);
+    }
+
+    #[test]
+    fn los_campos_desconocidos_anidados_sobreviven_a_un_borrado() {
+        // El escenario que destruiría datos: se borra UNA comparación y las demás deben
+        // conservar sus campos futuros, también los anidados hondo.
+        let dir = tmp_dir("b541-anidados");
+        let ruta = dir.join("saved_comparisons.json");
+        let mut c1 = comparacion("c1", "b1", "t1");
+        c1.evaluacion = Some(evaluacion_de("b1", "t1"));
+        let mut c2 = comparacion("c2", "b2", "t2");
+        c2.evaluacion = Some(evaluacion_de("b2", "t2"));
+
+        let mut json = serde_json::json!({
+            "version": 2,
+            "comparisons": [serde_json::to_value(&c1).unwrap(), serde_json::to_value(&c2).unwrap()],
+            "campo_futuro_raiz": {"anidado": [1, 2, 3]}
+        });
+        json["comparisons"][1]["comparison"]["campo_futuro_profundo"] =
+            serde_json::json!({"nivel": {"mas": true}});
+        escribir(&ruta, &serde_json::to_string_pretty(&json).unwrap());
+
+        let mut datos = try_load_saved_data_de(&ruta).expect("lectura");
+        datos.comparisons.retain(|c| c.id != "c1");
+        save_saved_data_en(&ruta, &datos).expect("escritura");
+
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        assert_eq!(escrito["campo_futuro_raiz"]["anidado"][2], 3, "raíz conservada");
+        assert_eq!(escrito["comparisons"].as_array().unwrap().len(), 1);
+        assert_eq!(escrito["comparisons"][0]["id"], "c2");
+        assert_eq!(
+            escrito["comparisons"][0]["comparison"]["campo_futuro_profundo"]["nivel"]["mas"],
+            true,
+            "campo anidado de un registro no afectado"
+        );
+        assert!(
+            escrito["comparisons"][0]["evaluacion"].is_object(),
+            "la evaluación de la otra comparación no se puede perder"
+        );
+    }
+
+    #[test]
+    fn un_fichero_v1_no_cambia_de_version_al_leerlo() {
+        let dir = tmp_dir("b541-v1-lee");
+        let ruta = dir.join("saved_comparisons.json");
+        let c = comparacion("c1", "b1", "t1");
+        escribir(
+            &ruta,
+            &format!(r#"{{"version":1,"comparisons":[{}]}}"#, serde_json::to_string(&c).unwrap()),
+        );
+
+        let datos = try_load_saved_data_de(&ruta).expect("lectura");
+        assert_eq!(datos.version, Some(1));
+        assert_eq!(version_a_escribir(&datos), 1, "sin evaluaciones sigue siendo v1");
+    }
+
+    #[test]
+    fn una_comparacion_con_evaluacion_se_escribe_en_v2() {
+        // Las comparaciones nacen con su evaluación (bloque C las creará juntas): no hay
+        // un camino que añada la evaluación después a una ya guardada.
+        let dir = tmp_dir("b541-v2");
+        let ruta = dir.join("saved_comparisons.json");
+        escribir(&ruta, r#"{"version":1,"comparisons":[]}"#);
+
+        let mut datos = try_load_saved_data_de(&ruta).expect("lectura");
+        let mut c = comparacion("c1", "b1", "t1");
+        c.evaluacion = Some(evaluacion_de("b1", "t1"));
+        datos.comparisons.push(c);
+        save_saved_data_en(&ruta, &datos).expect("escritura");
+
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        assert_eq!(escrito["version"], 2, "una evaluación obliga a v2");
+
+        let releido = try_load_saved_data_de(&ruta).expect("relectura");
+        assert!(releido.comparisons[0].evaluacion.is_some());
+    }
+
+    #[test]
+    fn un_fichero_v2_no_vuelve_a_v1_aunque_se_borren_las_evaluaciones() {
+        let dir = tmp_dir("b541-v2-no-baja");
+        let ruta = dir.join("saved_comparisons.json");
+        let mut c = comparacion("c1", "b1", "t1");
+        c.evaluacion = Some(evaluacion_de("b1", "t1"));
+        escribir(
+            &ruta,
+            &format!(r#"{{"version":2,"comparisons":[{}]}}"#, serde_json::to_string(&c).unwrap()),
+        );
+
+        let mut datos = try_load_saved_data_de(&ruta).expect("lectura");
+        datos.comparisons[0].evaluacion = None;
+        save_saved_data_en(&ruta, &datos).expect("escritura");
+
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        assert_eq!(escrito["version"], 2, "un v2 nunca baja a v1 solo");
+
+        // Y vaciar todas tampoco lo baja.
+        datos.comparisons.clear();
+        save_saved_data_en(&ruta, &datos).expect("escritura 2");
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        assert_eq!(escrito["version"], 2);
+    }
+
+    #[test]
+    fn una_version_futura_no_se_trata_como_danada_ni_se_toca() {
+        // La protección de v1.2.0: un archivo v3 da error explícito y el archivo queda
+        // intacto. Es lo que impide que una versión antigua reescriba evaluaciones.
+        let dir = tmp_dir("b541-v3");
+        let ruta = dir.join("saved_comparisons.json");
+        escribir(&ruta, r#"{"version":3,"comparisons":[]}"#);
+        let antes = fs::read(&ruta).unwrap();
+
+        let err = try_load_saved_data_de(&ruta).expect_err("debe rechazar v3");
+        match err {
+            ErrorDatos::VersionFutura { encontrada, soportada } => {
+                assert_eq!(encontrada, 3);
+                assert_eq!(soportada, COMPARISONS_SCHEMA_VERSION);
+            }
+            otro => panic!("se esperaba VersionFutura, llegó {otro:?}"),
+        }
+        assert_eq!(antes, fs::read(&ruta).unwrap(), "no se modifica");
+    }
+
+    #[test]
+    fn un_id_duplicado_se_detecta_y_no_se_pisa() {
+        let dir = tmp_dir("b541-duplicado");
+        let ruta = dir.join("saved_comparisons.json");
+        let c1 = comparacion("repetido", "b1", "t1");
+        escribir(
+            &ruta,
+            &format!(
+                r#"{{"version":1,"comparisons":[{},{}]}}"#,
+                serde_json::to_string(&c1).unwrap(),
+                serde_json::to_string(&c1).unwrap()
+            ),
+        );
+        match try_load_saved_data_de(&ruta) {
+            Err(ErrorDatos::Corrupto { detalle, .. }) => assert!(detalle.contains("mismo id")),
+            otro => panic!("se esperaba Corrupto por id duplicado, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn ausente_no_es_lo_mismo_que_datos_insuficientes() {
+        let mut sin = comparacion("c1", "b1", "t1");
+        sin.evaluacion = None;
+        assert_eq!(sin.estado_de_la_evaluacion(), EstadoDeLaEvaluacion::NoRegistrada);
+
+        let mut con = comparacion("c2", "b2", "t2");
+        let mut ev = evaluacion_de("b2", "t2");
+        ev.estado = CodigoDeEvaluacion(CodigoDeEvaluacion::DATOS_INSUFICIENTES.to_string());
+        con.evaluacion = Some(ev);
+        match con.estado_de_la_evaluacion() {
+            EstadoDeLaEvaluacion::Soportada(e) => {
+                assert_eq!(e.estado.0, CodigoDeEvaluacion::DATOS_INSUFICIENTES)
+            }
+            otro => panic!("los datos insuficientes son una evaluación registrada: {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn una_evaluacion_con_codigos_desconocidos_se_conserva_sin_reinterpretar() {
+        let mut c = comparacion("c1", "b1", "t1");
+        let mut ev = evaluacion_de("b1", "t1");
+        ev.metodologia_interpretacion = VersionDeInterpretacion("v9" .to_string());
+        c.evaluacion = Some(ev);
+
+        // Se conserva íntegra en disco.
+        let json = serde_json::to_string(&c).unwrap();
+        let vuelta: SavedComparison = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            vuelta.evaluacion.as_ref().unwrap().metodologia_interpretacion.0,
+            "v9"
+        );
+        // Y no se presenta como si se entendiera.
+        assert_eq!(
+            c.estado_de_la_evaluacion(),
+            EstadoDeLaEvaluacion::NoSoportada(Box::new(c.evaluacion.clone().unwrap()))
+        );
+    }
+
+    #[test]
+    fn una_evaluacion_que_no_corresponde_a_sus_benchmarks_no_se_presenta_como_valida() {
+        let mut c = comparacion("c1", "b1", "t1");
+        // Los ids apuntan a otras grabaciones.
+        c.evaluacion = Some(evaluacion_de("otro", "distinto"));
+        assert!(matches!(
+            c.estado_de_la_evaluacion(),
+            EstadoDeLaEvaluacion::NoSoportada(_)
+        ));
+    }
+
+    #[test]
+    fn los_estados_y_versiones_desconocidos_no_se_convierten_en_conocidos() {
+        assert!(!CodigoDeEvaluacion("estado_del_futuro".to_string()).es_conocido());
+        assert!(CodigoDeEvaluacion(CodigoDeEvaluacion::MEJORA.to_string()).es_conocido());
+        assert!(!VersionDeInterpretacion("v9" .to_string()).es_soportada());
+        assert!(VersionDeInterpretacion("v1" .to_string()).es_soportada());
+    }
+
+    #[test]
+    fn añadir_una_comparacion_conserva_las_demas_registros() {
+        let dir = tmp_dir("b541-alta");
+        let ruta = dir.join("saved_comparisons.json");
+        let c1 = comparacion("c1", "b1", "t1");
+        escribir(
+            &ruta,
+            &format!(r#"{{"version":1,"comparisons":[{}]}}"#, serde_json::to_string(&c1).unwrap()),
+        );
+
+        let mut datos = try_load_saved_data_de(&ruta).expect("lectura");
+        datos.comparisons.push(comparacion("c2", "b2", "t2"));
+        save_saved_data_en(&ruta, &datos).expect("escritura");
+
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        assert_eq!(escrito["comparisons"].as_array().unwrap().len(), 2);
+        assert_eq!(escrito["comparisons"][0]["id"], "c1");
+        assert_eq!(escrito["comparisons"][1]["id"], "c2");
+    }
+
+    #[test]
+    fn los_motivos_no_se_validan_contra_el_vocabulario_de_estados() {
+        // Motivo y estado son vocabularios distintos: un motivo con código propio no
+        // convierte la evaluación en no soportada.
+        let mut c = comparacion("c1", "b1", "t1");
+        let mut ev = evaluacion_de("b1", "t1");
+        ev.motivos = vec![CodigoDeEvaluacion("motivo_de_una_version_futura".to_string())];
+        c.evaluacion = Some(ev);
+        assert!(matches!(
+            c.estado_de_la_evaluacion(),
+            EstadoDeLaEvaluacion::Soportada(_)
+        ));
+    }
+
+    /// La conservación es del JSON entero, no solo de los objetos de primer nivel: dentro
+    /// de arrays, de snapshots y de la propia evaluación también se conserva lo que esta
+    /// versión no entiende.
+    #[test]
+    fn los_campos_desconocidos_se_conservan_en_arrays_snapshots_y_evaluacion() {
+        let dir = tmp_dir("b541-arrays");
+        let ruta = dir.join("saved_comparisons.json");
+        let mut c = comparacion("c1", "b1", "t1");
+        c.evaluacion = Some(evaluacion_de("b1", "t1"));
+        let mut json = serde_json::json!({
+            "version": 2,
+            "comparisons": [serde_json::to_value(&c).unwrap()],
+        });
+        json["comparisons"][0]["evaluacion"]["futuro_en_evaluacion"] =
+            serde_json::json!({"x": [1, {"y": 2}]});
+        // Un objeto desconocido dentro del benchmark, con array y objeto anidados.
+        json["comparisons"][0]["comparison"]["baseline"]["campo_futuro"] =
+            serde_json::json!({ "lista": [ {"hondo": true} ] });
+        escribir(&ruta, &serde_json::to_string_pretty(&json).unwrap());
+
+        // Se borra OTRA comparación, de modo que c1 no se toque pero el archivo se reescriba.
+        let mut datos = try_load_saved_data_de(&ruta).expect("lectura");
+        let mut otra = comparacion("c2", "b2", "t2");
+        otra.evaluacion = None;
+        datos.comparisons.push(otra);
+        datos.comparisons.retain(|c| c.id != "c2");
+        save_saved_data_en(&ruta, &datos).expect("escritura");
+
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        let r = &escrito["comparisons"][0];
+        assert_eq!(r["evaluacion"]["futuro_en_evaluacion"]["x"][1]["y"], 2,
+            "campo futuro dentro de la evaluación");
+        assert_eq!(r["comparison"]["baseline"]["campo_futuro"]["lista"][0]["hondo"], true,
+            "campo futuro con array y objeto anidados, dentro del benchmark");
+    }
+
+    /// Una evaluación malformada no es «no registrada» ni convierte el archivo en corrupto:
+    /// el resto de la comparación se conserva y la evaluación se marca ilegible.
+    #[test]
+    fn una_evaluacion_malformada_no_arrastra_al_resto_del_archivo() {
+        let dir = tmp_dir("b541-malformada");
+        let ruta = dir.join("saved_comparisons.json");
+        let c = comparacion("c1", "b1", "t1");
+        let mut json = serde_json::json!({
+            "version": 2,
+            "comparisons": [serde_json::to_value(&c).unwrap()],
+        });
+        // `condiciones` debería ser un objeto: aquí es una cadena.
+        json["comparisons"][0]["evaluacion"] = serde_json::json!({
+            "metodologia_interpretacion": "v1",
+            "evaluada_en": "2026-01-02 11:00:00",
+            "referencia": {"id": "b1"},
+            "candidata": {"id": "t1"},
+            "estado": "mejora",
+            "confianza": "observada",
+            "condiciones": "esto no es un objeto"
+        });
+        escribir(&ruta, &serde_json::to_string_pretty(&json).unwrap());
+
+        let datos = try_load_saved_data_de(&ruta).expect("el archivo sigue siendo legible");
+        assert_eq!(datos.comparisons.len(), 1);
+        // Lo medido se conserva.
+        assert_eq!(datos.comparisons[0].id, "c1");
+        assert_eq!(datos.comparisons[0].game_name, "Palworld");
+        // Y la evaluación no se finge ausente.
+        assert!(datos.comparisons[0].evaluacion.is_none());
+        assert!(datos.comparisons[0].evaluacion_ilegible.is_some());
+        assert_eq!(
+            datos.comparisons[0].estado_de_la_evaluacion(),
+            EstadoDeLaEvaluacion::Malformada
+        );
+
+        // El JSON original se conserva íntegro al reescribir.
+        let datos2 = try_load_saved_data_de(&ruta).expect("relectura");
+        save_saved_data_en(&ruta, &datos2).expect("escritura");
+        let escrito: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ruta).unwrap()).unwrap();
+        assert_eq!(
+            escrito["comparisons"][0]["evaluacion"]["condiciones"],
+            "esto no es un objeto",
+            "la evaluación ilegible no se descarta ni se reescribe"
+        );
+    }
+
+    /// El apoyo estadístico del bloque A se puede **recuperar** desde los benchmarks
+    /// inmutables: la evaluación no necesita copiarlo entero ni inventarlo.
+    #[test]
+    fn el_apoyo_de_metricas_se_recupera_del_benchmark_guardado() {
+        let mut b = bench(1, "Palworld");
+        b.apoyo_metricas = Some(ApoyoDeMetricas {
+            fps_1_percent_low: Some(ApoyoDePercentil {
+                muestras: 498,
+                cola_nominal: 4.98,
+                observaciones_interpoladas: 2,
+                muestras_en_la_media: Some(5),
+            }),
+            fps_0_1_percent_low: Some(ApoyoDePercentil {
+                muestras: 498,
+                cola_nominal: 0.498,
+                observaciones_interpoladas: 2,
+                muestras_en_la_media: None,
+            }),
+            max_fps: None,
+            min_fps: None,
+            frame_time_1_percent_high: None,
+        });
+
+        // Ida y vuelta por JSON: es como llega desde disco.
+        let json = serde_json::to_string(&b).expect("serializar");
+        let vuelta: Benchmark = serde_json::from_str(&json).expect("deserializar");
+        let apoyo = vuelta.apoyo_metricas.expect("el apoyo consta");
+
+        let p1 = apoyo.fps_1_percent_low.expect("1% low");
+        assert_eq!(p1.muestras, 498);
+        assert_eq!(p1.cola_nominal, 4.98);
+        assert_eq!(p1.observaciones_interpoladas, 2);
+        assert_eq!(p1.muestras_en_la_media, Some(5));
+
+        let p01 = apoyo.fps_0_1_percent_low.expect("0,1% low");
+        // Un percentil puro no tiene muestras en la media: `None`, no 0.
+        assert_eq!(p01.muestras_en_la_media, None);
+
+        // Y las métricas que no aplican siguen siendo `None`, sin rellenarse en cero.
+        assert!(apoyo.max_fps.is_none());
+        assert!(apoyo.frame_time_1_percent_high.is_none());
+    }
+
+    /// `ApoyoDeMetrica` (por métrica) no puede llevar el apoyo de otra métrica.
+    #[test]
+    fn el_apoyo_por_metrica_no_mezcla_metricas() {
+        let a = ApoyoDeMetrica { percentil: None };
+        let json = serde_json::to_value(&a).expect("serializar");
+        // Sin apoyo de percentil no se escribe nada: no hay `percentil: null` falso.
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn un_registro_intacto_no_se_reconstruye() {
+        let dir = tmp_dir("b541-intacto");
+        let ruta = dir.join("saved_comparisons.json");
+        let c = comparacion("c1", "b1", "t1");
+        let original = serde_json::to_string_pretty(&c).unwrap();
+        escribir(&ruta, &format!(r#"{{"version":1,"comparisons":[{original}]}}"#));
+
+        let datos = try_load_saved_data_de(&ruta).expect("lectura");
+        let json = construir_json_de_comparaciones(&datos).expect("json");
+        // El registro se reescribe literal: mismo objeto que estaba en disco.
+        assert_eq!(
+            json["comparisons"][0],
+            serde_json::to_value(&c).unwrap(),
+            "sin cambios, se conserva el registro original"
+        );
+    }
+
+    #[test]
+    fn el_apoyo_estadistico_del_bloque_a_se_conserva_en_la_evaluacion() {
+        let mut ev = evaluacion_de("b1", "t1");
+        ev.metricas[0].apoyo_referencia = Some(ApoyoDeMetrica {
+            percentil: Some(ApoyoDePercentil {
+                muestras: 499,
+                cola_nominal: 4.99,
+                observaciones_interpoladas: 2,
+                muestras_en_la_media: Some(5),
+            }),
+        });
+        let json = serde_json::to_string(&ev).unwrap();
+        let vuelta: EvaluacionPersistida = serde_json::from_str(&json).unwrap();
+        let p = vuelta.metricas[0]
+            .apoyo_referencia
+            .as_ref()
+            .unwrap()
+            .percentil
+            .as_ref()
+            .unwrap();
+        assert_eq!(p.muestras, 499);
+        assert_eq!(p.observaciones_interpoladas, 2);
+        assert_eq!(p.muestras_en_la_media, Some(5));
+    }
+
+    #[test]
+    fn ausente_y_null_se_leen_igual_y_no_se_escribe_cero() {
+        // `Option` simple: ausente y null significan «no registrado».
+        let base = comparacion("c1", "b1", "t1");
+        let mut valor = serde_json::to_value(&base).unwrap();
+        valor.as_object_mut().unwrap().remove("evaluacion");
+        valor["evaluacion"] = serde_json::Value::Null;
+        let con_null: SavedComparison = serde_json::from_value(valor).expect("null");
+        assert!(con_null.evaluacion.is_none());
+
+        let mut valor = serde_json::to_value(&base).unwrap();
+        valor.as_object_mut().unwrap().remove("evaluacion");
+        let sin_campo: SavedComparison = serde_json::from_value(valor).expect("ausente");
+        assert!(sin_campo.evaluacion.is_none());
+
+        // Sin evaluación no aparece la clave al serializar (no se escribe `null`).
+        let json = serde_json::to_string(&sin_campo).unwrap();
+        assert!(!json.contains("evaluacion"), "json: {json}");
     }
 
     #[test]
@@ -6041,7 +7096,9 @@ mod tests {
         // variante que propaga el error en vez de tragárselo.
         for funcion in ["pub fn load_benchmarks()", "pub fn load_benchmarks_for_game(", "pub fn load_comparisons()"] {
             let inicio = fuente.find(funcion).unwrap_or_else(|| panic!("falta {funcion}"));
-            let cuerpo = &fuente[inicio..(inicio + 700).min(fuente.len())];
+            // Ventana amplia: la función creció al clasificar la evaluación, y lo que se
+            // comprueba (que propaga el error) sigue existiendo dentro de ella.
+            let cuerpo = &fuente[inicio..(inicio + 2000).min(fuente.len())];
             assert!(
                 cuerpo.contains("cargar_benchmarks()?") || cuerpo.contains(".map_err(|e| e.mensaje("),
                 "{funcion} debe propagar el error de lectura"
@@ -6083,6 +7140,8 @@ mod tests {
                 within_noise: false,
                 comandos_iguales: Some(true),
             },
+            evaluacion: None,
+            evaluacion_ilegible: None,
         };
 
         // El historial queda vacío (como tras «borrar todo»), pero la prueba guardada
@@ -6100,6 +7159,8 @@ mod tests {
         let datos = SavedComparisonsData {
             version: Some(COMPARISONS_SCHEMA_VERSION),
             comparisons: vec![guardada],
+            crudos: serde_json::Map::new(),
+            crudo_raiz: serde_json::Map::new(),
         };
         escribir_atomico(&cmp_path, &serde_json::to_string(&datos).unwrap()).unwrap();
 
@@ -6170,7 +7231,9 @@ mod tests {
                 "{funcion} debe usar su cerrojo"
             );
         }
-        assert_eq!(COMPARISONS_SCHEMA_VERSION, 1);
+        // 5.4.1.B: `saved_comparisons.json` pasa a v2 (añade `evaluacion`). El esquema de
+        // benchmarks no cambia: son dos archivos con ciclos distintos.
+        assert_eq!(COMPARISONS_SCHEMA_VERSION, 2);
         assert_eq!(BENCHMARKS_SCHEMA_VERSION, 1);
     }
 
@@ -6185,6 +7248,45 @@ mod tests {
     /// benchmarks, porque dos hilos leerían la misma lista y el segundo pisaría al primero.
     /// Esta prueba ejercita el ciclo completo bajo el mismo cerrojo que usan las rutas
     /// reales.
+    /// La escritura atómica evita un archivo a medias, **no** evita perder
+    /// actualizaciones: dos hilos que leen lo mismo y escriben por turnos se pisan. Lo que
+    /// lo evita es el cerrojo, y aquí se comprueba que cubre el ciclo entero.
+    #[test]
+    fn la_concurrencia_intraproceso_no_pierde_comparaciones() {
+        let dir = tmp_dir("b541-concurrencia");
+        let ruta = dir.join("saved_comparisons.json");
+        escribir(&ruta, r#"{"version":1,"comparisons":[]}"#);
+        const HILOS: usize = 30;
+
+        let mut handles = Vec::new();
+        for i in 0..HILOS {
+            let ruta = ruta.clone();
+            handles.push(std::thread::spawn(move || {
+                // Mismo cerrojo que `save_comparison`: todo el ciclo leer-modificar-escribir.
+                let _t = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
+                let mut d = try_load_saved_data_de(&ruta).expect("lectura");
+                let mut c = comparacion(&format!("conc-{i}"), &format!("b{i}"), &format!("t{i}"));
+                c.evaluacion = Some(evaluacion_de(&format!("b{i}"), &format!("t{i}")));
+                d.comparisons.push(c);
+                save_saved_data_en(&ruta, &d).expect("escritura");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_data = try_load_saved_data_de(&ruta).expect("lectura final");
+        assert_eq!(
+            final_data.comparisons.len(),
+            HILOS,
+            "sin cerrojo se perderían actualizaciones: cada hilo relee y reescribe el archivo"
+        );
+        // Y ninguna se ha quedado sin su evaluación por una escritura pisada.
+        assert!(final_data.comparisons.iter().all(|c| c.evaluacion.is_some()));
+        // El primero en escribir forzó v2, y ya no baja.
+        assert_eq!(final_data.version, Some(2));
+    }
+
     #[test]
     fn s51_concurrencia_real_no_pierde_ni_duplica_benchmarks() {
         let dir = tmp_dir("s51-concurrencia");
@@ -6747,6 +7849,8 @@ mod tests {
             after_fps: 63.0,
             fps_change_percent: 5.0,
             comparison: comparacion,
+            evaluacion: None,
+            evaluacion_ilegible: None,
         };
 
         let json = serde_json::to_string(&guardada).unwrap();
@@ -7546,6 +8650,8 @@ mod pruebas_aislamiento {
                 within_noise: false,
                 comandos_iguales: None,
             },
+            evaluacion: None,
+            evaluacion_ilegible: None,
         };
         // Una de Palworld (debe sobrevivir) y una de Deskrawl (debe caer).
         let mut comps = vec![

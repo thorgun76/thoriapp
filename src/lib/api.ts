@@ -82,6 +82,89 @@ export interface SavedComparison {
   after_fps: number;
   fps_change_percent: number;
   comparison: BenchmarkComparison;
+  /** Evaluación registrada al guardar. Ausente = no registrada (comparación histórica). */
+  evaluacion?: EvaluacionPersistida | null;
+  /**
+   * Clasificación calculada por el backend al leer. Rust es la fuente de verdad: el
+   * frontend la presenta, no la deduce.
+   */
+  estado_de_la_evaluacion?: EstadoDeLaEvaluacionLeida;
+}
+
+/**
+ * Versión de la metodología de interpretación. Texto, no unión cerrada: un valor de una
+ * versión futura (`v9`) tiene que poder conservarse tal cual.
+ */
+export type VersionDeInterpretacion = string;
+
+/** Estado de una evaluación. Texto por el mismo motivo. */
+export type CodigoDeEvaluacion = string;
+
+/** Cómo se leyó la evaluación guardada. La decide el backend, no el frontend. */
+export type EstadoDeLaEvaluacionLeida =
+  | 'no_registrada'
+  | 'soportada'
+  | 'no_soportada'
+  | 'malformada';
+
+export type DireccionDeCambio = 'sube' | 'baja' | 'igual' | 'no_consta';
+
+export type PreferenciaDeMetrica =
+  | 'favor_de_candidata'
+  | 'favor_de_referencia'
+  | 'indistinto'
+  | 'no_establecida';
+
+export type CompatibilidadMetodologica = 'establecida' | 'no_establecida';
+
+export interface IdDeBenchmark {
+  id: string;
+}
+
+/** Apoyo estadístico de una grabación en una métrica (bloque A). */
+export interface ApoyoDeMetrica {
+  percentil?: {
+    muestras: number;
+    cola_nominal: number;
+    observaciones_interpoladas: number;
+    muestras_en_la_media?: number | null;
+  } | null;
+}
+
+export interface EvaluacionDeMetrica {
+  clave: string;
+  antes?: number | null;
+  despues?: number | null;
+  diferencia?: number | null;
+  diferencia_pct?: number | null;
+  direccion: DireccionDeCambio;
+  preferencia: PreferenciaDeMetrica;
+  confianza?: CodigoDeEvaluacion | null;
+  apoyo_referencia?: ApoyoDeMetrica | null;
+  apoyo_candidata?: ApoyoDeMetrica | null;
+  motivos?: CodigoDeEvaluacion[];
+  limitaciones?: CodigoDeEvaluacion[];
+}
+
+export interface CondicionesDeComparacion {
+  compatibilidad_metodologica: CompatibilidadMetodologica;
+  margen_porcentaje?: number | null;
+  ruido_combinado_porcentaje?: number | null;
+  comandos_iguales?: boolean | null;
+  variable_evaluada?: { codigo: string } | null;
+}
+
+export interface EvaluacionPersistida {
+  metodologia_interpretacion: VersionDeInterpretacion;
+  evaluada_en: string;
+  referencia: IdDeBenchmark;
+  candidata: IdDeBenchmark;
+  estado: CodigoDeEvaluacion;
+  confianza: CodigoDeEvaluacion;
+  metricas?: EvaluacionDeMetrica[];
+  motivos?: CodigoDeEvaluacion[];
+  limitaciones?: CodigoDeEvaluacion[];
+  condiciones: CondicionesDeComparacion;
 }
 
 /** update_profile reutiliza los mismos campos salvo appid y gameName, que no cambia. */

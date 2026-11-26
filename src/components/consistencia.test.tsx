@@ -10,10 +10,12 @@ afterEach(cleanup);
 /**
  * Consistencia entre las dos pantallas que muestran un resultado.
  *
- * Antes había dos caminos: la pantalla de Benchmarks usaba `buildVerdict` (pesos 3/2/1) y
- * la de pruebas guardadas usaba `interpretar()`. Podían dar veredictos distintos para los
- * mismos datos. Ahora las dos usan `interpretar()`, y esto lo comprueba de verdad: se
- * renderizan las dos y se compara el texto que ve el usuario, no solo la función.
+ * Ya **no** tienen que decir lo mismo, y esa es la corrección: la pantalla de Benchmarks
+ * interpreta una comparación recién hecha con las reglas de hoy, mientras que la de pruebas
+ * guardadas muestra el veredicto que se **registró** al guardarla. Si se interpretara otra
+ * vez, una prueba antigua cambiaría de conclusión al actualizar la app.
+ *
+ * Lo que sí deben compartir: las cifras medidas, y no inventar un ganador que no consta.
  */
 
 function bench(over: Partial<Benchmark> = {}): Benchmark {
@@ -76,17 +78,41 @@ const CASOS: Array<[string, ReturnType<typeof comparison>]> = [
 ];
 
 describe('las dos pantallas dan el mismo veredicto', () => {
-  it.each(CASOS)('%s: el titular del cambio aparece en ambas', (_nombre, c) => {
-    // El titular ya no es «Gana “X”» (se leía al revés con el color del resultado), sino
-    // la frase sobre el cambio. Las dos pantallas usan el mismo helper.
+  it.each(CASOS)('%s: la actual interpreta; la guardada NO', (_nombre, c) => {
+    // La pantalla de lo recién medido sigue usando el intérprete.
     const esperado = titularDelCambio(interpretar(c), etiquetasDe(c));
-
     const { unmount } = render(<ComparisonResultCard comparison={c} />);
     expect(screen.getByText(esperado)).toBeDefined();
     unmount();
 
-    render(<SavedComparisonDetail comparison={c} {...propsVista} />);
-    expect(screen.getByText(esperado)).toBeDefined();
+    // La guardada, sin evaluación registrada, dice justamente eso: no hay veredicto.
+    const { container } = render(<SavedComparisonDetail comparison={c} {...propsVista} />);
+    expect(container.textContent).toContain('Evaluación original no registrada');
+    expect(container.textContent).not.toContain(esperado);
+  });
+
+  it('una guardada CON evaluación muestra la evaluación registrada, no una nueva', () => {
+    // El intérprete diría «mejora» con estos datos; la evaluación guardada dice «empeora».
+    // Debe mandar la guardada.
+    const c = comparison({}, { avg_fps: 75, fps_1_percent_low: 55, fps_0_1_percent_low: 45 });
+    expect(interpretar(c).estado).toBe('mejora');
+
+    const evaluacion = {
+      metodologia_interpretacion: 'v1',
+      evaluada_en: '2026-01-02 11:00:00',
+      referencia: { id: c.baseline.id },
+      candidata: { id: c.test.id },
+      estado: 'empeora',
+      confianza: 'observada',
+      condiciones: { compatibilidad_metodologica: 'establecida' as const },
+      estado_de_la_evaluacion: 'soportada' as const,
+    };
+
+    const { container } = render(
+      <SavedComparisonDetail comparison={c} evaluacion={evaluacion} {...propsVista} />
+    );
+    expect(container.textContent).toContain('Empeora');
+    expect(container.textContent).not.toContain('Evaluación original no registrada');
   });
 
   it.each(CASOS)('%s: ninguna pantalla inventa un ganador', (_nombre, c) => {
@@ -162,12 +188,31 @@ describe('ninguna pantalla promete más de lo que los datos permiten', () => {
   });
 
   it('con dos grabaciones la confianza nunca pasa de provisional', () => {
-    // La vista guardada lo escribe en el chip; la de Benchmarks comparte intérprete.
+    // El chip de la vista guardada sale de la confianza **registrada**, no de una
+    // interpretación nueva. Sin evaluación registrada no hay chip: no hay nada que
+    // prometer.
     const c = CASOS[0][1];
     expect(interpretar(c).confianza).toBe('provisional');
-    const { container } = render(
+
+    const { container: sinEval } = render(
       <SavedComparisonDetail comparison={c} {...propsVista} />
     );
-    expect(container.textContent ?? '').toContain(interpretar(c).chipConfianza);
+    expect(sinEval.textContent).not.toContain(interpretar(c).chipConfianza);
+
+    const evaluacion = {
+      metodologia_interpretacion: 'v1',
+      evaluada_en: '2026-01-02 11:00:00',
+      referencia: { id: c.baseline.id },
+      candidata: { id: c.test.id },
+      estado: 'mejora',
+      confianza: 'provisional',
+      condiciones: { compatibilidad_metodologica: 'establecida' as const },
+      estado_de_la_evaluacion: 'soportada' as const,
+    };
+    const { container } = render(
+      <SavedComparisonDetail comparison={c} evaluacion={evaluacion} {...propsVista} />
+    );
+    // La confianza guardada es la que se muestra.
+    expect(container.textContent).toContain('Provisional');
   });
 });

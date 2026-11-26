@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { AlertTriangle, BarChart3, Trash2, ChevronRight } from 'lucide-react';
-import { interpretar, nombreLegible, etiquetasDe, titularDelCambio } from '../lib/interpretacion';
+import { nombreLegible, etiquetasDe } from '../lib/interpretacion';
+import { estadoDeEvaluacionGuardada } from '../lib/evaluacionGuardada';
 import { formatTimestamp } from '../lib/format';
 import { PruebaN } from './PruebaN';
 import { SavedComparisonDetail } from './SavedComparisonDetail';
@@ -18,13 +19,46 @@ const testDateOf = (c: SavedComparison) => c.comparison.test.timestamp;
 
 const normGame = (n: string) => n.trim().toLowerCase();
 
-/** Color del título del resultado. Mismo vocabulario que el resto de la app. */
-const ESTADO_TEXTO: Record<ReturnType<typeof interpretar>['estado'], string> = {
+const ESTADO_TEXTO = {
   mejora: 'text-[var(--compatible)]',
   empeora: 'text-[var(--error)]',
   mixto: 'text-[var(--caution)]',
   sin_cambio: 'text-[var(--text-muted)]',
   datos_insuficientes: 'text-[var(--text-dim)]',
+  solo_descriptiva: 'text-[var(--text-muted)]',
+} as const;
+
+/**
+ * Cómo se resume una prueba guardada en el listado.
+ *
+ * Una prueba guardada **no se reinterpreta**. Si se guardó con evaluación, manda lo que
+ * se guardó; si no, se dice que no se registró y se enseña la variación de FPS, que es un
+ * dato medido. Pintar aquí un veredicto recalculado con las reglas de hoy sería presentar
+ * una conclusión nueva como si fuera la original.
+ */
+function resumenDeGuardada(c: SavedComparison): { texto: string; color: string } {
+  const estado = estadoDeEvaluacionGuardada(c);
+  if (estado === 'no_registrada') {
+    return { texto: 'Sin evaluación registrada', color: 'text-[var(--text-muted)]' };
+  }
+  if (estado === 'no_soportada') {
+    return { texto: 'Evaluación no compatible', color: 'text-[var(--text-muted)]' };
+  }
+  const ev = c.evaluacion!;
+  const clave = (ev.estado === 'solo_descriptiva' ? 'solo_descriptiva' : ev.estado) as
+    | keyof typeof ESTADO_TEXTO;
+  const texto = TEXTOS_ESTADO_GUARDADO[ev.estado] ?? `Evaluación registrada (${ev.estado})`;
+  return { texto, color: ESTADO_TEXTO[clave] ?? 'text-[var(--text-muted)]' };
+}
+
+/** Etiqueta de cada estado guardado. Vocabulario cerrado; lo desconocido se ve crudo. */
+const TEXTOS_ESTADO_GUARDADO: Record<string, string> = {
+  mejora: 'Mejora',
+  empeora: 'Empeora',
+  mixto: 'Resultado mixto',
+  sin_cambio: 'Sin cambio',
+  datos_insuficientes: 'Datos insuficientes',
+  solo_descriptiva: 'Solo descriptivo',
 };
 
 /** «Mis pruebas»: las comparaciones guardadas, de la más reciente a la más antigua. */
@@ -113,6 +147,7 @@ export function DashboardView() {
       <>
         <SavedComparisonDetail
           comparison={selected.comparison}
+          evaluacion={selected.evaluacion}
           onBack={() => setSelectedId(null)}
           onDelete={() => askDeleteOne(selected)}
           onCopy={copyText}
@@ -205,10 +240,10 @@ export function DashboardView() {
         </button>
       </div>
 
-      {/* Lista. Una fila por comparación; el resultado lo decide el intérprete, no la
-          resta de FPS. El nombre del juego solo se repite cuando cambia respecto a la
-          fila de arriba: con varias pruebas seguidas del mismo juego, repetirlo en cada
-          línea era la mitad del texto de la pantalla. */}
+      {/* Lista. Una fila por comparación. El veredicto, si existe, es el **guardado**: una
+          prueba antigua no se reinterpreta con las reglas de hoy. El nombre del juego solo
+          se repite cuando cambia respecto a la fila de arriba: con varias pruebas seguidas
+          del mismo juego, repetirlo en cada línea era la mitad del texto de la pantalla. */}
       <motion.ul
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
@@ -216,9 +251,9 @@ export function DashboardView() {
         className="rounded-xl bg-[var(--surface)] border border-[var(--border)] divide-y divide-[var(--border)] overflow-hidden"
       >
         {sorted.map((test, i) => {
-          const r = interpretar(test.comparison);
           const et = etiquetasDe(test.comparison);
-          const titulo = titularDelCambio(r, et);
+          const resumen = resumenDeGuardada(test);
+          const titulo = resumen.texto;
           const mismoJuego =
             i > 0 && normGame(sorted[i - 1].game_name) === normGame(test.game_name);
           const pctCambio = test.fps_change_percent;
@@ -266,11 +301,11 @@ export function DashboardView() {
                 {/* Resultado: variación de FPS y titular del intérprete. */}
                 <div className="flex items-center gap-3 shrink-0">
                   <div className="text-right max-w-[13rem]">
-                    <p className={`text-sm font-bold font-mono tabular-nums ${ESTADO_TEXTO[r.estado]}`}>
+                    <p className={`text-sm font-bold font-mono tabular-nums ${resumen.color}`}>
                       {pctCambio > 0 ? '+' : ''}
                       {pctCambio.toFixed(1)}%
                     </p>
-                    <p className={`text-xs font-semibold truncate ${ESTADO_TEXTO[r.estado]}`}>{titulo}</p>
+                    <p className={`text-xs font-semibold truncate ${resumen.color}`}>{titulo}</p>
                   </div>
 
                   <button

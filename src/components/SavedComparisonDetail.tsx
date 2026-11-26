@@ -6,12 +6,18 @@ import {
 } from 'lucide-react';
 import type { Benchmark, BenchmarkComparison } from '../lib/types';
 import {
-  interpretar, nombreLegible, etiquetasDe, titularDelCambio, mejorObservada,
+  nombreLegible, etiquetasDe,
   type Etiquetas,
-  type Interpretacion, type MetricaInterpretada, type Tono,
+  type CambioMetrica, type MetricaInterpretada, type Tono,
 } from '../lib/interpretacion';
+import type { EvaluacionPersistida } from '../lib/api';
+import {
+  veredictoGuardado, ganadorDeEstado, metricasGuardadas,
+  textoDeDireccion, textoDePreferencia, textoDeCompatibilidad,
+  type VeredictoGuardado,
+} from '../lib/evaluacionGuardada';
 import { estabilidadDe, estabilidadLabel } from '../lib/estabilidad';
-import { textoDeDuracion } from '../lib/duracion';
+import { textoDeDuracion, duraMenosDe } from '../lib/duracion';
 import { GraficoTemporal } from './GraficoTemporal';
 import { PruebaN } from './PruebaN';
 import { InstantaneaCard } from './InstantaneaCard';
@@ -353,6 +359,210 @@ function Participante({
 }
 
 /**
+ * Traduce el estado guardado a lo que se pinta. **No calcula nada**: elige textos y tono.
+ *
+ * Que el veredicto no se registre no es un error ni un vacío rellenable: es un hecho sobre
+ * el archivo. Se dice tal cual, sin inventar un «mejora» que entonces no constaba.
+ */
+function presentarVeredicto(v: VeredictoGuardado): {
+  tono: Tono;
+  titulo: string;
+  explicacion: string;
+  chip: string | null;
+  chipTitulo: string;
+  sinGanadora: string;
+  avisos: string[];
+} {
+  switch (v.tipo) {
+    case 'no_registrada':
+      return {
+        tono: 'neutro',
+        titulo: 'Evaluación original no registrada',
+        explicacion:
+          'Esta prueba se guardó antes de que Thoriapp registrara cómo la evaluó. Los datos ' +
+          'medidos y sus diferencias están completos; lo que no consta es la conclusión que se ' +
+          'mostró entonces, y no se reconstruye para no atribuirle un veredicto que no tuvo.',
+        chip: null,
+        chipTitulo: '',
+        sinGanadora: 'Sin evaluación registrada no consta qué grabación rindió mejor.',
+        avisos: [],
+      };
+    case 'no_soportada':
+      return {
+        tono: 'neutro',
+        titulo: 'Evaluación no compatible con esta versión',
+        explicacion:
+          'La evaluación guardada usa una versión de metodología que esta versión de Thoriapp ' +
+          `no sabe leer (${v.motivo}). Se conserva intacta; los datos medidos se muestran abajo, ` +
+          'sin reinterpretarlos.',
+        chip: 'No compatible',
+        chipTitulo: 'Guardada con una metodología de interpretación posterior a esta versión.',
+        sinGanadora: 'No consta qué grabación rindió mejor: la evaluación no es legible aquí.',
+        avisos: [],
+      };
+    case 'malformada':
+      return {
+        tono: 'neutro',
+        titulo: 'Evaluación no legible',
+        explicacion:
+          'Esta prueba guarda una evaluación, pero su formato no es el que esta versión ' +
+          'espera. El contenido original se conserva intacto; los datos medidos se muestran ' +
+          'abajo sin reinterpretarlos.',
+        chip: 'No legible',
+        chipTitulo: 'Hay una evaluación guardada, pero no se puede leer aquí.',
+        sinGanadora: 'No consta qué grabación rindió mejor: la evaluación no es legible.',
+        avisos: [],
+      };
+    case 'datos_insuficientes':
+      return {
+        tono: 'neutro',
+        titulo: 'Evaluación registrada: datos insuficientes',
+        explicacion:
+          'La evaluación sí se registró, y su conclusión fue que las grabaciones no bastaban ' +
+          'para decidir. Eso no es lo mismo que no tener evaluación: aquí hubo una y dijo esto.',
+        chip: 'Datos insuficientes',
+        chipTitulo: 'La evaluación se registró y concluyó que no había datos suficientes.',
+        sinGanadora: 'No hubo datos suficientes para decir cuál rindió mejor.',
+        avisos: [],
+      };
+    case 'solo_descriptiva':
+      return {
+        tono: 'neutro',
+        titulo: 'Evaluación descriptiva',
+        explicacion:
+          'Las metodologías de cálculo de las dos grabaciones no son comparables, así que la ' +
+          'evaluación registrada describe las diferencias sin concluir cuál es mejor.',
+        chip: 'Descriptiva',
+        chipTitulo: 'Metodologías no comparables: la evaluación no emite veredicto.',
+        sinGanadora: 'Sin comparabilidad metodológica no se puede decir cuál rindió mejor.',
+        avisos: [],
+      };
+    case 'veredicto': {
+      const e = v.evaluacion;
+      const t = TEXTOS_GUARDADOS[e.estado] ?? {
+        titulo: `Evaluación registrada (${e.estado})`,
+        tono: 'neutro' as Tono,
+        explicacion: 'El estado guardado usa un código que esta versión no conoce.',
+        sinGanadora: 'No consta qué grabación rindió mejor.',
+      };
+      return {
+        tono: t.tono,
+        titulo: t.titulo,
+        explicacion: t.explicacion,
+        chip: e.confianza ? CHIP_CONFIANZA[e.confianza] ?? e.confianza : null,
+        chipTitulo:
+          'Esta prueba compara dos grabaciones. Para confirmar una mejora hacen falta varias ' +
+          'grabaciones por configuración.',
+        sinGanadora: t.sinGanadora,
+        avisos: [],
+      };
+    }
+  }
+}
+
+/**
+ * Por debajo de esta duración el 0,1 % low se apoya en muy pocas muestras.
+ *
+ * Es el mismo `MIN_STEADY_SECONDS` del backend; aquí solo decide si se enseña el aviso de
+ * cautela, no si una comparación es válida.
+ */
+const MIN_GRABACION_CORTA_S = 20;
+
+/**
+ * Construye una métrica **descriptiva** a partir de dos cifras medidas.
+ *
+ * `cambio` aquí solo dice si la cifra sube o baja; **no** es un veredicto (subir FPS es
+ * mejor, subir frametime no, y eso lo decide la preferencia de cada métrica, no esta
+ * función). Sirve para pintar la tarjeta con el dato que hay, sin interpolar nada.
+ */
+function metricaMostrada(
+  clave: MetricaInterpretada['clave'],
+  etiqueta: string,
+  antes: number | null,
+  despues: number | null
+): MetricaInterpretada {
+  const diferencia =
+    antes != null && despues != null ? despues - antes : null;
+  const diferenciaPct =
+    diferencia != null && antes != null && antes !== 0
+      ? (diferencia / Math.abs(antes)) * 100
+      : null;
+  const cambio: CambioMetrica =
+    diferencia == null
+      ? 'sin_datos'
+      : diferencia > 0
+      ? 'mejor'
+      : diferencia < 0
+      ? 'peor'
+      : 'sin_cambio';
+  return {
+    clave,
+    etiqueta,
+    antes,
+    despues,
+    diferencia,
+    diferenciaPct,
+    diferenciaPuntos: null,
+    cambio,
+    resumen: diferencia == null ? 'Sin datos' : `${diferencia >= 0 ? '+' : ''}${diferencia.toFixed(1)}`,
+  };
+}
+
+/**
+ * Margen con el que se comparó.
+ *
+ * Se muestra el margen combinado **guardado**. Si no consta (pruebas antiguas), se dice
+ * que no consta: no se rellena con el margen vigente, que sería atribuirle a la prueba un
+ * criterio que no se aplicó entonces.
+ */
+function textoDeMargen(c: BenchmarkComparison): string {
+  const n = c.noise_percent;
+  if (n == null || !Number.isFinite(n)) return 'no guardado en esta prueba';
+  return `±${n.toFixed(1)} % (ruido combinado de las dos grabaciones)`;
+}
+
+/** Textos de los estados guardados. Solo presentación: no altera el dato. */
+const TEXTOS_GUARDADOS: Record<
+  string,
+  { titulo: string; tono: Tono; explicacion: string; sinGanadora: string }
+> = {
+  mejora: {
+    titulo: 'Mejora',
+    tono: 'bien',
+    explicacion:
+      'La evaluación guardada concluyó que la grabación nueva rinde mejor que la anterior.',
+    sinGanadora: '',
+  },
+  empeora: {
+    titulo: 'Empeora',
+    tono: 'mal',
+    explicacion:
+      'La evaluación guardada concluyó que la grabación nueva rinde peor que la anterior.',
+    sinGanadora: '',
+  },
+  mixto: {
+    titulo: 'Resultado mixto',
+    tono: 'neutro',
+    explicacion: 'La evaluación guardada concluyó que gana una en un aspecto y la otra en otro.',
+    sinGanadora: 'Gana una prueba en un aspecto y la otra en otro: no hay un único mejor resultado.',
+  },
+  sin_cambio: {
+    titulo: 'Sin cambio',
+    tono: 'neutro',
+    explicacion: 'La evaluación guardada concluyó que la diferencia entra dentro del margen.',
+    sinGanadora: 'Ninguna de las dos destaca: la diferencia entra dentro del margen.',
+  },
+};
+
+/** Etiqueta de la confianza guardada. Un código desconocido se muestra crudo. */
+const CHIP_CONFIANZA: Record<string, string> = {
+  provisional: 'Provisional',
+  observada: 'Observado',
+  no_concluyente: 'No concluyente',
+  insuficiente: 'Insuficiente',
+};
+
+/**
  * Panel principal: las dos pruebas enfrentadas y, debajo, la conclusión.
  *
  * Es un solo componente a propósito: separar el VS y el resultado en dos tarjetas hacía
@@ -361,29 +571,33 @@ function Participante({
  */
 function PanelVS({
   comparison,
-  r,
+  veredicto,
   etiquetas,
   onCopy,
 }: {
   comparison: BenchmarkComparison;
-  r: Interpretacion;
+  veredicto: VeredictoGuardado;
   etiquetas: Etiquetas;
   onCopy: (t: string) => void;
 }) {
-  const style = TONO[r.tono];
+  // Presentación de lo guardado. No se recalcula ningún veredicto: `estado` es el que se
+  // registró al guardar, y si no se registró se dice eso en vez de deducirlo ahora.
+  const vista = presentarVeredicto(veredicto);
+  const style = TONO[vista.tono];
 
-  const mejor = mejorObservada(r, etiquetas);
-
-  // La fiabilidad del 0,1 % low se explica una sola vez, en la caja técnica de abajo
-  // (`low01.aviso` es exactamente ese texto). Filtrarlo por identidad es fiable porque
-  // el intérprete guarda el mismo string que mete en `avisos`.
-  const avisosDelVeredicto = r.avisos.filter((a) => a !== r.low01.aviso);
+  const ganador = veredicto.tipo === 'veredicto'
+    ? ganadorDeEstado(veredicto.evaluacion.estado)
+    : 'ninguno';
+  const mejor = ganador === 'ninguno'
+    ? null
+    : { lado: ganador, nombre: ganador === 'antes' ? etiquetas.antes : etiquetas.despues };
 
   const baseFps = comparison.baseline.avg_fps;
   const testFps = comparison.test.avg_fps;
 
-  // «Peor» solo cuando el cambio empeora de verdad: sin ganadora no se insulta a nadie.
-  const peor = r.ganador === 'antes';
+  // «Peor» solo cuando el veredicto **guardado** dice que empeora: sin ganadora no se
+  // insulta a nadie.
+  const peor = ganador === 'antes';
 
   return (
     <section
@@ -422,17 +636,19 @@ function PanelVS({
         <div className={`mt-4 pt-4 border-t border-[var(--border)] rounded-xl`}>
           <div className="flex flex-wrap items-center gap-2 mb-1">
             <h3 id="resultado-principal" className={`text-lg font-bold ${style.texto}`}>
-              {titularDelCambio(r, etiquetas)}
+              {vista.titulo}
             </h3>
-            <span
-              className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[var(--surface)] text-[var(--text-muted)] border border-[var(--border)]"
-              title="Esta prueba compara dos grabaciones. Para confirmar una mejora hacen falta varias grabaciones por configuración."
-            >
-              {r.chipConfianza}
-            </span>
+            {vista.chip && (
+              <span
+                className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[var(--surface)] text-[var(--text-muted)] border border-[var(--border)]"
+                title={vista.chipTitulo}
+              >
+                {vista.chip}
+              </span>
+            )}
           </div>
 
-          <p className="text-sm text-[var(--text)] leading-relaxed">{r.explicacion}</p>
+          <p className="text-sm text-[var(--text)] leading-relaxed">{vista.explicacion}</p>
 
           {/* Mejor resultado observado: es lo único que se puede afirmar con una sola
               comparación. Sin ganadora clara no se pinta. */}
@@ -447,20 +663,16 @@ function PanelVS({
             <p className="mt-2 text-sm font-semibold text-[var(--text-muted)] flex items-start gap-1.5">
               <Scale className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
               <span>
-                {r.estado === 'mixto'
-                  ? 'Gana una prueba en un aspecto y la otra en otro: no hay un único mejor resultado.'
-                  : r.estado === 'sin_cambio'
-                  ? 'Ninguna de las dos destaca: la diferencia entra dentro del margen.'
-                  : 'No hay datos suficientes para decir cuál rindió mejor.'}
+                {vista.sinGanadora}
               </span>
             </p>
           )}
 
           {/* El aviso de fiabilidad del 0,1 % low se excluye aquí porque ya se explica
               en la caja técnica de abajo: el mismo aviso dos veces en una pantalla es ruido. */}
-          {avisosDelVeredicto.length > 0 && (
+          {vista.avisos.length > 0 && (
             <ul className="mt-3 pt-3 border-t border-[var(--border)] space-y-1.5">
-              {avisosDelVeredicto.map((a) => (
+              {vista.avisos.map((a) => (
                 <li key={a} className="text-xs text-[var(--caution)] font-medium flex items-start gap-2">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
                   <span>{a}</span>
@@ -734,13 +946,66 @@ function formatFull(dateString: string): string {
   });
 }
 
+/**
+ * Las métricas **tal como se guardaron** en la evaluación.
+ *
+ * Ni una cifra se recalcula: `antes`, `despues` y `diferencia` vienen del registro. La
+ * dirección (sube/baja) y la preferencia (qué lado es mejor) se muestran por separado
+ * porque no son lo mismo: subir FPS es mejor y subir frametime no.
+ */
+function TablaMetricasGuardadas({ evaluacion }: { evaluacion: EvaluacionPersistida }) {
+  const filas = metricasGuardadas(evaluacion);
+  if (filas.length === 0) return null;
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg)] overflow-hidden">
+      <div className="px-3 py-2 border-b border-[var(--border)]">
+        <h4 className="text-xs font-bold text-[var(--text)]">
+          Métricas tal como se evaluaron
+        </h4>
+        <p className="text-[11px] text-[var(--text-muted)]">
+          {textoDeCompatibilidad(evaluacion.condiciones?.compatibilidad_metodologica ?? '')}
+        </p>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-[var(--text-muted)]">
+            <th className="text-left px-3 py-1.5 font-semibold">Métrica</th>
+            <th className="text-right px-2 py-1.5 font-semibold">Antes</th>
+            <th className="text-right px-2 py-1.5 font-semibold">Después</th>
+            <th className="text-right px-2 py-1.5 font-semibold">Diferencia</th>
+            <th className="text-left px-3 py-1.5 font-semibold">Dirección</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-[var(--border)]">
+          {filas.map((m) => (
+            <tr key={m.clave}>
+              <td className="px-3 py-1.5 text-[var(--text)]">{m.clave}</td>
+              <td className="px-2 py-1.5 text-right font-mono tabular-nums">{f(m.antes)}</td>
+              <td className="px-2 py-1.5 text-right font-mono tabular-nums">{f(m.despues)}</td>
+              <td className="px-2 py-1.5 text-right font-mono tabular-nums">
+                {m.diferenciaPct == null ? '—' : `${m.diferenciaPct >= 0 ? '+' : ''}${f(m.diferenciaPct)} %`}
+              </td>
+              <td className="px-3 py-1.5 text-[var(--text-muted)]">
+                {textoDeDireccion(m.direccion)} · {textoDePreferencia(m.preferencia)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function SavedComparisonDetail({
   comparison,
+  evaluacion,
   onBack,
   onDelete,
   onCopy,
 }: {
   comparison: BenchmarkComparison;
+  evaluacion?: EvaluacionPersistida | null;
   onBack: () => void;
   onDelete: () => void;
   onCopy: (t: string) => void;
@@ -750,10 +1015,22 @@ export function SavedComparisonDetail({
   const [showComandos, setShowComandos] = useState(false);
   // Las etiquetas dependen solo de las dos grabaciones, así que se pueden memoizar aparte.
   const etiquetas = useMemo(() => etiquetasDe(comparison), [comparison]);
-  const r = useMemo(() => interpretar(comparison, etiquetas), [comparison, etiquetas]);
+  // El veredicto es el **guardado**, no uno recalculado ahora. `interpretar()` no se llama
+  // aquí a propósito: rehacerlo con las reglas de hoy y presentarlo como el original sería
+  // atribuirle a una prueba antigua una conclusión que no tuvo.
+  const veredicto = useMemo(() => veredictoGuardado({ evaluacion }), [evaluacion]);
 
-  const avg = r.metricas.find((m) => m.clave === 'avg_fps')!;
-  const est = r.metricas.find((m) => m.clave === 'estabilidad')!;
+  // Si la grabación más corta no llega a la duración mínima, el 0,1 % low es menos fiable.
+  // Se calcula con la duración **medida** guardada, no con una reinterpretación.
+  const cortaLaGrabacion =
+    duraMenosDe(comparison.baseline, MIN_GRABACION_CORTA_S) ||
+    duraMenosDe(comparison.test, MIN_GRABACION_CORTA_S);
+
+  // Cifras medidas y almacenadas: no dependen de ninguna evaluación y no se recalculan.
+  const avg = metricaMostrada('avg_fps', 'FPS medios',
+    comparison.baseline?.avg_fps ?? null, comparison.test?.avg_fps ?? null);
+  const est = metricaMostrada('estabilidad', 'Estabilidad',
+    comparison.baseline?.fps_1_percent_low ?? null, comparison.test?.fps_1_percent_low ?? null);
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-8 space-y-4 sm:space-y-6">
@@ -788,10 +1065,10 @@ export function SavedComparisonDetail({
               </span>{' '}
               FPS
             </span>
-            {avg.diferenciaPct != null && (
+            {comparison.fps_change_percent != null && (
               <span className="font-bold font-mono tabular-nums">
-                ({avg.diferenciaPct >= 0 ? '+' : ''}
-                {f(avg.diferenciaPct)} %)
+                ({comparison.fps_change_percent >= 0 ? '+' : ''}
+                {f(comparison.fps_change_percent)} %)
               </span>
             )}
           </p>
@@ -807,7 +1084,7 @@ export function SavedComparisonDetail({
       </header>
 
       {/* 2. Enfrentamiento y resultado (un solo panel) */}
-      <PanelVS comparison={comparison} r={r} etiquetas={etiquetas} onCopy={onCopy} />
+      <PanelVS comparison={comparison} veredicto={veredicto} etiquetas={etiquetas} onCopy={onCopy} />
 
       {/* 3. Comparación de rendimiento — dos tarjetas destacadas y UNA tabla con el resto.
           Antes cada medida era una caja con su borde: aquí solo hay dos cajas y una tabla. */}
@@ -819,6 +1096,12 @@ export function SavedComparisonDetail({
         </div>
 
         <TablaMetricas comparacion={comparison} etiquetas={etiquetas} />
+
+        {/* 3b. Lo que la evaluación guardada dijo de cada métrica, si se registró. No se
+            recalcula: se copian sus cifras, su dirección y su preferencia. */}
+        {veredicto.tipo === 'veredicto' && (
+          <TablaMetricasGuardadas evaluacion={veredicto.evaluacion} />
+        )}
 
         {/* Un solo bloque de notas. El aviso del 0,1 % low aparece una única vez y
             solo si la grabación es corta. */}
@@ -832,7 +1115,7 @@ export function SavedComparisonDetail({
               100 — significa «va parejo», no «va fluido».
             </span>
           </p>
-          {!r.low01.fiable && (
+          {cortaLaGrabacion && (
             <p className="text-[11px] text-[var(--caution)] leading-relaxed flex items-start gap-2">
               <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
               <span>
@@ -922,7 +1205,7 @@ export function SavedComparisonDetail({
               </p>
               <p>
                 <strong className="text-[var(--text)]">Margen estimado:</strong><br />
-                {r.margenTexto ?? 'no guardado (±5 %)'}
+                {textoDeMargen(comparison)}
               </p>
             </div>
             <p className="text-[11px] text-[var(--text-dim)] leading-relaxed flex items-start gap-1.5">

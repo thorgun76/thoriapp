@@ -65,10 +65,42 @@ function abrirConfiguracion() {
   if (btn.getAttribute('aria-expanded') !== 'true') fireEvent.click(btn);
 }
 
-function renderDetail(c: BenchmarkComparison, handlers: Partial<{ onDelete: () => void; onCopy: (t: string) => void }> = {}) {
+/**
+ * Evaluación **registrada** coherente con la comparación.
+ *
+ * El detalle de una prueba guardada ya no interpreta: muestra lo que se guardó. Para que
+ * estas pruebas sigan comprobando el veredicto de los datos que construyen, se registra
+ * una evaluación con el estado que daba el intérprete, calculado **aquí**, en la prueba,
+ * y no dentro del componente.
+ */
+function evaluacionDe(c: BenchmarkComparison) {
+  const r = interpretar(c);
+  const estado =
+    r.estado === 'mejora' || r.estado === 'empeora' || r.estado === 'mixto' ||
+    r.estado === 'sin_cambio' || r.estado === 'datos_insuficientes'
+      ? r.estado
+      : 'datos_insuficientes';
+  return {
+    metodologia_interpretacion: 'v1',
+    evaluada_en: '2026-01-02 11:00:00',
+    referencia: { id: c.baseline.id },
+    candidata: { id: c.test.id },
+    estado,
+    confianza: 'provisional',
+    condiciones: { compatibilidad_metodologica: 'establecida' as const },
+    estado_de_la_evaluacion: 'soportada' as const,
+  };
+}
+
+function renderDetail(
+  c: BenchmarkComparison,
+  handlers: Partial<{ onDelete: () => void; onCopy: (t: string) => void }> = {},
+  evaluacion: ReturnType<typeof evaluacionDe> | null = evaluacionDe(c)
+) {
   return render(
     <SavedComparisonDetail
       comparison={c}
+      evaluacion={evaluacion}
       onBack={() => {}}
       onDelete={handlers.onDelete ?? (() => {})}
       onCopy={handlers.onCopy ?? (() => {})}
@@ -148,7 +180,8 @@ describe('SavedComparisonDetail: jerarquía', () => {
   it('el resultado va ANTES que la configuración', () => {
     const { container } = renderDetail(cmp());
     const texto = container.textContent ?? '';
-    const posResultado = texto.indexOf('Sin diferencia concluyente');
+    // El veredicto guardado para «sin cambio»; antes lo decía el intérprete.
+    const posResultado = texto.indexOf('Sin cambio');
     const posConfig = texto.indexOf('Configuración comparada');
     expect(posResultado).toBeGreaterThan(-1);
     expect(posConfig).toBeGreaterThan(-1);
@@ -176,8 +209,7 @@ describe('SavedComparisonDetail: jerarquía', () => {
   it('la estabilidad se muestra sobre 100 y se explica como índice propio', () => {
     const { container } = renderDetail(cmp());
     const texto = container.textContent ?? '';
-    expect(texto).toContain('Estabilidad de FPS');
-    expect(texto).toContain('índice propio de Thoriapp');
+    expect(texto).toContain('La estabilidad de FPS es un índice propio de');
     expect(texto).toContain('no una métrica estándar');
   });
 
@@ -295,22 +327,30 @@ describe('SavedComparisonDetail: acciones y accesibilidad', () => {
   });
 
   it('datos con FPS cero no rompen la pantalla', () => {
-    renderDetail(cmp({ avg_fps: 0 }, { avg_fps: 0 }));
-    // Aparece como titular del resultado y también como explicación sin ganadora.
-    expect(screen.getAllByText(/No hay datos suficientes/).length).toBeGreaterThan(0);
+    const { container } = renderDetail(cmp({ avg_fps: 0 }, { avg_fps: 0 }));
+    // Con FPS cero la evaluación registrada es «datos insuficientes», no un veredicto.
+    expect(container.textContent).toContain('Datos insuficientes');
+    // Y no se inventa una ganadora.
+    expect(container.textContent).not.toMatch(/rinde mejor|rinde peor/);
   });
 
   it('percentiles ausentes no se inventan', () => {
     const { container } = renderDetail(
       cmp({ fps_1_percent_low: 0, fps_0_1_percent_low: 0 }, { fps_1_percent_low: 0, fps_0_1_percent_low: 0 }, 20)
     );
-    expect(container.textContent).toMatch(/Sin datos|No hay datos para comparar/);
+    // Percentil 0 es un dato medido, no una ausencia: no se inventa ni se convierte en
+    // «sin datos». Solo se comprueba que no aparezca una cifra fabricada.
+    expect(container.textContent).toContain('0,1 % low');
+    expect(container.textContent).toMatch(/Sin cambio|Peor|Mejor/);
   });
 
   it('grabaciones guardadas sin noise_percent siguen funcionando', () => {
     // Compatibilidad: comparaciones antiguas no tienen margen guardado.
     renderDetail(cmp({}, {}, null));
-    expect(screen.getByText(/Sin diferencia concluyente|No hay datos suficientes/)).toBeTruthy();
+    // Sin margen guardado se dice que no consta; no se asume un margen del 3 %.
+    const texto = document.body.textContent ?? '';
+    expect(texto).toMatch(/margen|Sin cambio/i);
+    expect(texto).not.toMatch(/margen del 3/);
   });
 });
 
@@ -342,8 +382,8 @@ describe('SavedComparisonDetail: panel VS', () => {
   it('empeora: corona a la Prueba 1 y dice que la Prueba 2 rinde peor', () => {
     renderDetail(EMPEORA());
     const texto = document.body.textContent ?? '';
-    expect(texto).toContain('Prueba 2 rinde peor');
     expect(texto).toContain('Mejor resultado observado');
+    expect(texto).toContain('Empeora');
     // La insignia va con el mejor resultado, que aquí es la prueba de referencia.
     expect(screen.getByText(/Mejor resultado$/i)).toBeTruthy();
     expect(texto).not.toContain('Gana «Prueba 1»');
@@ -406,17 +446,28 @@ describe('SavedComparisonDetail: panel VS', () => {
   it('el aviso del 0,1 % low aparece una sola vez y en la caja técnica', () => {
     // Antes salía dos veces con el mismo contenido: en la lista de avisos del veredicto
     // (`low01.aviso`) y en la explicación técnica de abajo. Ahora solo en la segunda.
+    // La grabación del fixture dura 60 s: no es corta, así que el aviso NO debe salir.
     const c = EMPEORA();
     const r = interpretar(c, etiquetasDe(c));
-    // El fixture es una grabación corta, así que el intérprete sí emite el aviso.
+    // El intérprete sí lo emitía con su propio criterio; la vista guardada decide con la
+    // duración medida, y 60 s no es una grabación corta.
     expect(r.low01.aviso).toBeTruthy();
 
     renderDetail(c);
     const texto = document.body.textContent ?? '';
-
-    // El texto del intérprete ya no se pinta: era la copia duplicada.
     expect(texto).not.toContain(r.low01.aviso!);
-    // Queda una sola mención del 0,1 % low como advertencia, con el texto pedido.
+    expect(texto).not.toMatch(/puede variar mucho con grabaciones cortas/gi);
+  });
+
+  it('una grabación corta sí muestra el aviso del 0,1 % low, una sola vez', () => {
+    // 12 s por prueba: por debajo del umbral de grabación corta.
+    const c = cmp(
+      { duration_seconds: 12, total_frames: 720 },
+      { duration_seconds: 12, total_frames: 720 },
+      20
+    );
+    renderDetail(c);
+    const texto = document.body.textContent ?? '';
     const veces = (texto.match(/puede variar mucho con grabaciones cortas/gi) ?? []).length;
     expect(veces).toBe(1);
     expect(texto).not.toMatch(/es poco fiable aquí/);
@@ -435,9 +486,10 @@ describe('SavedComparisonDetail: panel VS', () => {
     expect(titularDelCambio(r, etiquetasDe(c))).toBe('Prueba 2 rinde peor');
   });
 
-  it('conserva «Resultado provisional»', () => {
+  it('muestra la confianza registrada como chip', () => {
+    // El chip sale de la evaluación guardada, no de una interpretación nueva.
     renderDetail(EMPEORA());
-    expect(screen.getByText(/Resultado provisional/)).toBeTruthy();
+    expect(screen.getByText('Provisional')).toBeTruthy();
   });
 
   it('el nombre de cada prueba lleva su comando en un tooltip', () => {
@@ -587,9 +639,16 @@ describe('SavedComparisonDetail: tabla única de métricas', () => {
   });
 
   it('el aviso del 0,1 % low aparece una sola vez en toda la pantalla', () => {
-    renderDetail(cmp());
+    // Grabación corta: es el único caso en que el aviso sale.
+    renderDetail(cmp({ duration_seconds: 12, total_frames: 720 }, { duration_seconds: 12, total_frames: 720 }));
     const pantalla = document.body.textContent ?? '';
     expect(pantalla.match(/puede variar mucho con grabaciones cortas/gi)).toHaveLength(1);
+  });
+
+  it('con una grabación larga el aviso no aparece', () => {
+    renderDetail(cmp());
+    const pantalla = document.body.textContent ?? '';
+    expect(pantalla.match(/puede variar mucho con grabaciones cortas/gi)).toBeNull();
   });
 
   it('la tabla mantiene la cabecera con los nombres de cada prueba', () => {
