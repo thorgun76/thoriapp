@@ -111,7 +111,7 @@ fn tiene(lista: &[CodigoDeEvaluacion], codigo: &str) -> bool {
     lista.iter().any(|c| c.0 == codigo)
 }
 
-fn metrica<'a>(ev: &'a EvaluacionDeComparacion, clave: &str) -> &'a EvaluacionDeMetrica {
+pub(crate) fn metrica<'a>(ev: &'a EvaluacionDeComparacion, clave: &str) -> &'a EvaluacionDeMetrica {
     ev.metricas
         .iter()
         .find(|m| m.clave == clave)
@@ -1493,4 +1493,33 @@ fn c1_los_estados_sin_veredicto_no_favorecen_ni_fingen_confianza() {
             }
         }
     }
+}
+
+// ─────────────────── Ayudantes compartidos con las pruebas de C.2 ───────────────────
+
+/// Grabación mínima para las pruebas de integración de C.2.
+pub(crate) fn bench_para_c2(id: &str, avg: f64, muestras: u64) -> Benchmark {
+    bench(id, avg, avg, avg, Some(muestras))
+}
+
+/// Grabación con los tres valores alterados por porcentaje (C.2).
+pub(crate) fn bench_para_c2_cambios(
+    id: &str,
+    avg_pct: f64,
+    low1_pct: f64,
+    low01_pct: f64,
+    muestras: u64,
+) -> Benchmark {
+    bench(
+        id,
+        100.0 * (1.0 + avg_pct / 100.0),
+        100.0 * (1.0 + low1_pct / 100.0),
+        100.0 * (1.0 + low01_pct / 100.0),
+        Some(muestras),
+    )
+}
+
+/// Comparación mínima para C.2, reutilizando el constructor de las pruebas de C.1.
+pub(crate) fn comparacion_para_c2(base: Benchmark, test: Benchmark) -> BenchmarkComparison {
+    comparar(base, test)
 }

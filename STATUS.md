@@ -209,6 +209,210 @@ producción. La única modificación fuera del módulo es el cambio de visibilid
 - **No existe** criterio validado de elegibilidad para el 1 % low.
 - D1, D2, D3 y D9 siguen abiertos: son C.2/C.3.
 
+## 5.4.1.C.2 — integración y persistencia atómica (**cerrado**)
+
+Ruta interna que genera la evaluación en Rust y la guarda **en la misma escritura atómica**
+que la comparación, con confirmación de la vista previa. **No está conectada a ningún
+comando IPC**: `main.rs` no se ha tocado y el binario de producción no contiene ningún
+símbolo nuevo. La activación es C.3.
+
+### Qué se ha añadido
+
+- `evaluacion::ConfirmacionDeVistaPrevia { comparacion, evaluacion }`: la confirmación no
+  es una huella ni un testigo, son **los dos objetos** que Rust generó. React los devuelve
+  como **expectativa**; nunca son datos autoritativos.
+- `evaluacion::comprobar_confirmacion(&confirmada, &recalculada) -> Result<(), MotivoDeRechazo>`
+  con cuatro motivos: `valor_no_persistible`, `evaluacion_no_corresponde`,
+  `entradas_cambiadas`, `significado_cambiado`.
+- `benchmarks::vista_previa_evaluada`: vista previa **real**, con las mismas funciones que
+  el guardado (`comparacion_entre` + `evaluar_comparacion`) y búsqueda **inequívoca**.
+- `benchmarks::comparacion_entre`: única función que construye la comparación;
+  `comparar_en` (comandos antiguos) y la vista previa desembocan en ella, así que no hay
+  dos formas de comparar.
+- `benchmarks::buscar_unico`: exige que un identificador corresponda a **exactamente un**
+  registro; dos o más lo rechazan. Es más estricta que `find` y solo la usa la ruta nueva.
+- `benchmarks::evaluar_comparacion`: **único** punto donde se aplica la metodología; sella
+  `evaluada_en` e ids.
+- `benchmarks::comprobar_coherencia`: verificación estructural antes de escribir. **No**
+  recalcula el veredicto; comprueba vocabulario de confianza, concordancia
+  preferencia/motivos, excluidas sin preferencia y compatibilidad. No amplía
+  `es_soportada()`.
+- `benchmarks::guardar_comparacion_evaluada(rutas, confirmacion, variable)`.
+- `benchmarks::adquirir_cerrojos`: orden único `CERROJO_BENCHMARKS` →
+  `CERROJO_COMPARACIONES`.
+- Extracciones sin duplicar lógica: `comparar_en` (usada por `compare_benchmarks` y por la
+  ruta nueva) y `try_load_benchmarks_data_de`.
+
+### Por qué la confirmación son dos objetos y no un hash
+
+El estado global no identifica una comparación: dos `mejora` pueden diferir en métricas,
+margen, preferencias y limitaciones. Y la evaluación sola no basta: hay cambios en las
+entradas (comando, procedencia) que **no** alteran el veredicto y sí alteran lo que se
+guardaría. Hay prueba de ambos casos
+(`c2_cambio_de_entradas_que_conserva_la_misma_evaluacion_se_rechaza`).
+
+`evaluada_en` queda **fuera** de la igualdad de significado: es el instante del registro, no
+lo que se afirma. No hay tolerancias numéricas.
+
+### La igualdad se corrigió: la forma serializada perdía información
+
+La primera versión comparaba la **forma serializada** para evitar que `NaN != NaN` hiciera
+imposible guardar. Al revisarla se comprobó que ese mecanismo **funde casos distintos**:
+`serde_json` serializa `NaN`, `+inf` y `-inf` **los tres como `null`**, y `null` es también
+lo que produce un valor ausente. Cuatro entradas distintas —tres no finitas y «no consta»—
+tenían la misma representación, así que dos confirmaciones diferentes se habrían aceptado
+como iguales.
+
+Ahora la igualdad es **campo por campo**: los `f64` se comparan por bits (`to_bits`, función
+total, y `NaN` coincide consigo mismo), los opcionales distinguen **ausente** de
+**presente**, y el resto usa su propia igualdad. Se cubren los dos riesgos opuestos: no
+colapsar lo distinto y no rechazar lo idéntico.
+
+Queda una diferencia real entre Rust y JavaScript que **no** se puede resolver en el
+mecanismo: `JSON.stringify` convierte `-0` en `0` y pierde precisión por encima de 2⁵³. Por
+eso no se confía en la representación de React: la decisión se toma sobre lo que Rust
+recalcula. Una confirmación que sobreviva al viaje con diferencias de redondeo no coincide
+con la recalculada y se rechaza, que es el lado seguro.
+
+### Los valores no finitos se rechazan antes de escribir
+
+Un `f64` no finito en un campo **obligatorio** se serializa como `null` y el archivo deja
+de poder leerse (`invalid type: null, expected f64`): no es un problema de presentación, es
+un archivo escrito que se pierde. `save_benchmark` **no** sanea esos valores (0
+comprobaciones `is_finite`). La ruta evaluada sí: `comprobar_confirmacion` devuelve
+`valor_no_persistible`. El análisis real filtra no finitos, así que un valor así solo puede
+llegar de datos históricos o de un llamador que se equivoque; el guardado no lo propaga.
+
+### Cerrojos
+
+Se toman **los dos**, una sola vez, antes de leer, y cubren lectura, evaluación,
+comprobación y escritura. Si la confirmación falla, **no se escribe nada**. Ninguna función
+llamada bajo ellos toma cerrojo (`load_*`, `save_*`, `comparar_en`: 0 apariciones), así que
+no hay adquisición recursiva. No se mantiene ningún cerrojo entre viajes de IPC.
+
+### Contradicción de la auditoría previa sobre `save_benchmark` — resuelta
+
+La afirmación anterior de que `save_benchmark` «solo añade» era **incorrecta**. Recibe un
+`Benchmark` completo, con su `id`, del llamador y hace `push` **sin comprobar unicidad**. El
+`id` se genera con resolución de **segundo** (`bench_{timestamp}`), así que dos análisis en
+el mismo segundo producen el mismo id. Consecuencia: **puede haber ids duplicados** y
+`find` se queda con el primero. Queda registrado como comportamiento real con prueba
+(`c2_save_benchmark_no_garantiza_ids_unicos`, `c2_con_ids_repetidos_se_toma_la_primera`).
+No se ha cambiado: deduplicar sería alterar el contrato de B.
+
+La ruta evaluada **no hereda** esa ambigüedad: `buscar_unico` rechaza un identificador que
+corresponda a dos registros, tenga el contenido idéntico o distinto, sin escribir nada. Los
+duplicados **ajenos** a la comparación pedida no la bloquean (si no, un duplicado antiguo de
+otro juego impediría comparar cualquier cosa).
+
+Deuda técnica **independiente**: el generador de ids tiene resolución de segundo y
+`save_benchmark` no comprueba unicidad. La ruta evaluada lo rodea, no lo arregla.
+
+### Validación ejecutada
+
+- `cargo test --locked --bins`: **1042 aprobadas, 0 fallidas, 1 ignorada** (la manual de
+  anticheat, preexistente). **+51** respecto a C.1 (991 → 1042). **0 pruebas eliminadas.**
+- `cargo clippy --locked --bins -- -D warnings`: **exit 0**.
+- `cargo clippy --locked --bins --tests`: **42 avisos, exactamente la deuda previa**;
+  **0 en `evaluacion*` y 0 en la zona nueva de `benchmarks.rs`**. Sin `#[allow]`.
+- `rustfmt --check` en los ficheros de `evaluacion`: limpio. No se reformateó nada ajeno.
+- `cargo build --locked --bins`: exit 0. `cargo audit`: exit 0, los mismos **3 avisos**.
+- Frontend **sin cambios**: `tsc` exit 0, `vitest` **1058**, `build` exit 0, `npm audit` 0.
+- `git diff --check`: exit 0.
+- **Ruta inactiva comprobada dinámicamente**: `nm -C target/debug/thoriapp` no contiene
+  `thoriapp::evaluacion`, `guardar_comparacion_evaluada` ni `adquirir_cerrojos` (0).
+  `main.rs` sin cambios: ningún comando IPC nuevo.
+
+### Contrato de transporte (serialización por IPC)
+
+`ConfirmacionDeVistaPrevia` deriva `Serialize`/`Deserialize` porque viajará por IPC en C.3.
+**No es un cambio de esquema persistido**: no se escribe en ningún archivo en esa forma, y
+el archivo de comparaciones sigue con su versión y sus campos.
+
+El viaje se prueba **de verdad**, no simulado: Rust → JSON → `JSON.parse` +
+`JSON.stringify` en Node → deserialización Rust → confirmación → persistencia. Si Node no
+está disponible, la prueba **falla** en vez de omitirse, porque el viaje es justamente lo
+que se prueba (`c2_transporte_por_node_conserva_la_confirmacion`,
+`c2_transporte_conserva_valores_normales`).
+
+El resultado es el que importa para decidir el diseño:
+
+- **Datos normales**: se conservan **bit a bit**. FPS con decimales (`59.94`, `143.98`), el
+  clásico `0.1 + 0.2`, porcentajes con muchos decimales, `2.5`, cero real y
+  `total_frames` (144 000 — siete órdenes de magnitud por debajo de 2⁵³). Una vista previa
+  **sin modificar se confirma y se guarda** después del viaje.
+- **Extremos sintéticos**: `-0.0` pierde el signo y un entero por encima de 2⁵³ pierde
+  precisión. Ninguna medición real los produce; si llegaran, la igualdad canónica los
+  detecta y la confirmación se **rechaza** (el lado seguro). El límite exacto 2⁵³ sí se
+  conserva.
+
+**No hay problema de transporte con datos normales**, así que no se ha cambiado el diseño:
+ni tolerancias, ni huellas, ni testigos. La pérdida de precisión solo aparece en casos que
+la aplicación no genera.
+
+### Limitaciones que se conservan
+
+- La ruta nueva **no está conectada**: `save_comparison` sigue guardando
+  `evaluacion: None` (D1). C.3 es quien la activa.
+- `es_soportada()` **no** valida la coherencia semántica completa; `comprobar_coherencia`
+  sí comprueba lo estructural, pero sigue siendo una comprobación de invariantes, no una
+  segunda interpretación.
+- Los cerrojos son **intraproceso**: dos instancias de la aplicación no se protegen entre
+  sí (fase 9).
+- Sigue sin criterio validado de elegibilidad del 1 % low ni significación validada
+  (5.4.3). Superar el margen no es una mejora reproducible.
+- D2 (dos intérpretes) y D9 (ganador por signo en `TablaMetricas`) siguen abiertos: C.3.
+
+**Recuento**: Rust **1042** + TypeScript **1058** = **2100** aprobadas.
+
+### Cierre
+
+C.2 se **cierra** con la aprobación oficial tras dos rondas de revisión. El criterio del
+cierre es que la ruta interna generada por Rust quede **demostrada y sin activar**:
+
+- La confirmación es **conjunta** (comparación + evaluación) y la vista previa que la
+  produce usa las mismas funciones que el guardado.
+- Un rechazo **no toca ningún archivo** (contenido y `mtime` idénticos).
+- La persistencia es **una sola escritura atómica** con la comparación y su evaluación, y
+  lo guardado sale del **recálculo**, nunca del llamador.
+- La igualdad de significado **no pierde información** (corregida tras detectar el colapso
+  de `NaN`/`±inf`/ausente en la forma serializada) y el contrato de transporte se verificó
+  con un viaje real por Node.
+- Los identificadores ambiguos se **rechazan** en la ruta nueva.
+- La ruta está **inactiva**: `main.rs` sin cambios, 0 símbolos nuevos en el binario, ningún
+  comando IPC (`nm` y `git diff` como evidencia).
+
+**Lo que C.2 no cierra**: la activación es C.3 (`save_comparison` sigue guardando
+`evaluacion: None`, D1); el generador de ids con resolución de segundo y la falta de
+comprobación de unicidad en `save_benchmark` quedan como **deuda técnica independiente**;
+la coherencia semántica completa y los criterios de 5.4.3 y 9 siguen abiertos.
+
+### Correspondencia con la auditoría de C.2
+
+La primera revisión añadió **18** pruebas sobre las 25 comunicadas (43). La segunda añadió
+**8** más (51 en total): contrato de transporte (3), fallo de escritura (1), rechazo sin
+tocar archivos (1), no finitos opcionales/obligatorios (3).
+
+| Punto | Qué se añadió | Pruebas |
+|---|---|---|
+| 1. Igualdad sin pérdida | no finitos distintos entre sí y de ausente, `0.0`/`-0.0`, `None`/`Some(0)`, finitos distintos, regresión del colapso serializado, rechazo de `valor_no_persistible`, **cobertura de todos los campos** | 7 |
+| 2. Identificadores ambiguos | duplicado distinto, duplicado idéntico, ausente, único, duplicados ajenos | 5 |
+| 3. Vista previa real | flujo completo vista previa → JSON → confirmación → guardado, `evaluada_en` como instante del guardado | 2 |
+| 4. Concurrencia | guardados concurrentes sin interbloqueo, lectura concurrente con guardado | 2 |
+| 5. Persistencia | lo persistido viene del recálculo, margen registrado | 2 |
+| 1b. Contrato de transporte | viaje real por Node (vista previa completa y valores normales), extremos sintéticos | 3 |
+| 4b. Fallo de escritura | `rename` fallido no deja registro parcial ni `.tmp` | 1 |
+| 4c. Rechazo sin efectos | contenido **y `mtime`** intactos en los dos archivos | 1 |
+| 1c. No finitos | obligatorio → archivo ilegible; opcional → se vuelve ausente; los dos se rechazan antes de escribir | 3 |
+
+Las pruebas de la **cobertura de campos** y de la **igualdad de no finitos** encontraron
+defectos reales en la primera versión (colapso de `NaN`/`±inf`/ausente), que se corrigieron.
+
+Una prueba de concurrencia escrita para esta revisión **se interbloqueó**: tomaba los dos
+cerrojos en el hilo padre y los retenía mientras los hilos hijos intentaban adquirirlos
+(`Mutex` no es reentrante). El defecto era de la prueba, no del código; se corrigió y ahora
+cada hilo toma los suyos.
+
 ## Cierre de 5.3 — validación real y limitación conocida
 
 La fase se **cierra** con una limitación declarada, tras la ronda de validación en el equipo
@@ -1354,12 +1558,13 @@ de contrato.
 ### Pendiente (bloques B y C)
 
 Persistencia completa de `Evaluacion` en `SavedComparison` y marca de comparación histórica
-(B); traslado de `interpretar()` a Rust y presentación tipada (C).
+(B, hecho: bloque 5.4.1.B); integración, persistencia atómica y conexión de la presentación
+tipada (C; C.2 implementado, C.3 pendiente).
 
 ## Pruebas
 
-- Rust: 948 (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
-- TypeScript: 1034, en 76 ficheros.
+- Rust: **1042** (1 ignorada a propósito: falla si GGG añade re-endpoint de consulta).
+- TypeScript: **1058**, en 76 ficheros.
 - `tsc --noEmit` limpio.
 - `cargo clippy --locked --bins -- -D warnings`: **sin avisos**. `save_benchmark` lleva un
   `#[allow(clippy::too_many_arguments)]` localizado porque su firma plana es el contrato IPC

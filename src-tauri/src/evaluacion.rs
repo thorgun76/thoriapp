@@ -43,7 +43,7 @@
 //!   cuando sus valores son válidos y su apoyo consta. Su revisión corresponde a 5.4.3.
 
 use crate::benchmarks::{
-    ApoyoDeMetrica, ApoyoDePercentil, BenchmarkComparison, CodigoDeEvaluacion,
+    ApoyoDeMetrica, ApoyoDePercentil, Benchmark, BenchmarkComparison, CodigoDeEvaluacion,
     CompatibilidadMetodologica, CondicionesDeComparacion, DireccionDeCambio, EvaluacionDeMetrica,
     EvaluacionPersistida, IdDeBenchmark, MetodologiaCalculo, PreferenciaDeMetrica,
     VersionDeInterpretacion,
@@ -767,5 +767,279 @@ fn compatibilidad_metodologica(comparacion: &BenchmarkComparison) -> Compatibili
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// C.2 — Confirmación de la vista previa
+// ---------------------------------------------------------------------------------------
+//
+// La evaluación confirmada en pantalla y la guardada deben ser la **misma** en significado.
+// No basta comparar ids ni el estado global: dos evaluaciones `mejora` pueden diferir en
+// métricas, margen, preferencias y limitaciones. Y no basta con la evaluación sola: hay
+// cambios en las entradas (comandos, procedencia, identidad) que pueden **no** alterar el
+// veredicto y sí alterar lo que se está guardando.
+//
+// Por eso la confirmación son **dos** objetos, ambos generados por Rust:
+//
+// 1. `BenchmarkComparison` — lo que se va a persistir (incluye las dos grabaciones
+//    completas embebidas).
+// 2. `EvaluacionDeComparacion` — el significado que se mostró al usuario.
+//
+// React los devuelve como **expectativa**; nunca son datos autoritativos. Rust relee,
+// recalcula y compara: si algo difiere, no se escribe nada.
+
+/// La confirmación de una vista previa: qué se mostró al usuario y sobre qué entradas.
+///
+/// No es un testigo criptográfico ni una prueba de consentimiento: es una **expectativa**
+/// que Rust contrasta contra el estado real en el momento de guardar. No acredita que la
+/// interfaz pintara nada; solo permite detectar que las entradas cambiaron.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmacionDeVistaPrevia {
+    /// La comparación que se mostró. Se persiste **la recalculada**, no esta.
+    pub comparacion: BenchmarkComparison,
+    /// La evaluación que se mostró. Se persiste **la recalculada**, no esta.
+    pub evaluacion: EvaluacionDeComparacion,
+}
+
+/// Por qué una confirmación no corresponde al estado actual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotivoDeRechazo {
+    /// Las entradas cambiaron: la comparación recalculada difiere de la confirmada.
+    EntradasCambiadas,
+    /// Las entradas coinciden pero el significado no: la evaluación recalculada difiere.
+    SignificadoCambiado,
+    /// La evaluación confirmada no describe a la comparación confirmada.
+    EvaluacionNoCorresponde,
+    /// Alguna entrada tiene un valor no finito, que no se puede persistir sin corromper
+    /// el archivo (se escribiría como `null` en un campo obligatorio).
+    ValorNoPersistible,
+}
+
+impl MotivoDeRechazo {
+    /// Código estable para mensajes y pruebas.
+    pub fn codigo(self) -> &'static str {
+        match self {
+            MotivoDeRechazo::EntradasCambiadas => "entradas_cambiadas",
+            MotivoDeRechazo::SignificadoCambiado => "significado_cambiado",
+            MotivoDeRechazo::EvaluacionNoCorresponde => "evaluacion_no_corresponde",
+            MotivoDeRechazo::ValorNoPersistible => "valor_no_persistible",
+        }
+    }
+}
+
+/// Compara una confirmación con lo que Rust acaba de recalcular.
+///
+/// Los cuatro pasos, en este orden, porque cada uno da un motivo distinto y más preciso:
+///
+/// 1. La evaluación confirmada **describe** la comparación confirmada (ids y coherencia).
+/// 2. Las **entradas** recalculadas coinciden con las confirmadas.
+/// 3. El **significado** recalculado coincide con el confirmado (sin `evaluada_en`, que es
+///    el instante del guardado y no forma parte del significado).
+///
+/// Devuelve `Ok(())` solo si los tres pasan.
+pub fn comprobar_confirmacion(
+    confirmada: &ConfirmacionDeVistaPrevia,
+    recalculada: &ConfirmacionDeVistaPrevia,
+) -> Result<(), MotivoDeRechazo> {
+    // 0. Nada no finito, en ninguna de las dos. Un valor así no se puede escribir: el
+    //    campo es obligatorio y `serde_json` lo serializa como `null`, con lo que el
+    //    archivo dejaría de poder leerse. Se rechaza antes de comparar nada.
+    if comparacion_tiene_no_finitos(&confirmada.comparacion)
+        || comparacion_tiene_no_finitos(&recalculada.comparacion)
+    {
+        return Err(MotivoDeRechazo::ValorNoPersistible);
+    }
+
+    // 1. Internamente coherente: una evaluación que no habla de estas dos grabaciones no
+    //    es una confirmación válida aunque sus campos suelten.
+    if !confirmada.evaluacion.corresponde_a(&confirmada.comparacion) {
+        return Err(MotivoDeRechazo::EvaluacionNoCorresponde);
+    }
+
+    // 2. Las entradas. `BenchmarkComparison` embute las dos grabaciones completas, así que
+    //    aquí entran comandos, procedencia, identidad, notas y cualquier característica
+    //    registrada; no solo las medidas que acaban en el veredicto.
+    if !misma_comparacion(&confirmada.comparacion, &recalculada.comparacion) {
+        return Err(MotivoDeRechazo::EntradasCambiadas);
+    }
+
+    // 3. El significado.
+    if !misma_evaluacion(&confirmada.evaluacion, &recalculada.evaluacion) {
+        return Err(MotivoDeRechazo::SignificadoCambiado);
+    }
+
+    Ok(())
+}
+
+/// Igualdad de dos valores `f64` **sin colapsar los no finitos**.
+///
+/// `serde_json` serializa `NaN`, `+inf` y `-inf` **los tres como `null`** (verificado):
+/// comparar por la forma serializada los confundiría entre sí y, además, con un valor
+/// ausente. Aquí se comparan por su bit pattern, que sí los distingue y hace que `NaN`
+/// coincida consigo mismo (`to_bits` es una función total, no una relación).
+///
+/// `0.0` y `-0.0` tienen bits distintos y por tanto **no** se consideran iguales: son
+/// entradas distintas en los campos donde aparecen (por ejemplo, un `-0.0` escrito a mano
+/// en un JSON histórico). Ninguna medición real produce `-0.0` en estos campos, pero la
+/// igualdad no puede depender de esa suposición.
+pub(crate) fn mismos_f64(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
+/// Igualdad de dos opcionales numéricos, distinguiendo **ausente** de **presente**.
+///
+/// `None` es «no consta»; `Some(0.0)` es «se midió cero». `serde_json` escribiría ambos
+/// como `null` y los fundiría, así que aquí se distinguen explícitamente.
+fn mismos_opcionales(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => mismos_f64(a, b),
+        _ => false,
+    }
+}
+
+/// Igualdad de dos opcionales genéricos, distinguiendo ausente de presente.
+fn mismos_opcionales_de<T: PartialEq>(a: Option<&T>, b: Option<&T>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// ¿Contiene esta grabación algún valor no finito en un campo numérico?
+///
+/// Un `f64` no finito **no se puede persistir**: `serde_json` lo escribe como `null` y el
+/// campo es obligatorio, así que el archivo resultante **no se puede volver a leer**
+/// (`invalid type: null, expected f64`). No es un caso de vista previa: es un archivo
+/// escrito que se pierde. Antes de confirmar se rechaza explícitamente.
+fn tiene_no_finitos(b: &Benchmark) -> bool {
+    let obligatorios = [
+        b.duration_seconds,
+        b.avg_fps,
+        b.fps_1_percent_low,
+        b.fps_0_1_percent_low,
+        b.max_fps,
+        b.min_fps,
+        b.frame_time_avg,
+        b.frame_time_1_percent_high,
+    ];
+    let opcionales = [
+        b.spikes_per_min,
+        b.pct_over_33ms,
+        b.jitter_ms,
+        b.worst_frame_ms,
+        b.warmup_seconds,
+        b.noise_percent,
+        b.duracion_medida,
+    ];
+
+    obligatorios.iter().any(|v| !v.is_finite())
+        || opcionales.iter().flatten().any(|v| !v.is_finite())
+}
+
+/// ¿La comparación contiene algún valor no finito, directo o en sus grabaciones?
+fn comparacion_tiene_no_finitos(c: &BenchmarkComparison) -> bool {
+    let deltas = [
+        c.fps_change_percent,
+        c.fps_1_percent_change_percent,
+        c.fps_0_1_percent_change_percent,
+        c.frame_time_change_percent,
+    ];
+
+    tiene_no_finitos(&c.baseline)
+        || tiene_no_finitos(&c.test)
+        || deltas.iter().any(|v| !v.is_finite())
+        || c.noise_percent.is_some_and(|v| !v.is_finite())
+}
+
+/// Igualdad de dos comparaciones, campo por campo y **sin pérdida de información**.
+///
+/// No se usa `==` sobre las structs porque `f64` no implementa una relación de igualdad
+/// total (`NaN != NaN`), y no se usa la forma serializada porque `serde_json` colapsa los
+/// no finitos a `null` y los confunde con la ausencia. Se comparan los campos con la
+/// semántica explícita de arriba: los números por bits, los opcionales distinguiendo
+/// ausente de presente, y todo lo demás con su propia igualdad.
+pub(crate) fn misma_comparacion(a: &BenchmarkComparison, b: &BenchmarkComparison) -> bool {
+    mismo_benchmark(&a.baseline, &b.baseline)
+        && mismo_benchmark(&a.test, &b.test)
+        && mismos_f64(a.fps_change_percent, b.fps_change_percent)
+        && mismos_f64(
+            a.fps_1_percent_change_percent,
+            b.fps_1_percent_change_percent,
+        )
+        && mismos_f64(
+            a.fps_0_1_percent_change_percent,
+            b.fps_0_1_percent_change_percent,
+        )
+        && mismos_f64(a.frame_time_change_percent, b.frame_time_change_percent)
+        && a.conclusion == b.conclusion
+        && mismos_opcionales(a.noise_percent, b.noise_percent)
+        && a.within_noise == b.within_noise
+        && a.comandos_iguales == b.comandos_iguales
+}
+
+/// Igualdad de dos grabaciones, campo por campo.
+///
+/// Es exhaustiva a propósito: si mañana se añade un campo a `Benchmark` y no se incluye
+/// aquí, el compilador **no** avisará, pero la prueba
+/// `c2_la_igualdad_cubre_todos_los_campos` construye dos grabaciones que difieren solo en
+/// un campo cada vez y exige que la igualdad las distinga.
+pub(crate) fn mismo_benchmark(a: &Benchmark, b: &Benchmark) -> bool {
+    a.id == b.id
+        && a.profile_id == b.profile_id
+        && a.game_name == b.game_name
+        && a.appid == b.appid
+        && a.timestamp == b.timestamp
+        && mismos_f64(a.duration_seconds, b.duration_seconds)
+        && mismos_f64(a.avg_fps, b.avg_fps)
+        && mismos_f64(a.fps_1_percent_low, b.fps_1_percent_low)
+        && mismos_f64(a.fps_0_1_percent_low, b.fps_0_1_percent_low)
+        && mismos_f64(a.max_fps, b.max_fps)
+        && mismos_f64(a.min_fps, b.min_fps)
+        && mismos_f64(a.frame_time_avg, b.frame_time_avg)
+        && mismos_f64(a.frame_time_1_percent_high, b.frame_time_1_percent_high)
+        && a.total_frames == b.total_frames
+        && mismos_opcionales_de(a.notes.as_ref(), b.notes.as_ref())
+        && a.launch_command == b.launch_command
+        && a.origen_comando == b.origen_comando
+        && mismos_opcionales_de(a.steam_command.as_ref(), b.steam_command.as_ref())
+        && a.number == b.number
+        && mismos_opcionales_de(a.snapshot.as_ref(), b.snapshot.as_ref())
+        && mismos_opcionales_de(a.sesion_id.as_ref(), b.sesion_id.as_ref())
+        && mismos_opcionales(a.spikes_per_min, b.spikes_per_min)
+        && mismos_opcionales(a.pct_over_33ms, b.pct_over_33ms)
+        && mismos_opcionales(a.jitter_ms, b.jitter_ms)
+        && mismos_opcionales(a.worst_frame_ms, b.worst_frame_ms)
+        && mismos_opcionales(a.warmup_seconds, b.warmup_seconds)
+        && mismos_opcionales(a.noise_percent, b.noise_percent)
+        && mismos_opcionales_de(a.shader_stutter.as_ref(), b.shader_stutter.as_ref())
+        && a.log_path == b.log_path
+        && a.sample_count == b.sample_count
+        && mismos_opcionales_de(
+            a.muestras_temporales.as_ref(),
+            b.muestras_temporales.as_ref(),
+        )
+        && mismos_opcionales(a.duracion_medida, b.duracion_medida)
+        && a.metodologia_calculo == b.metodologia_calculo
+        && mismos_opcionales_de(
+            a.contabilidad_muestras.as_ref(),
+            b.contabilidad_muestras.as_ref(),
+        )
+        && mismos_opcionales_de(a.apoyo_metricas.as_ref(), b.apoyo_metricas.as_ref())
+}
+
+/// Igualdad de significado de dos evaluaciones.
+///
+/// `evaluada_en` **queda fuera**: es el instante en que se registra, no lo que se afirma.
+/// Todo lo demás entra, incluida la metodología de interpretación y las condiciones.
+fn misma_evaluacion(a: &EvaluacionDeComparacion, b: &EvaluacionDeComparacion) -> bool {
+    let mut a = a.clone();
+    let mut b = b.clone();
+    a.evaluada_en.clear();
+    b.evaluada_en.clear();
+    a == b
+}
+
 #[cfg(test)]
 mod pruebas;
+#[cfg(test)]
+mod pruebas_c2;

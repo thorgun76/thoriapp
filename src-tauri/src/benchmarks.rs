@@ -241,7 +241,7 @@ pub struct SnapshotConfig {
 /// Versión del formato de instantánea.
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Benchmark {
     pub id: String,
     pub profile_id: String,
@@ -458,7 +458,7 @@ impl Benchmark {
 /// `frame_time_ms[i]` corresponde a `elapsed_s[i]`; ambos vectores tienen la misma
 /// longitud. Si el log no trae la columna `elapsed`, `elapsed_s` queda vacío y el
 /// gráfico se dibuja por índice de muestra (ver `interpretacion` en el frontend).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MuestrasTemporales {
     /// Frametime medio de cada muestra, en milisegundos.
     pub frame_time_ms: Vec<f32>,
@@ -483,7 +483,7 @@ const MAX_MUESTRAS_TEMPORALES: usize = 4000;
 /// **peor 1 %** de frames. Se usa el peor 1 % y no el FPS promedio porque la compilación
 /// de shaders no baja el promedio: provoca tirones puntuales, que es justo lo que el
 /// promedio esconde.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShaderStutter {
     /// Segundos comparados al principio (0 = no se pudo comparar).
     pub window_seconds: f64,
@@ -1362,7 +1362,7 @@ fn compute_stutter(frame_times: &[f64], duration_seconds: f64) -> StutterStats {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BenchmarkComparison {
     pub baseline: Benchmark,
     pub test: Benchmark,
@@ -1652,8 +1652,17 @@ pub(crate) fn leer_datos<T>(
 /// abortar. Devolver `Ok` vacío en ese caso era la vía por la que un archivo ilegible
 /// acababa sobrescrito con una lista vacía y el historial desaparecía.
 fn try_load_benchmarks_data() -> Result<BenchmarksData, ErrorDatos> {
+    try_load_benchmarks_data_de(&get_benchmarks_file())
+}
+
+/// Igual, sobre una ruta explícita.
+///
+/// Existe por el mismo motivo que `save_saved_data_en`: C.2 necesita leer el historial
+/// **dentro** de su sección crítica, con la ruta que le den, sin volver a resolver la ruta
+/// real ni abrir una segunda lectura fuera del cerrojo.
+fn try_load_benchmarks_data_de(path: &Path) -> Result<BenchmarksData, ErrorDatos> {
     let leido = leer_datos::<BenchmarksData>(
-        &get_benchmarks_file(),
+        path,
         "benchmarks.json",
         BENCHMARKS_SCHEMA_VERSION,
         |v| v.get("version").and_then(|x| x.as_u64()).map(|x| x as u32),
@@ -3213,20 +3222,103 @@ pub fn compare_benchmarks(
     test_id: String,
 ) -> Result<BenchmarkComparison, String> {
     let data = load_benchmarks_data();
+    comparar_en(&data.benchmarks, &baseline_id, &test_id)
+}
 
-    let baseline = data
-        .benchmarks
+/// Construye la comparación a partir de una lista de grabaciones **ya leída**.
+///
+/// Separado de `compare_benchmarks` para que las rutas que trabajan bajo el cerrojo puedan
+/// comparar sobre los datos que acaban de leer, sin volver a leer el archivo (lo que abriría
+/// la ventana entre la lectura y el uso que esta subfase cierra). La lógica es una sola:
+/// `compare_benchmarks` solo lee y delega aquí.
+/// Busca una grabación por identificador **exigiendo que sea única**.
+///
+/// `save_benchmark` acepta el `id` que le da el llamador y **no** comprueba que no exista
+/// ya (los ids llevan resolución de segundo, así que dos análisis seguidos pueden
+/// coincidir). Cuando eso pasa, `find` se queda con la primera y la comparación deja de
+/// describir un hecho: hay dos grabaciones distintas y se evaluó una de ellas al azar.
+///
+/// La ruta evaluada **no** puede heredar esa ambigüedad. Aquí se exige que el
+/// identificador corresponda a **exactamente un** registro:
+///
+/// - 0 → no encontrado.
+/// - 1 → el único, se devuelve.
+/// - 2 o más → se rechaza. Se distingue el caso en que los candidatos son **idénticos**
+///   (mismo contenido bit a bit, incluidos `number`, ruta y sesión) del caso en que
+///   difieren: los dos son ambiguos, porque el identificador no identifica, pero el
+///   mensaje dice cuál es la situación real.
+///
+/// Es deliberadamente **más estricta** que `comparar_en`: los comandos antiguos siguen
+/// comportándose igual (`find`, primera coincidencia) para no alterar su contrato.
+#[cfg(test)]
+fn buscar_unico<'a>(
+    benchmarks: &'a [Benchmark],
+    id: &str,
+    que: &str,
+) -> Result<&'a Benchmark, String> {
+    let mut encontrados = benchmarks.iter().filter(|b| b.id == id);
+
+    let primero = encontrados
+        .next()
+        .ok_or_else(|| format!("{que} no encontrado"))?;
+
+    let mut total = 1;
+    let mut todos_identicos = true;
+    for otro in encontrados {
+        total += 1;
+        if !crate::evaluacion::mismo_benchmark(primero, otro) {
+            todos_identicos = false;
+        }
+    }
+
+    if total > 1 {
+        let detalle = if todos_identicos {
+            "las copias tienen contenido idéntico"
+        } else {
+            "las copias tienen contenido distinto"
+        };
+        return Err(format!(
+            "El identificador «{id}» corresponde a {total} grabaciones ({detalle}): no se              puede saber cuál evaluar. No se ha guardado nada."
+        ));
+    }
+
+    Ok(primero)
+}
+
+/// Compara dos identificadores sobre un historial **ya leído**, tomando la primera
+/// coincidencia de cada uno.
+///
+/// Es el comportamiento de `compare_benchmarks` y no se ha cambiado. La ruta evaluada usa
+/// `comparacion_entre`, que exige unicidad.
+fn comparar_en(
+    benchmarks: &[Benchmark],
+    baseline_id: &str,
+    test_id: &str,
+) -> Result<BenchmarkComparison, String> {
+    let baseline = benchmarks
         .iter()
         .find(|b| b.id == baseline_id)
-        .ok_or("Benchmark base no encontrado")?
-        .clone();
+        .ok_or("Benchmark base no encontrado")?;
 
-    let test = data
-        .benchmarks
+    let test = benchmarks
         .iter()
         .find(|b| b.id == test_id)
-        .ok_or("Benchmark de prueba no encontrado")?
-        .clone();
+        .ok_or("Benchmark de prueba no encontrado")?;
+
+    comparacion_entre(baseline, test)
+}
+
+/// Construye la comparación entre dos grabaciones **ya resueltas**.
+///
+/// Aquí vive toda la regla de comparación. `comparar_en` (comandos antiguos) y la vista
+/// previa evaluada desembocan las dos en esta función, así que no hay dos formas de
+/// comparar que puedan divergir.
+fn comparacion_entre(
+    baseline: &Benchmark,
+    test: &Benchmark,
+) -> Result<BenchmarkComparison, String> {
+    let baseline = baseline.clone();
+    let test = test.clone();
 
     // Dos grabaciones de juegos distintos no se comparan. Antes se calculaba todo y se
     // añadía un aviso al final diciendo que la comparación «no es válida», pero el resultado
@@ -4207,6 +4299,272 @@ fn save_saved_data_en(ruta: &Path, data: &SavedComparisonsData) -> Result<(), St
     })
 }
 
+/// Orden único de adquisición de los cerrojos.
+/// **C.2, aún sin consumidor de producción**: se activa en C.3. Mientras tanto vive bajo
+/// `cfg(test)`, igual que el motor, para no dejar una ruta medio conectada ni un consumidor
+/// ficticio que solo sirva para que compile.
+#[cfg(test)]
+///
+/// Hay dos cerrojos, uno por archivo, y una ruta que necesita los dos a la vez. Para que no
+/// pueda formarse un abrazo mortal, el orden es **siempre** este y no se invierte en ningún
+/// sitio:
+///
+/// 1. `CERROJO_BENCHMARKS` (el historial: de aquí salen las entradas).
+/// 2. `CERROJO_COMPARACIONES` (las comparaciones guardadas: aquí se escribe).
+///
+/// Ninguna función toma el segundo y luego el primero. Las funciones de lectura y escritura
+/// de cada archivo (`load_*`, `save_*`) **no** toman cerrojo por su cuenta: el cerrojo lo
+/// toma la operación que las agrupa, y por eso no hay adquisición recursiva del mismo
+/// `Mutex` (que en `std` no es reentrante y se bloquearía a sí misma).
+///
+/// Ambos son intraproceso. Entre dos instancias de la aplicación la protección sigue
+/// pendiente (fase 9).
+///
+/// **C.2**: lo usará la ruta pública que conecte C.3. Mientras no exista, vive bajo
+/// `cfg(test)` y su prueba comprueba que los toma y los suelta en el orden documentado.
+#[cfg(test)]
+pub(crate) fn adquirir_cerrojos() -> (
+    std::sync::MutexGuard<'static, ()>,
+    std::sync::MutexGuard<'static, ()>,
+) {
+    let benchmarks = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+    let comparaciones = CERROJO_COMPARACIONES.lock().unwrap_or_else(|e| e.into_inner());
+    (benchmarks, comparaciones)
+}
+
+/// Evalúa una comparación con el motor puro y le pone los datos de registro.
+/// **C.2, aún sin consumidor de producción**: se activa en C.3. Mientras tanto vive bajo
+/// `cfg(test)`, igual que el motor, para no dejar una ruta medio conectada ni un consumidor
+/// ficticio que solo sirva para que compile.
+#[cfg(test)]
+///
+/// Es el **único** punto en que se aplica la metodología de interpretación. `benchmarks.rs`
+/// aporta el instante y los identificadores; el significado lo decide el motor. No hay una
+/// segunda copia de las reglas.
+pub(crate) fn evaluar_comparacion(
+    comparacion: &BenchmarkComparison,
+    variable: Option<VariableEvaluada>,
+) -> EvaluacionPersistida {
+    let condiciones = crate::evaluacion::condiciones_de(comparacion, variable);
+    let mut ev = crate::evaluacion::evaluar(comparacion, &condiciones);
+
+    // El instante de registro es **este** (`evaluada_en`): el momento en que se guarda la
+    // comparación. No es la fecha de las pruebas (cada una tiene la suya) ni la de la
+    // vista previa, y no forma parte de la igualdad de significado.
+    ev.evaluada_en = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    // Los identificadores salen de la comparación evaluada, no de lo que diga el llamador.
+    ev.referencia = IdDeBenchmark {
+        id: comparacion.baseline.id.clone(),
+    };
+    ev.candidata = IdDeBenchmark {
+        id: comparacion.test.id.clone(),
+    };
+    ev
+}
+
+/// Comprobación interna de coherencia **antes de persistir** (C.2 §5).
+/// **C.2, aún sin consumidor de producción**: se activa en C.3. Mientras tanto vive bajo
+/// `cfg(test)`, igual que el motor, para no dejar una ruta medio conectada ni un consumidor
+/// ficticio que solo sirva para que compile.
+#[cfg(test)]
+///
+/// No es un segundo motor: no recalcula el veredicto. Solo verifica invariantes
+/// estructurales que el propio contrato exige, para que no se escriba una evaluación
+/// internamente contradictoria. Reutiliza el vocabulario de C.1.
+fn comprobar_coherencia(
+    ev: &EvaluacionPersistida,
+    comparacion: &BenchmarkComparison,
+) -> Result<(), String> {
+    // Identificadores: la evaluación describe **exactamente** estas dos grabaciones.
+    if ev.referencia.id != comparacion.baseline.id || ev.candidata.id != comparacion.test.id {
+        return Err("La evaluación no corresponde a la comparación.".to_string());
+    }
+
+    // Confianza: pertenece al vocabulario cerrado, nunca es un código de estado.
+    let confianza_valida = matches!(
+        ev.confianza.0.as_str(),
+        crate::evaluacion::codigos::CONFIANZA_OBSERVADA
+            | crate::evaluacion::codigos::CONFIANZA_NO_CONCLUYENTE
+            | crate::evaluacion::codigos::CONFIANZA_INSUFICIENTE
+    );
+    if !confianza_valida {
+        return Err(format!("Confianza fuera de vocabulario: {}", ev.confianza.0));
+    }
+
+    // Métricas: una preferencia establecida exige un motivo de preferencia concordante, y
+    // una preferencia sin establecer no puede llevar motivos que la afirmen.
+    for m in &ev.metricas {
+        let favor_candidata = m.motivos.iter().any(|c| c.0 == crate::evaluacion::codigos::FAVORECE_CANDIDATA);
+        let favor_referencia = m.motivos.iter().any(|c| c.0 == crate::evaluacion::codigos::FAVORECE_REFERENCIA);
+        match m.preferencia {
+            PreferenciaDeMetrica::FavorDeCandidata => {
+                if !favor_candidata || favor_referencia {
+                    return Err(format!("Motivos incoherentes en «{}».", m.clave));
+                }
+            }
+            PreferenciaDeMetrica::FavorDeReferencia => {
+                if !favor_referencia || favor_candidata {
+                    return Err(format!("Motivos incoherentes en «{}».", m.clave));
+                }
+            }
+            PreferenciaDeMetrica::NoEstablecida | PreferenciaDeMetrica::Indistinto => {
+                if favor_candidata || favor_referencia {
+                    return Err(format!(
+                        "Una métrica sin preferencia no puede favorecer a nadie («{}»).",
+                        m.clave
+                    ));
+                }
+            }
+        }
+    }
+
+    // Compatibilidad: si no está establecida, ninguna métrica puede preferir.
+    if ev.condiciones.compatibilidad_metodologica != CompatibilidadMetodologica::Establecida
+        && ev
+            .metricas
+            .iter()
+            .any(|m| m.preferencia == PreferenciaDeMetrica::FavorDeCandidata
+                || m.preferencia == PreferenciaDeMetrica::FavorDeReferencia)
+    {
+        return Err(
+            "Sin compatibilidad establecida no puede haber preferencia por métrica.".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Vista previa **evaluada**, con la ruta real.
+///
+/// Es la primera mitad del flujo: lee el historial, compara, evalúa y devuelve la
+/// confirmación que la interfaz enseñará y devolverá al guardar. Usa **las mismas**
+/// funciones que el guardado (`comparar_en`, `evaluar_comparacion`), así que la vista
+/// previa y lo persistido no pueden divergir por lógica distinta.
+///
+/// A diferencia de `comparar_en`, exige que cada identificador sea **inequívoco**
+/// (`buscar_unico`): una vista previa sobre una grabación ambigua mostraría el resultado de
+/// una copia arbitraria.
+///
+/// No mantiene el cerrojo más de lo que dura la lectura: entre la vista previa y la
+/// confirmación el usuario puede tardar lo que quiera, y ningún cerrojo cruza la espera.
+/// Por eso el guardado **vuelve a leer y recalcular** en vez de fiarse de esto.
+///
+/// **C.2, aún sin consumidor de producción**: se activa en C.3.
+#[cfg(test)]
+fn vista_previa_evaluada(
+    ruta_benchmarks: &Path,
+    baseline_id: &str,
+    test_id: &str,
+    variable: Option<VariableEvaluada>,
+) -> Result<crate::evaluacion::ConfirmacionDeVistaPrevia, String> {
+    let _turno = CERROJO_BENCHMARKS.lock().unwrap_or_else(|e| e.into_inner());
+    let data = try_load_benchmarks_data_de(ruta_benchmarks)
+        .map_err(|e| e.mensaje("El historial de pruebas"))?;
+
+    let baseline = buscar_unico(&data.benchmarks, baseline_id, "Benchmark base")?;
+    let test = buscar_unico(&data.benchmarks, test_id, "Benchmark de prueba")?;
+
+    // La comparación se construye con el mismo camino que el guardado, sobre las
+    // grabaciones ya resueltas de forma inequívoca.
+    let comparacion = comparacion_entre(baseline, test)?;
+
+    Ok(crate::evaluacion::ConfirmacionDeVistaPrevia {
+        evaluacion: evaluar_comparacion(&comparacion, variable),
+        comparacion,
+    })
+}
+
+/// Guarda una comparación **con** su evaluación, en una sola escritura atómica.
+///
+/// Trabaja sobre rutas explícitas, igual que el resto del archivo (`save_saved_data_en`),
+/// para que las pruebas ejerciten **esta** lógica y no una copia. La ruta pública de C.3
+/// envolverá esta función con `adquirir_cerrojos()` y las rutas reales.
+///
+/// **No** toma los cerrojos: los toma el llamador, y por eso no hay adquisición recursiva
+/// del mismo `Mutex`. Recibe la confirmación como **expectativa**, relee, recalcula y solo
+/// escribe si todo coincide. Lo que persiste son los objetos **recalculados**.
+#[cfg(test)]
+fn guardar_comparacion_evaluada(
+    ruta_benchmarks: &Path,
+    ruta_comparaciones: &Path,
+    confirmacion: &crate::evaluacion::ConfirmacionDeVistaPrevia,
+    variable: Option<VariableEvaluada>,
+) -> Result<SavedComparison, String> {
+    let benchmarks = try_load_benchmarks_data_de(ruta_benchmarks)
+        .map_err(|e| e.mensaje("El historial de pruebas"))?;
+
+    // Relectura **inequívoca**: si entre la vista previa y este momento ha aparecido una
+    // copia con el mismo identificador, no se puede saber cuál evaluar y se rechaza.
+    let baseline = buscar_unico(
+        &benchmarks.benchmarks,
+        &confirmacion.comparacion.baseline.id,
+        "Benchmark base",
+    )?;
+    let test = buscar_unico(
+        &benchmarks.benchmarks,
+        &confirmacion.comparacion.test.id,
+        "Benchmark de prueba",
+    )?;
+    let comparacion = comparacion_entre(baseline, test)?;
+
+    let evaluacion_nueva = evaluar_comparacion(&comparacion, variable);
+    let recalculada = crate::evaluacion::ConfirmacionDeVistaPrevia {
+        comparacion: comparacion.clone(),
+        evaluacion: evaluacion_nueva.clone(),
+    };
+
+    // Si algo cambió, se rechaza **sin escribir**.
+    crate::evaluacion::comprobar_confirmacion(confirmacion, &recalculada).map_err(|m| {
+        format!(
+            "La vista previa ya no corresponde a los datos actuales ({}). Vuelve a comparar antes de guardar; no se ha guardado nada.",
+            m.codigo()
+        )
+    })?;
+
+    // Coherencia interna antes de tocar el disco.
+    comprobar_coherencia(&evaluacion_nueva, &comparacion)?;
+
+    let mut data = try_load_saved_data_de(ruta_comparaciones)
+        .map_err(|e| e.mensaje("Las comparaciones guardadas"))?;
+
+    let already_saved = data.comparisons.iter().any(|c| {
+        c.comparison.baseline.id == comparacion.baseline.id
+            && c.comparison.test.id == comparacion.test.id
+    });
+    if already_saved {
+        return Err("Esta comparación ya está guardada en Mis pruebas.".to_string());
+    }
+
+    let now = chrono::Local::now();
+    let game_name = if comparacion.test.game_name.is_empty() {
+        comparacion.baseline.game_name.clone()
+    } else {
+        comparacion.test.game_name.clone()
+    };
+
+    let saved = SavedComparison {
+        id: format!("cmp_{}", now.format("%Y%m%d%H%M%S%3f")),
+        saved_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        game_name,
+        before_fps: comparacion.baseline.avg_fps,
+        after_fps: comparacion.test.avg_fps,
+        fps_change_percent: comparacion.fps_change_percent,
+        comparison: comparacion,
+        // La evaluación generada en **esta** operación, con los objetos recalculados.
+        evaluacion: Some(evaluacion_nueva),
+        evaluacion_ilegible: None,
+    };
+
+    data.comparisons.push(saved.clone());
+    // Una sola escritura atómica: la comparación y su evaluación aparecen juntas o no
+    // aparece ninguna de las dos.
+    save_saved_data_en(ruta_comparaciones, &data)?;
+
+    Ok(saved)
+}
+
 /// Guarda en "Mis pruebas" la comparación entre dos benchmarks (copia completa).
 #[tauri::command]
 pub fn save_comparison(baseline_id: String, test_id: String) -> Result<SavedComparison, String> {
@@ -4352,7 +4710,7 @@ mod tests {
         fs::read_to_string(fixture_log(nombre)).expect("fixture legible")
     }
 
-    fn tmp_dir(name: &str) -> std::path::PathBuf {
+    pub(crate) fn tmp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "thoriapp-test-{}-{}",
             name,
@@ -4420,7 +4778,7 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
-    fn bench(appid: u32, name: &str) -> Benchmark {
+    pub(crate) fn bench(appid: u32, name: &str) -> Benchmark {
         Benchmark {
             id: format!("{}-{}", appid, name),
             profile_id: String::new(),
@@ -6855,7 +7213,7 @@ mod tests {
         )
     }
 
-    fn leer_bench(path: &Path) -> Result<Option<BenchmarksData>, ErrorDatos> {
+    pub(crate) fn leer_bench(path: &Path) -> Result<Option<BenchmarksData>, ErrorDatos> {
         leer_datos::<BenchmarksData>(
             path,
             "benchmarks.json",
@@ -8997,4 +9355,628 @@ mod pruebas_v2_compatibilidad {
         assert_eq!(releido.benchmarks[0].metodologia_calculo, None);
         assert_eq!(releido.benchmarks[0].avg_fps, 60.0);
     }
+}
+
+/// 5.4.1.C.2: el guardado evaluado sobre la **ruta real**, no sobre una copia.
+///
+/// Estos tests usan los ayudantes de `tests` (`tmp_dir`, `bench`, `leer_bench`) y ejercitan
+/// `guardar_comparacion_evaluada`, el mismo cuerpo que llama la función pública. El
+/// directorio es temporal; la lógica es la de producción.
+#[cfg(test)]
+mod pruebas_c2_guardado {
+    use super::tests::{bench, leer_bench, tmp_dir};
+    use super::*;
+
+    // ──────────────── 5.4.1.C.2: guardado evaluado (ruta real) ────────────────
+    //
+    // Estas pruebas ejercitan el **núcleo real** (`guardar_comparacion_evaluada`), el
+    // mismo que usará la ruta pública: solo cambian las rutas por un directorio temporal.
+    // No son una copia de la lógica.
+
+    /// Prepara un historial con dos grabaciones y una comparación ya cargada.
+    /// Hace el viaje por JavaScript de verdad: `JSON.parse` + `JSON.stringify` en Node.
+    ///
+    /// Devuelve `None` si Node no está disponible, para que la prueba se omita en vez de
+    /// simular el viaje y dar un verde falso.
+    fn ir_y_volver_por_node(json: &str) -> Option<String> {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let mut hijo = Command::new("node")
+            .arg("-e")
+            .arg("let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.stringify(JSON.parse(s))))")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+
+        hijo.stdin.as_mut()?.write_all(json.as_bytes()).ok()?;
+        let salida = hijo.wait_with_output().ok()?;
+        if !salida.status.success() {
+            return None;
+        }
+        String::from_utf8(salida.stdout).ok()
+    }
+
+    pub(crate) fn escenario_c2(nombre: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = tmp_dir(nombre);
+        let ruta_bench = dir.join("benchmarks.json");
+        let ruta_cmp = dir.join("saved_comparisons.json");
+
+        let mut a = bench(1623730, "Palworld");
+        a.id = "b_a".to_string();
+        a.avg_fps = 100.0;
+        a.fps_1_percent_low = 100.0;
+        a.fps_0_1_percent_low = 100.0;
+        a.total_frames = 20000;
+        let mut b = a.clone();
+        b.id = "b_b".to_string();
+        b.avg_fps = 112.5;
+        b.fps_1_percent_low = 100.0;
+        b.fps_0_1_percent_low = 100.0;
+
+        let historial = BenchmarksData {
+            version: Some(BENCHMARKS_SCHEMA_VERSION),
+            benchmarks: vec![a.clone(), b.clone()],
+            counters: HashMap::new(),
+        };
+        escribir_atomico(
+            &ruta_bench,
+            &serde_json::to_string(&historial).expect("serializar"),
+        )
+        .expect("escribir historial");
+        escribir_atomico(&ruta_cmp, r#"{"version":2,"comparisons":[]}"#).expect("escribir");
+
+        (ruta_bench, ruta_cmp)
+    }
+
+    /// **Flujo completo de C.2**: vista previa → serialización → deserialización →
+    /// confirmación → recálculo → persistencia.
+    ///
+    /// La confirmación se obtiene de `vista_previa_evaluada` (la función real), se pasa por
+    /// JSON como haría el viaje de IPC, se deserializa y se guarda. Comprueba que el
+    /// significado sobrevive a la ida y vuelta completa.
+    #[test]
+    fn c2_flujo_completo_vista_previa_a_persistencia() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-flujo");
+
+        // 1. Vista previa real.
+        let vista = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("vista previa");
+
+        // 2. Viaje de serialización, como en el IPC.
+        let json = serde_json::to_string(&vista).expect("serializar la vista previa");
+        let vuelta: crate::evaluacion::ConfirmacionDeVistaPrevia =
+            serde_json::from_str(&json).expect("deserializar la confirmación");
+
+        // 3. La confirmación vuelve idéntica en significado (aun sin `PartialEq` en el
+        //    contrato deserializado, la comprobación es la del guardado).
+        assert_eq!(vuelta.comparacion.baseline.id, vista.comparacion.baseline.id);
+        assert_eq!(vuelta.comparacion.test.id, vista.comparacion.test.id);
+        assert_eq!(vuelta.evaluacion.estado, vista.evaluacion.estado);
+
+        // 4. Guardado con la confirmación que volvió del JSON.
+        let guardada = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &vuelta, None)
+            .expect("debe guardar");
+
+        // 5. Lo persistido coincide con lo evaluado en la vista previa.
+        let ev = guardada.evaluacion.clone().expect("con evaluación");
+        assert_eq!(ev.estado, vista.evaluacion.estado);
+        assert_eq!(ev.confianza, vista.evaluacion.confianza);
+        assert_eq!(ev.condiciones, vista.evaluacion.condiciones);
+        assert_eq!(ev.metricas.len(), vista.evaluacion.metricas.len());
+
+        // 6. Y el archivo se relee con todo dentro.
+        let datos = try_load_saved_data_de(&ruta_cmp).expect("releer");
+        assert_eq!(datos.comparisons.len(), 1);
+        assert!(datos.comparisons[0].evaluacion.is_some());
+    }
+
+    /// **Contrato de transporte**: Rust → JSON → `JSON.parse`/`JSON.stringify` en Node →
+    /// deserialización Rust → confirmación → persistencia.
+    ///
+    /// El viaje por JavaScript es el riesgo real de esta ruta: su `Number` es `f64` y
+    /// re-serializar puede cambiar la representación textual. Esta prueba ejecuta el viaje
+    /// **de verdad** con Node (si está disponible) sobre una vista previa sin modificar, y
+    /// exige que se pueda confirmar y guardar.
+    ///
+    /// Se distingue el caso **normal** (`c2_transporte_por_node_conserva_la_confirmacion`)
+    /// de los **extremos sintéticos**, que se prueban aparte contra la igualdad y no tienen
+    /// por qué ser guardables.
+    #[test]
+    fn c2_transporte_por_node_conserva_la_confirmacion() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-transporte");
+
+        // 1. Vista previa real, sin tocar.
+        let vista = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("vista");
+        let json = serde_json::to_string(&vista).expect("serializar");
+
+        // 2. Viaje por Node: parse + stringify, exactamente lo que hace la interfaz.
+        let viajado = match ir_y_volver_por_node(&json) {
+            Some(v) => v,
+            // Sin Node no se puede afirmar nada del transporte, y aquí el transporte es
+            // lo que se prueba: se falla en vez de omitir.
+            None => panic!("el viaje por Node debe ejecutarse: Node no está disponible"),
+        };
+
+        // 3. Deserialización en Rust: es el mismo tipo, no una copia.
+        let vuelta: crate::evaluacion::ConfirmacionDeVistaPrevia =
+            serde_json::from_str(&viajado).expect("deserializar lo que devolvió Node");
+
+        // 4. Confirmación contra el recálculo real: debe aceptarse.
+        crate::evaluacion::comprobar_confirmacion(
+            &vuelta,
+            &vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("recalcular"),
+        )
+        .expect("una vista previa sin modificar debe confirmarse tras el viaje");
+
+        // 5. Y se persiste.
+        let guardada = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &vuelta, None)
+            .expect("debe guardar tras el viaje");
+        assert!(guardada.evaluacion.is_some());
+        assert_eq!(
+            contar_comparaciones_para_c2(&ruta_cmp).expect("contar"),
+            1
+        );
+    }
+
+    /// Los valores **normales** del contrato sobreviven al viaje por Node.
+    ///
+    /// Se construye una confirmación con decimales de medición real (FPS con dos
+    /// decimales, porcentajes con muchos), opcionales ausentes y presentes, cero, y el
+    /// entero más grande que aparece en una grabación. No hay tolerancias: o se conserva
+    /// o se detecta.
+    #[test]
+    fn c2_transporte_conserva_valores_normales() {
+        let valores: [f64; 7] = [
+            0.0,          // cero real (no ausencia)
+            59.94,        // FPS de una pantalla
+            143.98,       // FPS medido
+            0.1 + 0.2,    // el binario que más se cita
+            12.3456789,   // porcentaje con muchos decimales
+            2.5,          // frame time
+            144000.0,     // total_frames real, como f64
+        ];
+
+        let json = serde_json::to_string(&valores).expect("serializar");
+        // En este proyecto el viaje por JS **es** el caso a probar: si Node no está, la
+        // prueba falla en vez de dar un verde que no demuestra nada.
+        let vuelta = ir_y_volver_por_node(&json).expect("el viaje por Node debe ejecutarse");
+        let otra: Vec<f64> = serde_json::from_str(&vuelta).expect("deserializar");
+
+        assert_eq!(otra.len(), valores.len());
+        for (original, despues) in valores.iter().zip(otra.iter()) {
+            assert_eq!(
+                original.to_bits(),
+                despues.to_bits(),
+                "{original} no sobrevivió al viaje: llegó {despues}"
+            );
+        }
+    }
+
+    /// Un **fallo de escritura** no deja comparación parcial ni fichero temporal.
+    ///
+    /// Se hace fallar la escritura de forma real: el destino es un **directorio**, así que
+    /// el `rename` final no puede sustituirlo. Lo que importa es que el archivo existente
+    /// quede **intacto** y que no quede un `.tmp` huérfano con la mitad de los datos.
+    #[test]
+    fn c2_fallo_de_escritura_no_deja_registro_parcial() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-fallo-escritura");
+        let vista = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("vista");
+
+        // Contenido previo conocido del archivo de comparaciones.
+        let antes = std::fs::read_to_string(&ruta_cmp).expect("leer antes");
+
+        // Se sustituye el destino por un directorio: `rename` sobre él falla.
+        std::fs::remove_file(&ruta_cmp).expect("quitar archivo");
+        std::fs::create_dir(&ruta_cmp).expect("crear directorio en su lugar");
+
+        let resultado = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &vista, None);
+        assert!(resultado.is_err(), "la escritura debe fallar");
+
+        // No queda ningún fichero temporal a medias.
+        let tmp = ruta_cmp.with_file_name("saved_comparisons.json.tmp");
+        assert!(!tmp.exists(), "no puede quedar un .tmp huérfano");
+
+        // El destino sigue siendo el directorio vacío: no se escribió nada dentro.
+        assert!(ruta_cmp.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&ruta_cmp).expect("leer dir").count(),
+            0,
+            "no puede haber un registro parcial"
+        );
+
+        // Restaurado el archivo, su contenido es el de antes (nada se modificó por el camino).
+        std::fs::remove_dir(&ruta_cmp).expect("quitar directorio");
+        std::fs::write(&ruta_cmp, &antes).expect("restaurar");
+        assert_eq!(std::fs::read_to_string(&ruta_cmp).expect("releer"), antes);
+    }
+
+    /// **Casos extremos sintéticos**: se comportan como deben y son distintos del normal.
+    ///
+    /// - `-0.0` y enteros por encima de 2⁵³ **no sobreviven** al viaje por JS (el primero
+    ///   pierde el signo, los segundos pierden precisión). Ninguna medición real los
+    ///   produce, pero si llegaran, la igualdad canónica los detecta y la confirmación se
+    ///   rechaza: el lado seguro.
+    /// - El caso **normal** no se ve afectado: eso lo fija la prueba de valores normales.
+    #[test]
+    fn c2_transporte_extremos_sinteticos_no_son_el_caso_normal() {
+        // `-0.0` pierde el signo en JavaScript.
+        let json = serde_json::to_string(&[-0.0f64]).expect("serializar");
+        let vuelta = ir_y_volver_por_node(&json).expect("viaje");
+        let tras: Vec<f64> = serde_json::from_str(&vuelta).expect("deserializar");
+        assert_eq!(tras[0], 0.0);
+        assert!(
+            !crate::evaluacion::mismos_f64(-0.0, tras[0]),
+            "-0.0 y 0.0 no pueden considerarse iguales tras el viaje"
+        );
+
+        // Un entero por encima de 2⁵³ pierde precisión.
+        let grande = 9_007_199_254_740_993u64; // 2^53 + 1
+        let json = serde_json::to_string(&[grande]).expect("serializar");
+        let vuelta = ir_y_volver_por_node(&json).expect("viaje");
+        let tras: Vec<u64> = serde_json::from_str(&vuelta).expect("deserializar");
+        assert_ne!(
+            tras[0], grande,
+            "un entero por encima de 2^53 no conserva su valor"
+        );
+
+        // Y el límite exacto sí se conserva (2^53 es representable).
+        let seguro = 9_007_199_254_740_992u64;
+        let json = serde_json::to_string(&[seguro]).expect("serializar");
+        let vuelta = ir_y_volver_por_node(&json).expect("viaje");
+        let tras: Vec<u64> = serde_json::from_str(&vuelta).expect("deserializar");
+        assert_eq!(tras[0], seguro);
+    }
+
+    /// Lo persistido **es** el resultado del recálculo, no la confirmación del llamador.
+    ///
+    /// Se guarda con una confirmación en la que la comparación ha sido alterada en un campo
+    /// que la evaluación no refleja (`avg_fps` de la candidata). Si el guardado se fiara de
+    /// la confirmación, ese valor quedaría en disco.
+    #[test]
+    fn c2_lo_persistido_viene_del_recalculo_no_del_llamador() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-recalculo");
+
+        // La vista previa real, y luego se altera un campo de la grabación candidata.
+        let mut confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+        confirmacion.comparacion.test.avg_fps = 9999.0;
+
+        // El guardado recalcula desde el archivo y detecta el cambio.
+        let err = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect_err("debe rechazar entradas cambiadas");
+        assert!(err.contains("cambi", ), "mensaje: {err}");
+
+        // Nada escrito: el valor inventado no está en disco.
+        let datos = try_load_saved_data_de(&ruta_cmp).expect("leer");
+        assert!(datos.comparisons.is_empty());
+    }
+
+    /// El margen aplicado se persiste tal cual se usó para evaluar.
+    #[test]
+    fn c2_el_margen_aplicado_queda_registrado() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-margen");
+        let vista = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("vista");
+
+        let guardada =
+            guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &vista, None).expect("guardar");
+        let ev = guardada.evaluacion.expect("con evaluación");
+
+        // El margen aplicado no baja nunca del suelo de empate de la interpretación.
+        let margen = ev
+            .condiciones
+            .margen_porcentaje
+            .expect("el margen aplicado debe constar");
+        assert!(margen >= crate::evaluacion::MIN_TIE_PERCENT, "margen {margen}");
+        // Y coincide con el que la vista previa había aplicado.
+        assert_eq!(
+            ev.condiciones.margen_porcentaje,
+            vista.evaluacion.condiciones.margen_porcentaje
+        );
+        // Y el ruido medido se conserva en la comparación persistida.
+        assert_eq!(
+            guardada.comparison.noise_percent,
+            vista.comparacion.noise_percent
+        );
+    }
+
+    /// `evaluada_en` **no** participates en la igualdad: la vista previa no la tiene y el
+    /// guardado la sella con el instante del registro.
+    #[test]
+    fn c2_evaluada_en_es_el_instante_del_guardado() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-instant");
+        let vista = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("vista");
+
+        // La vista previa sella un instante (es una evaluación completa)...
+        assert!(!vista.evaluacion.evaluada_en.is_empty());
+
+        let guardada = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &vista, None)
+            .expect("guardar");
+        let ev = guardada.evaluacion.expect("con evaluación");
+
+        // ...y el guardado sella el suyo, que es el del registro.
+        assert!(!ev.evaluada_en.is_empty());
+        // El formato es el mismo que usa el resto de la aplicación.
+        assert_eq!(ev.evaluada_en.len(), "2026-01-01 10:00:00".len());
+
+        // Y la diferencia de instante no impidió confirmar: no participa en la igualdad.
+        assert!(crate::evaluacion::comprobar_confirmacion(
+            &vista,
+            &crate::evaluacion::ConfirmacionDeVistaPrevia {
+                comparacion: guardada.comparison.clone(),
+                evaluacion: ev,
+            }
+        )
+        .is_ok());
+    }
+
+    /// La confirmación de lo que Rust acaba de generar se guarda **con** su evaluación.
+    #[test]
+    fn c2_la_confirmacion_valida_se_guarda_con_su_evaluacion() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-guarda");
+        // La confirmación sale de la función **real** de vista previa, no se compone a mano.
+        let confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+
+        let guardada = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect("debe guardar");
+
+        // Se ha persistido la evaluación, y es la recalcular.
+        let ev = guardada.evaluacion.expect("con evaluación");
+        assert!(ev.corresponde_a(&guardada.comparison));
+        assert!(ev.es_soportada(), "un estado conocido es soportado");
+        // El instante se ha sellado.
+        assert!(!ev.evaluada_en.is_empty());
+        // Un solo registro, y con la comparación completa (no un resumen).
+        assert_eq!(guardada.comparison.baseline.id, "b_a");
+        assert_eq!(guardada.comparison.test.id, "b_b");
+    }
+
+    /// Una confirmación cuyas entradas ya no existen se rechaza **sin escribir**.
+    #[test]
+    fn c2_una_confirmacion_obsoleta_no_escribe_nada() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-obsoleta");
+        // La confirmación sale de la función **real** de vista previa, no se compone a mano.
+        let confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+
+        // El archivo cambia entre la vista previa y el guardado: desaparece la candidata.
+        let mut historial = leer_bench(&ruta_bench).unwrap().unwrap();
+        historial.benchmarks.retain(|b| b.id != "b_b");
+        escribir_atomico(
+            &ruta_bench,
+            &serde_json::to_string(&historial).unwrap(),
+        )
+        .unwrap();
+
+        let err = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect_err("debe rechazar");
+        assert!(err.contains("no encontrado"), "mensaje: {err}");
+
+        // Y no se ha creado ni modificado el archivo de comparaciones.
+        let datos = try_load_saved_data_de(&ruta_cmp).expect("leer");
+        assert!(
+            datos.comparisons.is_empty(),
+            "un rechazo no puede dejar registro a medias"
+        );
+    }
+
+    /// Un rechazo deja **los dos archivos** con el mismo contenido y la misma fecha de
+    /// modificación.
+    ///
+    /// Es más fuerte que comprobar que no hay registros: si la ruta reescribiera el archivo
+    /// sin añadir nada, el contenido coincidiría pero el `mtime` no.
+    #[test]
+    fn c2_un_rechazo_no_toca_ningun_archivo() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-sin-tocar");
+        let vista = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None).expect("vista");
+
+        // Se fuerza un rechazo: una confirmación con la candidata alterada.
+        let mut manipulada = vista.clone();
+        manipulada.comparacion.test.avg_fps = 1.0;
+
+        let contenido_bench = std::fs::read(&ruta_bench).expect("leer bench");
+        let contenido_cmp = std::fs::read(&ruta_cmp).expect("leer cmp");
+        let mtime_bench = std::fs::metadata(&ruta_bench).and_then(|m| m.modified()).ok();
+        let mtime_cmp = std::fs::metadata(&ruta_cmp).and_then(|m| m.modified()).ok();
+
+        // Se deja pasar algo de tiempo para que un rewrite cambie el mtime de verdad.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &manipulada, None)
+            .expect_err("debe rechazar");
+
+        assert_eq!(std::fs::read(&ruta_bench).expect("releer"), contenido_bench);
+        assert_eq!(std::fs::read(&ruta_cmp).expect("releer"), contenido_cmp);
+        assert_eq!(
+            std::fs::metadata(&ruta_bench).and_then(|m| m.modified()).ok(),
+            mtime_bench,
+            "un rechazo no puede reescribir el historial"
+        );
+        assert_eq!(
+            std::fs::metadata(&ruta_cmp).and_then(|m| m.modified()).ok(),
+            mtime_cmp,
+            "un rechazo no puede reescribir las comparaciones"
+        );
+    }
+
+    /// Cambiar una entrada sin que cambie el veredicto también se rechaza, y no escribe.
+    #[test]
+    fn c2_cambio_de_entradas_rechaza_y_no_escribe() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-entradas");
+        // La confirmación sale de la función **real** de vista previa, no se compone a mano.
+        let confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+
+        let mut historial = leer_bench(&ruta_bench).unwrap().unwrap();
+        for b in &mut historial.benchmarks {
+            if b.id == "b_b" {
+                b.launch_command = "otro comando %command%".to_string();
+            }
+        }
+        escribir_atomico(&ruta_bench, &serde_json::to_string(&historial).unwrap()).unwrap();
+
+        let err = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect_err("debe rechazar");
+        assert!(err.contains("entradas_cambiadas"), "mensaje: {err}");
+        assert!(try_load_saved_data_de(&ruta_cmp).unwrap().comparisons.is_empty());
+    }
+
+    /// Lo que se persiste son los objetos de Rust, no los que envía el llamador.
+    #[test]
+    fn c2_no_se_persiste_lo_que_diga_el_llamador() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-manipulada");
+        let mut confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+        // El llamador "cambia" el veredicto en su copia.
+        confirmacion.evaluacion.estado = CodigoDeEvaluacion("mejora".to_string());
+        confirmacion.evaluacion.metricas.clear();
+
+        let err = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect_err("no corresponde");
+        assert!(err.contains("significado_cambiado"), "mensaje: {err}");
+        assert!(try_load_saved_data_de(&ruta_cmp).unwrap().comparisons.is_empty());
+    }
+
+    /// La evaluación guardada se puede releer idéntica, y no se recalcula.
+    #[test]
+    fn c2_la_evaluacion_guardada_se_relee_sin_tocarla() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-relee");
+        // La confirmación sale de la función **real** de vista previa, no se compone a mano.
+        let confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+        let guardada = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect("guardar");
+        let ev = guardada.evaluacion.clone().expect("con evaluación");
+
+        let releido = try_load_saved_data_de(&ruta_cmp).expect("leer");
+        let misma = &releido.comparisons[0];
+        assert_eq!(misma.evaluacion.as_ref(), Some(&ev));
+        // Y el estado de la evaluación registrada está soportado (no malformada ni ausente).
+        assert!(matches!(
+            misma.estado_de_la_evaluacion(),
+            EstadoDeLaEvaluacion::Soportada(_)
+        ));
+    }
+
+    /// Guardar dos veces la misma comparación no duplica el registro.
+    #[test]
+    fn c2_no_se_guarda_dos_veces_la_misma_comparacion() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-duplicada");
+        // La confirmación sale de la función **real** de vista previa, no se compone a mano.
+        let confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+        guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None).expect("1ª");
+
+        let err = guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None)
+            .expect_err("2ª rechazada");
+        assert!(err.contains("ya está guardada"), "mensaje: {err}");
+        assert_eq!(try_load_saved_data_de(&ruta_cmp).unwrap().comparisons.len(), 1);
+    }
+
+    /// La comparación y su evaluación se escriben **juntas**: no existe el estado
+    /// intermedio con una sin la otra.
+    #[test]
+    fn c2_comparacion_y_evaluacion_se_escriben_juntas() {
+        let (ruta_bench, ruta_cmp) = escenario_c2("c2-atomico");
+        // La confirmación sale de la función **real** de vista previa, no se compone a mano.
+        let confirmacion = vista_previa_evaluada(&ruta_bench, "b_a", "b_b", None)
+            .expect("vista previa");
+        guardar_comparacion_evaluada(&ruta_bench, &ruta_cmp, &confirmacion, None).expect("guardar");
+
+        let datos = try_load_saved_data_de(&ruta_cmp).unwrap();
+        assert_eq!(datos.comparisons.len(), 1);
+        let c = &datos.comparisons[0];
+        // La evaluación embebida habla de los benchmarks embebidos en la misma comparación.
+        assert!(c.evaluacion.as_ref().unwrap().corresponde_a(&c.comparison));
+        // Y no hay una segunda escritura suelta: solo un archivo, un registro.
+        assert_eq!(datos.version, Some(2));
+    }
+}
+
+/// Ayudante de pruebas: ejecuta el flujo real de vista previa + guardado sobre rutas
+/// dadas, para las pruebas de concurrencia de `evaluacion::pruebas_c2`.
+///
+/// Devuelve `Ok(true)` si guardó, `Ok(false)` si la vista previa o el guardado
+/// rechazaron (situación esperada bajo carrera), y `Err` solo si algo es ilegible.
+#[cfg(test)]
+pub(crate) fn guardar_con_vista_previa_para_c2(
+    ruta_benchmarks: &Path,
+    ruta_comparaciones: &Path,
+) -> Result<bool, String> {
+    let vista = match vista_previa_evaluada(ruta_benchmarks, "b_a", "b_b", None) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    match guardar_comparacion_evaluada(ruta_benchmarks, ruta_comparaciones, &vista, None) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Ayudante de pruebas: expone `escenario_c2` a `evaluacion::pruebas_c2`.
+#[cfg(test)]
+pub(crate) fn escenario_c2_para_c2(nombre: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    pruebas_c2_guardado::escenario_c2(nombre)
+}
+
+/// Ayudante de pruebas: cuántos registros hay en el archivo de comparaciones, para las
+/// pruebas de concurrencia de `evaluacion::pruebas_c2`.
+///
+/// Devuelve solo datos públicos: el tipo del archivo no se expone fuera de este módulo.
+#[cfg(test)]
+pub(crate) fn contar_comparaciones_para_c2(ruta: &Path) -> Result<usize, String> {
+    try_load_saved_data_de(ruta)
+        .map(|d| d.comparisons.len())
+        .map_err(|e| e.mensaje("El archivo de comparaciones"))
+}
+
+/// Ayudante de pruebas: los identificadores base y candidato de cada comparación guardada,
+/// para comprobar que lo leído bajo carrera es coherente.
+#[cfg(test)]
+pub(crate) fn ids_de_comparaciones_para_c2(ruta: &Path) -> Result<Vec<(String, String)>, String> {
+    let datos =
+        try_load_saved_data_de(ruta).map_err(|e| e.mensaje("El archivo de comparaciones"))?;
+    Ok(datos
+        .comparisons
+        .iter()
+        .map(|c| {
+            (
+                c.comparison.baseline.id.clone(),
+                c.comparison.test.id.clone(),
+            )
+        })
+        .collect())
+}
+
+/// Ayudante de pruebas: expone `adquirir_cerrojos` a los tests de `evaluacion::pruebas_c2`.
+#[cfg(test)]
+pub(crate) fn adquirir_cerrojos_para_c2() -> (
+    std::sync::MutexGuard<'static, ()>,
+    std::sync::MutexGuard<'static, ()>,
+) {
+    adquirir_cerrojos()
+}
+
+/// Ayudante de pruebas: expone `buscar_unico` a los tests de `evaluacion::pruebas_c2`.
+#[cfg(test)]
+pub(crate) fn buscar_unico_para_c2<'a>(
+    benchmarks: &'a [Benchmark],
+    id: &str,
+    que: &str,
+) -> Result<&'a Benchmark, String> {
+    buscar_unico(benchmarks, id, que)
+}
+
+/// Ayudante de pruebas: expone `construir_snapshot` a los tests de `evaluacion::pruebas_c2`
+/// sin cambiar la visibilidad de producción.
+#[cfg(test)]
+pub(crate) fn construir_snapshot_para_c2(
+    b: &Benchmark,
+    ctx: &ContextoDeCaptura,
+    sesion: Option<&crate::sessions::SesionDeEjecucion>,
+    ahora: &str,
+) -> SnapshotConfig {
+    construir_snapshot(b, ctx, sesion, ahora)
 }
