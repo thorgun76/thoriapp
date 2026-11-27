@@ -1256,7 +1256,7 @@ fn noise_percent(fps: &[f64]) -> Option<f64> {
 /// Si falta el dato de alguna de las dos, esa parte no aporta: el margen no puede
 /// inventarse más incertidumbre de la que hay. Con una sola grabación medida el margen
 /// es el de esa grabación, no `√2` veces mayor; con ninguna, el mínimo de la casa.
-fn combined_noise(a: Option<f64>, b: Option<f64>) -> f64 {
+pub(crate) fn combined_noise(a: Option<f64>, b: Option<f64>) -> f64 {
     let a = a.filter(|v| v.is_finite() && *v > 0.0);
     let b = b.filter(|v| v.is_finite() && *v > 0.0);
 

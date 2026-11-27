@@ -16,12 +16,198 @@ la incidencia se aplaza.
 | **5.1 — Almacenamiento e integridad** | **Cerrada** |
 | **5.2 — Instantáneas de configuración** | **Cerrada** (incluye metadatos de MangoHud) |
 | **5.3 — Captura temprana y evidencias de ejecución** | **Cerrada con limitación conocida.** El observador es **experimental y opcional, apagado por defecto**. Compatibilidad **individual validada en el equipo** en Steam, Heroic, Heronite y Lutris (Wine); simultaneidad validada en **Steam + Steam** (Palworld + Deskrawl) y **Lutris + Steam** (Starsector + Deskrawl). **Heroic + Heronite no garantizada** (ver «Limitación conocida»). |
-| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado**, **bloque B cerrado** (persistencia de evaluaciones); bloque C sin comenzar. |
+| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado**, **bloque B cerrado** (persistencia de evaluaciones); **C.1 cerrado** (motor puro desconectado de producción); C.2 y C.3 sin comenzar. |
 | 6 — Rediseño visual | Pendiente |
 | 7 — (reservada) | Pendiente |
 | **8 — Internacionalización (i18n)** | **Pendiente, no empezada.** Registrada en `docs/planificacion-fases.md`. |
 | **9 — Seguridad y hardening** | **Pendiente, no empezada.** Auditoría avanzada; **no** autoriza a posponer vulnerabilidades conocidas. |
 | **10 — Distribución pública** | **Pendiente, no empezada.** |
+
+## 5.4.1.C.1 — motor de interpretación (**cerrado**)
+
+Motor **puro** que traduce el contrato numérico de B (`BenchmarkComparison`) en el
+semántico (`EvaluacionPersistida`): qué se puede afirmar de una comparación y con qué
+apoyo. Sin reloj, sin disco, sin IPC y **sin conectar a producción**: el módulo se
+registra con `#[cfg(test)] mod evaluacion;` y no lo referencia ningún camino de ejecución.
+
+### Qué hace
+
+- `evaluar(&BenchmarkComparison, &CondicionesDeComparacion) -> EvaluacionDeComparacion`.
+  Sin `Result`: todo caso admitido tiene representación. Lo que falta es «no consta»,
+  nunca cero.
+- `condiciones_de(&BenchmarkComparison, Option<VariableEvaluada>)
+  -> CondicionesDeComparacion`. Aplica el margen **`max(5 %, ruido combinado)`** y
+  distingue tres cosas: ruido original **ausente** (`None`), **estimación con suelo**
+  (el margen no baja de 5 %) y **margen aplicado** (lo que se guarda).
+
+### Distinciones que el motor mantiene separadas
+
+magnitud · dirección · apoyo · elegibilidad · preferencia · participación. Una métrica
+puede tener magnitud y dirección observadas y **no** ser elegible: se registra y no decide.
+
+Los niveles de **confianza** son un vocabulario cerrado y propio —`no_concluyente`,
+`observada`, `insuficiente`—, **distinto** del de estado. Un estado dice *qué* cambió; la
+confianza dice *qué lo sostiene*. Escribir `mejora` en el campo `confianza` es un error.
+
+Códigos emitidos, sobre el campo `limitaciones`/`motivos` **existente** de B (sin campos ni
+estados nuevos): `participo`, `dentro_del_margen`, `favorece_candidata`,
+`favorece_referencia`, `sin_datos`, `valor_no_valido`, `no_elegible`, `apoyo_no_consta`,
+`apoyo_insuficiente`, `evaluacion_parcial`, `perdida_observada_sin_evaluar`,
+`cobertura_insuficiente_para_conclusion_global`, `sin_metricas_medibles`,
+`compatibilidad_no_establecida`, `sin_margen`.
+
+### Correcciones aplicadas durante la revisión final de C.1
+
+1. **Un llamador podía fabricar compatibilidad.** `evaluar` aceptaba
+   `CompatibilidadMetodologica::Establecida` para dos grabaciones sin metodología
+   declarada y producía `mejora`. Ahora la compatibilidad se toma de los **benchmarks** y
+   gana siempre el criterio más conservador: una condición externa no puede afirmar una
+   comparabilidad que las grabaciones no establecen.
+2. **`sin_cambio` sin margen.** Sin margen no se juzgó nada; el estado vacío caía en
+   `sin_cambio`, que afirma que todo quedó dentro de un margen inexistente. Ahora es
+   `datos_insuficientes` con motivo `sin_margen`.
+3. **Preferencia superviviente a `solo_descriptiva`.** El estado decía «descriptiva»
+   mientras cada métrica conservaba `FavorDeCandidata`: un ganador alcanzable por
+   cualquier consumidor. Ahora la preferencia se neutraliza en las métricas.
+4. **Ruido medido de cero confundido con ausente.** Se colapsaba `Some(0.0)` a `None`.
+   Un 0 medido dice «no se detectó variación»; `None` dice «no se estimó».
+5. **Participación derivada de la preferencia.** Una métrica dentro del margen participa
+   (es la razón de `sin_cambio`) sin favorecer a nadie. `participo` se registra aparte.
+6. **La confianza contenía códigos de estado.** `confianza` llevaba `mejora`,
+   `sin_cambio`, `solo_descriptiva` o `datos_insuficientes`: el estado repetido. Ahora usa
+   solo niveles de confianza. Además, superar el margen y ser elegible **no** dan confianza
+   alta: como mucho, `observada` (se midió por encima del ruido de muestreo), que no es
+   reproducibilidad demostrada.
+7. **Una métrica excluida conservaba `favorece_referencia`.** El campo `preferencia` se
+   neutralizaba, pero el motivo de preferencia ya se había añadido: el motivo afirmaba por
+   la puerta de atrás lo que el campo negaba. Ahora se retiran los dos a la vez. La misma
+   contradicción existía en `solo_descriptiva` (se retiraba `participo`, no `favorece_*`) y
+   se ha corregido también. La métrica excluida conserva magnitud, dirección numérica y
+   motivo de exclusión, pero no favorece a nadie.
+8. **Fórmula de ruido duplicada.** El motor replicaba la cuadratura de
+   `combined_noise`. Ahora la reutiliza directamente (`pub(crate)`). El valor combinado
+   que se registra es el que devuelve esa función, con su suelo `MIN_NOISE`; el margen,
+   en cambio, tiene su propio suelo del 5 %. Por eso 0/0 registra `3.0` de ruido y `5.0`
+   de margen: no es una contradicción, son dos suelos distintos.
+   Nota: `combined_noise` filtra `> 0`, así que no puede distinguir «0 medido» de
+   «ausente»; esa distinción se resuelve en `condiciones_de` mirando los valores
+   originales, sin tocar la función.
+
+### Validación ejecutada
+
+- `cargo test --locked --bins`: **991 aprobadas, 0 fallidas, 1 ignorada** (`--list`: 992).
+  La ignorada es `anticheat::tests::manual_descarga_y_busca_appids_reales`, previa y manual.
+- Inventario de pruebas frente a `ec32935` (`git worktree`, conteo real): **953 → 992**,
+  **+39, 0 eliminadas**, las 39 de `evaluacion::`. No se modificó ninguna prueba anterior.
+- `cargo clippy --locked --bins -- -D warnings`: **exit 0**.
+- `cargo clippy --locked --bins --tests`: **exit 0**, **0 avisos en `evaluacion.rs`**.
+  Quedan **42** avisos, todos de deuda previa (12 `evidencia_proceso.rs`, 8 `benchmarks.rs`,
+  6 `launch_command.rs`, 6 `hw.rs`, y el resto repartidos). Ninguno corresponde a
+  `combined_noise`. La deuda registrada **no se amplió**; no se añadió ningún `#[allow]`.
+- `npx tsc --noEmit`: exit 0. `npx vitest run`: **1058 aprobadas**, igual que en B.
+- `npm run build`: exit 0. `npm audit --omit=dev`: 0 vulnerabilidades.
+- `cargo audit --file Cargo.lock`: exit 0 con **3 avisos visibles**: `chrono`
+  (RUSTSEC-2026-0543, unmaintained), `proc-macro-error` (RUSTSEC-2024-0370, unmaintained) y
+  `glib` (RUSTSEC-2024-0429, unsound). No hay `audit.toml`, `deny.toml` ni exclusiones:
+  el exit 0 viene de que son avisos y no vulnerabilidades, no de silenciarlos.
+- `git diff --check`: exit 0. `rustfmt --check` en los dos ficheros nuevos: limpio.
+- **Desconexión comprobada dinámicamente**, no por búsqueda de texto: `nm -C` sobre el
+  binario de producción no contiene `thoriapp::evaluacion::`. Además, mutar
+  `MIN_TIE_PERCENT` de 5 a 99 hace **fallar 4 pruebas**, lo que demuestra que la suite
+  ejercita el motor de verdad (fichero restaurado e idéntico).
+- **Reutilización del ruido comprobada por prueba**
+  (`c1_el_motor_reutiliza_la_misma_funcion_de_ruido`): para nueve pares de entrada, lo que
+  el motor registra coincide con `benchmarks::combined_noise`, y el margen con
+  `max(combinado, 5 %)`.
+- **Confianza y preferencia comprobadas por prueba**: `c1_la_confianza_usa_solo_codigos_de_confianza`
+  (recorre los seis estados y exige un nivel de confianza, nunca el estado),
+  `c1_una_metrica_excluida_no_favorece_a_nadie` y
+  `c1_los_estados_sin_veredicto_no_favorecen_ni_fingen_confianza` (ningún estado sin
+  veredicto deja preferencia ni por campo ni por motivo).
+- **Compatibilidad con B comprobada por prueba** (`c1_la_evaluacion_parcial_es_soportada_por_b`):
+  una evaluación parcial real sigue siendo `es_soportada()` y `corresponde_a()`, y conserva
+  sus códigos tras la vuelta a disco. `es_soportada` valida solo versión y estado; los
+  motivos y limitaciones son códigos abiertos por diseño, así que **C.2 no necesita
+  adaptar nada** de la clasificación.
+
+  **Matiz importante:** que `es_soportada()` sea `true` **no** garantiza la validez
+  semántica de todos los campos. Solo comprueba la versión de metodología y que el estado
+  esté en el vocabulario conocido; **no** valida `confianza`, `motivos`, `limitaciones` ni
+  las métricas. Por eso los dos defectos anteriores (confianza con códigos de estado y
+  preferencia contradictoria) pasaban `es_soportada()` sin objeción. La coherencia interna
+  la garantizan las pruebas del motor, no el clasificador. **C.2 no debe ampliar el
+  clasificador**; si en el futuro se quiere validar esa coherencia al leer de disco, es una
+  decisión aparte y no se toma aquí.
+
+### Limitaciones que se conservan (no las introduce C.1)
+
+- Superar el margen **no** es una mejora reproducible ni significación validada: solo que
+  las dos grabaciones midieron distinto más allá del ruido de muestreo.
+- Un ruido de cero **no** demuestra ausencia de variabilidad real.
+- La elegibilidad del 0,1 % low reutiliza el criterio operativo de `low01Reliability`
+  (frontera real **9500** muestras: 9499 no, 9500 sí). Es un criterio operativo, **no** un
+  mínimo estadístico validado.
+- **No existe** criterio validado de elegibilidad para el 1 % low: decide cuando sus
+  valores constan. Su revisión es 5.4.3.
+- El ruido combinado **no** se duplica: el motor llama a `benchmarks::combined_noise`, que
+  pasó de `fn` a `pub(crate)` (cambio de visibilidad de una línea, sin tocar fórmula,
+  entradas ni resultados).
+- D1 (`save_comparison` guarda `evaluacion: None`), D2, D3 y D9 **siguen abiertos**: son
+  C.2/C.3.
+
+### Cierre
+
+C.1 queda **cerrado** con aprobación explícita. El motor es lógica pura: no se ha tocado la
+persistencia (`save_comparison` sigue guardando `evaluacion: None`) ni se ha conectado a
+producción. La única modificación fuera del módulo es el cambio de visibilidad de
+`combined_noise` (`fn` → `pub(crate)`) y el registro `#[cfg(test)] mod evaluacion;`.
+
+**Recuento de pruebas**
+
+| Plano | Aprobadas |
+|---|---|
+| Rust (`cargo test --locked --bins`) | **991** |
+| TypeScript (`vitest`) | **1058** |
+| **Total** | **2049** |
+
+- **39 pruebas nuevas** respecto a B (`ec32935`), todas de `evaluacion::`.
+- **Cero eliminadas.** Inventario: 953 → 992 registradas.
+- **Una ignorada preexistente**: `anticheat::tests::manual_descarga_y_busca_appids_reales`
+  (prueba manual con red, ya estaba así en B).
+- **42 avisos de Clippy en código de pruebas**, todos de deuda previa; ninguno en
+  `evaluacion.rs` y sin ningún `#[allow]` añadido. `--bins` limpio con `-D warnings`.
+- **Tres avisos de `cargo audit`** (`chrono` RUSTSEC-2026-0543, `proc-macro-error`
+  RUSTSEC-2024-0370, `glib` RUSTSEC-2024-0429), visibles y **sin exclusiones** ni
+  `audit.toml`: el exit 0 refleja que son avisos y no vulnerabilidades.
+
+**Estado del motor**: puro y **desconectado de producción**, comprobado sobre el binario
+(`nm -C` no contiene `thoriapp::evaluacion::`) y por el registro `#[cfg(test)]`.
+
+### Pendiente para C.2 y C.3
+
+- **Activación coherente** de evaluación, persistencia y presentación: que
+  `save_comparison` calcule y persista la evaluación en la **misma escritura**, con
+  `evaluada_en` e ids, sin confiar en el frontend.
+- **Correspondencia entre vista previa confirmada y evaluación guardada**: lo que el
+  usuario ve antes de guardar debe ser lo que queda en disco.
+- **Coherencia semántica de las evaluaciones generadas**: hoy la garantizan las pruebas del
+  motor; al activar la persistencia hay que asegurar que sigue habiendo **una** fuente de
+  verdad y no dos intérpretes en desacuerdo (D2).
+- **Distinción entre evaluación soportada y evaluación semánticamente válida**:
+  `es_soportada()` solo valida versión de metodología y vocabulario del estado; **no**
+  valida `confianza`, `motivos`, `limitaciones` ni métricas. No debe presentarse como
+  garantía de corrección semántica.
+- **Presentación de la confianza observada sin afirmar reproducibilidad**: `observada` dice
+  que se midió por encima del ruido de muestreo, no que el resultado se reproduzca.
+
+### Limitaciones metodológicas (pendientes de 5.4.3)
+
+- Superar el margen **no** es mejora reproducible ni significación validada.
+- Un ruido de cero **no** demuestra ausencia de variabilidad real.
+- La elegibilidad del 0,1 % low reutiliza el criterio operativo de `low01Reliability`
+  (frontera 9500 muestras): es operativo, **no** un mínimo estadístico validado.
+- **No existe** criterio validado de elegibilidad para el 1 % low.
+- D1, D2, D3 y D9 siguen abiertos: son C.2/C.3.
 
 ## Cierre de 5.3 — validación real y limitación conocida
 

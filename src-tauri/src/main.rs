@@ -5,6 +5,8 @@ mod covers;
 mod cpu_rank;
 mod diagnostico_procesos;
 mod engine;
+#[cfg(test)]
+mod evaluacion;
 mod evidencia_proceso;
 #[cfg(test)]
 mod fixtures_procesos;
