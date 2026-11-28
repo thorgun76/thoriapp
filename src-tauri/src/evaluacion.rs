@@ -1043,3 +1043,5 @@ fn misma_evaluacion(a: &EvaluacionDeComparacion, b: &EvaluacionDeComparacion) ->
 mod pruebas;
 #[cfg(test)]
 mod pruebas_c2;
+#[cfg(test)]
+mod pruebas_c3_20;

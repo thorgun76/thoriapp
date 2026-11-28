@@ -1,8 +1,8 @@
 # Estado del proyecto
 
-Última actualización: **5.3 CERRADA** con una limitación conocida —validada en el equipo real
-en Steam, Heroic, Heronite y Lutris; la simultaneidad Heroic + Heronite queda sin garantizar y
-la incidencia se aplaza.
+Última actualización: **C.3 CERRADA** (presentación y activación del motor de evaluación),
+validada en el equipo con datos sintéticos. La validación con **juegos reales** sigue
+pendiente y la limitación de 5.3 (simultaneidad Heroic + Heronite) continúa abierta.
 
 ## Fases
 
@@ -16,7 +16,7 @@ la incidencia se aplaza.
 | **5.1 — Almacenamiento e integridad** | **Cerrada** |
 | **5.2 — Instantáneas de configuración** | **Cerrada** (incluye metadatos de MangoHud) |
 | **5.3 — Captura temprana y evidencias de ejecución** | **Cerrada con limitación conocida.** El observador es **experimental y opcional, apagado por defecto**. Compatibilidad **individual validada en el equipo** en Steam, Heroic, Heronite y Lutris (Wine); simultaneidad validada en **Steam + Steam** (Palworld + Deskrawl) y **Lutris + Steam** (Starsector + Deskrawl). **Heroic + Heronite no garantizada** (ver «Limitación conocida»). |
-| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado**, **bloque B cerrado** (persistencia de evaluaciones); **C.1 cerrado** (motor puro desconectado de producción); C.2 y C.3 sin comenzar. |
+| 5.4 — Calidad de comparación | **En curso.** 5.4.0 (auditoría estadística) **cerrada**. 5.4.1 dividida en A/B/C; **bloque A cerrado**, **bloque B cerrado** (persistencia de evaluaciones); **C.1 cerrado** (motor puro desconectado de producción); **C.2 cerrado** (integración y persistencia atómica); **C.3 cerrada** (presentación y activación) dentro del alcance acordado, validada en el equipo con datos sintéticos. |
 | 6 — Rediseño visual | Pendiente |
 | 7 — (reservada) | Pendiente |
 | **8 — Internacionalización (i18n)** | **Pendiente, no empezada.** Registrada en `docs/planificacion-fases.md`. |
@@ -412,6 +412,833 @@ Una prueba de concurrencia escrita para esta revisión **se interbloqueó**: tom
 cerrojos en el hilo padre y los retenía mientras los hilos hijos intentaban adquirirlos
 (`Mutex` no es reentrante). El defecto era de la prueba, no del código; se corrigió y ahora
 cada hilo toma los suyos.
+
+## 5.4.1.C.3 — presentación y activación del motor (**implementado, sin cerrar**)
+
+C.3 activa el motor de C.1 y la persistencia de C.2 sobre la interfaz real: **una sola
+fuente de verdad** (`evaluar_comparacion`), **un solo modelo de presentación** y **ningún
+intérprete en frontend**. Se entrega como bloque C.3.a–d. **No se declara cerrado**: falta
+la validación real en el equipo (ver «Limitaciones»).
+
+### Qué se ha activado
+
+Dos comandos IPC sustituyen a los antiguos, sin ruta alternativa:
+
+| Antes | Ahora |
+|---|---|
+| `compare_benchmarks` | `compare_benchmarks_evaluada(baseline_id, test_id, variable)` |
+| `save_comparison` | `save_comparison_evaluada(confirmacion, variable)` |
+
+- La comparación **no existe sin evaluación**: la vista previa devuelve
+  `ConfirmacionDeVistaPrevia` (comparación + evaluación) y el guardado **solo** acepta esa
+  confirmación. No hay un estado intermedio con la comparación pero sin evaluación.
+- El guardado **recalcula** y compara con la confirmación (C.2). Lo persistido sale del
+  recálculo, nunca del llamador.
+- Los comandos antiguos están **retirados** de `main.rs` y de `api.ts`.
+
+### Contrato de errores tipados
+
+`ErrorDeEvaluacion` es **contrato IPC**, no formato en disco: viaja con
+`#[serde(tag = "tipo", rename_all = "snake_case")]` y seis variantes —
+`confirmacion_rechazada { motivo }`, `grabacion_inexistente`, `identificador_ambiguo`,
+`comparacion_ya_existente { comparacion_id }`, `lectura_fallida { archivo, mensaje }` y
+`escritura_fallida { mensaje }`.
+
+El frontend decide por **discriminante**, nunca por el texto:
+
+- `confirmacion_rechazada` con motivo `entradas_cambiadas` o `evaluacion_no_corresponde`
+  significa «los datos cambiaron, repite la vista previa» — no un error del usuario.
+- `comparacion_ya_existente` **no** es un fallo: es que ya estaba guardada.
+- Un error de **transporte** (IPC caído, timeout) no es `ErrorDeEvaluacion`: no afirma nada
+  sobre el disco. Se relee la lista y se busca **el par**; si el par está, el guardado
+  ocurrió; si no se puede saber, se conserva la incertidumbre (`desconocido`) y **no se
+  ofrece volver a guardar**, porque repetir podría chocar con el duplicado sin que el
+  usuario sepa cuál es el estado real.
+
+`MotivoDeRechazo::codigo()` ya existía en C.1 y se **reutiliza**; los discriminantes nuevos
+son operativos (qué hacer), no metodológicos (qué se puede afirmar).
+
+### Un solo modelo de presentación
+
+`src/lib/presentacionEvaluacion.ts` es la **única** función que decide qué se enseña, y la
+consumen las tres vistas: `BenchmarksView` (vista previa y recién guardada),
+`SavedComparisonDetail` (detalle) y `DashboardView` (listado). Retirados
+`lib/interpretacion.ts`, `lib/evaluacionGuardada.ts` y toda tabla de estados propia.
+
+Reglas que la forma del modelo hace difíciles de incumplir:
+
+- **`quienFavorece` solo copia `estado`**: es `null` salvo `mejora` o `empeora`. `mixto`,
+  `sin_cambio`, `datos_insuficientes` y `solo_descriptiva` **no tienen ganadora**, aunque
+  alguna métrica suba un 20 %.
+- **`MetricaPresentada` no tiene `mejor` / `peor` / `esMejora`**: quien pinta no puede
+  deducir un veredicto de un número porque el número no tiene esa forma.
+- **Estabilidad es descriptiva** y solo se calcula de lo medido (`estabilidad.ts`, fuera del
+  motor). Rust no tiene clave de estabilidad: no se evalúa, no se persiste, no da ganadora.
+  El texto de la vista lo dice explícitamente.
+- **Ruido combinado ≠ margen aplicado**: son dos campos distintos. El margen es
+  `max(5 %, ruido)`; confundirlos haría creer que un ruido del 3 % basta para afirmar algo.
+- **`sin_cambio` no es equivalencia**, y observado no es reproducibilidad (los códigos de
+  confianza se presentan como son: `provisional`, `observada`, `no_concluyente`,
+  `insuficiente`).
+- **`conclusion` y `within_noise`** se conservan con su formato y significado, pero **no son
+  fuente de interpretación**: nadie decide nada a partir de ellos.
+
+### Cuatro estados, no dos
+
+`estadoDeEvaluacionGuardada` distingue `no_registrada` (histórica), `soportada`,
+`no_soportada` (metodología de otra versión: se conserva y se dice) y `malformada`
+(registro truncado). El respaldo del frontend solo actúa si el campo de Rust no viene; la
+clasificación de Rust manda siempre. `presentarGuardada` **no lanza**: un registro ilegible
+se presenta como `malformada`, sin romper la pantalla ni inventar narrativa.
+
+Las comparaciones **históricas** conservan sus datos y su narrativa original identificada
+como histórica; **no** se les genera veredicto nuevo.
+
+### Concurrencia en React
+
+`useComparison` garantiza, con pruebas:
+
+- **Invalidación inmediata** al cambiar de selección (par o variable).
+- **Respuestas obsoletas descartadas**, incluido **A→B→A**: un token creciente impide que la
+  respuesta de la primera A se acepte al volver, aunque los ids coincidan.
+- **Protección síncrona** (`useRef`) contra el doble guardado: dos clics en el mismo tick
+  envían **un** guardado.
+- Las **relecturas fuera de orden** no pisan lo reciente.
+
+### Validación ejecutada
+
+| Comprobación | Resultado |
+|---|---|
+| `cargo test --locked --bins` | **1052 passed, 1 ignored** |
+| `cargo clippy --locked --bins -- -D warnings` | limpio |
+| `cargo clippy --locked --all-targets` | 42 avisos, **los mismos** que antes del cambio (deuda registrada, no ampliada) |
+| `npx tsc --noEmit` | limpio |
+| `npx vitest run` | **1074 passed**, 78 ficheros |
+| `npm run build` | OK |
+| `npm audit --omit=dev` | 0 vulnerabilidades |
+| `cargo audit --file Cargo.lock` | 3 avisos preexistentes, ya registrados |
+| `git diff --check` | limpio |
+| `Cargo.toml` / `Cargo.lock` | **sin cambios** |
+
+### Inventario de pruebas de C.3
+
+**Nuevas (TS)**: `presentacionEvaluacion.test.ts` (32), `useComparison.test.tsx` (23).
+**Nuevas (Rust)**: módulo `pruebas_c3_activacion` (11), serialización del contrato de
+errores y no-dependencia del texto incluidas. **Reescritas**: `verdict.test.tsx` (18),
+`consistencia.test.tsx` (30), `SavedComparisonDetail.test.tsx` (66),
+`sinReinterpretacion.test.ts` (12), `DashboardView.test.tsx` (14).
+**Retiradas**: `interpretacion.test.ts` y `evaluacionGuardada.test.ts`, porque el módulo que
+probaban **ya no existe**; su cobertura semántica vive ahora en `presentacionEvaluacion.test.ts`
+y su guardia estructural en `sinReinterpretacion.test.ts`. Ninguna se retiró para tapar un
+fallo.
+
+**Total TS: 78 ficheros, 1095 pruebas. Rust: 1053 + 1 ignorada.**
+
+Las pruebas que debían detectar un defecto se verificaron **inyectándolo**: se rompió el
+guardia y se comprobó que la prueba fallaba (relecturas fuera de orden; discriminante de
+`FallaDeBusqueda`; presentación sin cobertura global).
+
+### Correcciones tras la revisión de solo lectura
+
+| # | Defecto | Corrección |
+|---|---|---|
+| 1 | `es_ambiguous` clasificaba por `.contains()` del mensaje | `FallaDeBusqueda { NoEncontrada, Ambigua }` devuelto por `buscar_unico`; `match` en `resolver_unico`; `es_ambiguous` eliminada. Pruebas: el texto cambia, el discriminante no. |
+| 2 | `guardadoPerdido='recuperado'` se declaraba con solo el par de ids | Estado nuevo `par_existente`: hay una prueba guardada de ese par, pero **no** se confirma que sea la del intento. Sin par o relectura fallida → `desconocido`. `puedeGuardar` bloquea cualquier duda. **No** se añadió una segunda igualdad de dominio en TS: se retiró `evaluacionCorrespondeA`, que quedó sin consumidores. |
+| 3 | `evaluacionCorrespondeA` era código muerto | **Eliminada** con su prueba (la autorización no permitía usarla para confirmar la evaluación). |
+| 4 | Sin prueba de relecturas fuera de orden | Añadido token al listado (`tokenListado`) y prueba con promesas diferidas que resuelve la vieja después de la nueva. La relectura del guardado perdido pasa por el mismo camino: ya no esquiva el token. |
+| 5 | Sin prueba de respuesta tardía de guardado | Pruebas con promesas diferidas: fallo tardío de un guardado anterior no contamina la selección nueva; A→B→A en vuelo; la selección nueva pide su propia vista previa. |
+| 6 | **Evaluación parcial presentada como victoria global** | Nuevo veredicto `cambio_parcial`; `quienFavorece: null` y `tono: neutro` cuando no hay cobertura global. La cobertura consume los códigos del motor y cuenta `indistinto` como evaluada, sin recalcular umbrales. `tituloDeCabecera` y la fila de «Mis pruebas» dicen «en parte de las métricas». Regresiones con el caso **real ejecutado** (0,1 % low a −50 % no elegible → parcial; el mismo caso con 20 000 muestras → `mixto`). |
+
+### Limitaciones de esta entrega
+
+- **`MockRuntime` de Tauri descartado como evidencia.** Se añadió la dev-feature `test` y se
+  escribieron pruebas de transporte real. En este proyecto **la ACL de la app rechaza los
+  comandos propios en el binario de test** («not allowed. Plugin not found») antes de
+  llegar al comando: el viaje mide el arnés, no el contrato de C.3. Se **retiraron** las
+  pruebas y la feature (`Cargo.toml` y `Cargo.lock` vuelven a HEAD) en vez de presentar un
+  verde que no demuestra lo que dice. **Consecuencia**: el transporte IPC real de los
+  comandos nuevos **no está cubierto por pruebas automáticas**; lo cubre el protocolo manual
+  en CachyOS.
+- **Niveles de evidencia**: dobles de frontend (Vitest), Rust por dentro (`cargo test`) y
+  viaje JSON por Node (C.2). **Ninguno demuestra la detección real ni el comportamiento en el
+  equipo del usuario**; eso exige la validación manual.
+- **Xvfb disponible** en el contenedor, pero **no se arrancó la app**: sin pantalla real no se
+  valida nada visual, y arrancar Tauri aquí no probaría la interfaz del usuario.
+- El 1 % low **sigue sin criterio de elegibilidad validado**; la elegibilidad del 0,1 % low
+  reutiliza la frontera operativa de `low01Reliability` (9500 muestras), que es operativa y
+  no estadística. Pendiente de 5.4.3.
+- La detección simultánea Heronite + Heroic sigue **aplazada** y no la toca C.3.
+- **Cobertura de concurrencia acotada a dobles**: las pruebas controlan el orden de las
+  promesas del módulo `api`, no el temporizado real de WebKitGTK. Que el hook descarte
+  respuestas obsoletas **no garantiza** que la interfaz real no muestre nunca un parpadeo.
+
+### Correcciones de presentación (inventario reconciliado C3-01…C3-26)
+
+Bloque de presentación dentro de C.3: **no toca el motor** (C.1), la confirmación (C.2), la
+persistencia (B) ni la metodología (A). `git diff` sobre `evaluacion.rs` muestra **solo** el
+`mod` de pruebas de C3-20; en `benchmarks.rs` no cambia ninguna fórmula, umbral ni el motor de
+grupos.
+
+**Procedencia de los identificadores.** Las descripciones de **C3-01 a C3-09** proceden de
+las observaciones de la validación real anterior y las aportó el responsable del proyecto al
+autorizar este bloque; **C3-14 a C3-26** se observaron al revisar la presentación. Ninguna
+de las dos listas estaba escrita en el repositorio: las descripciones de C3-01 a C3-09 se
+incorporan aquí **desde esa aportación**, no reconstruidas de memoria. C3-04 se marca como
+corregida solo después de comprobar que la narrativa original **existe** en los datos y viaja
+hasta la interfaz (ver más abajo).
+
+**Estado de cada fila.** *Implementada* = el defecto está corregido en el código y hay una
+prueba que lo detecta. *Validada en CachyOS* = además se ha visto corregido en el equipo
+real. **Ninguna fila de esta tabla está validada en CachyOS todavía**: ese es precisamente el
+paso pendiente, y por eso C.3 no se cierra.
+
+| Id | Defecto observado (descripción aportada) | Corrección implementada | Referencias | Evidencia | Estado |
+|---|---|---|---|---|---|
+| C3-01 | Evaluación malformada confundida con histórica en Dashboard y detalle guardado | `presentarGuardada` conserva la clasificación de Rust (`malformada`/`no_soportada`) en vez de degradarla a `no_registrada`; ambas vistas consumen el mismo modelo | C3-15 (misma causa: la clasificación se perdía al presentar) | `regresionesC3.test.ts` (C3-15/C3-01) | Implementada |
+| C3-02 | Colores y preferencias visuales sin evaluación válida | El color de cada métrica sale de `metricas[].preferencia` del modelo; sin evaluación válida no hay preferencia y no hay color de mejora | C3-14, C3-21 (misma causa raíz: el color se decidía por el signo) | `SavedComparisonDetail.test.tsx` (dos pruebas de color/preferencia) | Implementada |
+| C3-03 | Estabilidad presentada con colores de preferencia, pese a ser descriptiva | La estabilidad es una fila **descriptiva** explícita: ni color de preferencia ni preferencia en el modelo | C3-08, C3-16, C3-21 | `BenchmarksView`/`DetailsTable`: `estado='descriptiva'`; matriz de coherencia | Implementada |
+| C3-04 | Narrativa histórica original no visible; pendiente de verificar su existencia y conservación | **Verificado antes de tocar nada**: `conclusion` existe (`types.ts:557`), la genera Rust (`texto_comparacion`, `benchmarks.rs:3425`), se persiste y **ningún componente la mostraba**. Se añade `narrativaOriginal` al modelo y el bloque «Lo que decía esta prueba» la enseña **tal cual**; si falta, no se fabrica | — | `regresionesC3.test.ts` (no se fabrica / se devuelve sin reescribir / en blanco no cuenta) | Implementada |
+| C3-05 | Detalle guardado de evaluación parcial con conclusión global favorable, contradictoria con Dashboard | El veredicto parcial no anuncia ganador global (`quienFavorece: null`); ambas superficies parten del mismo modelo, así que no pueden contradecirse | C3-18 (contador), C3-24 (estados) | `matrizCoherencia.test.tsx`, escenario «mejora parcial con pérdida» en las tres superficies | Implementada |
+| C3-06 | Motivos y limitaciones insuficientemente visibles | Bloque propio de motivos y limitaciones en el detalle, antes de «Mejor resultado observado», con el texto de la etiqueta y el código técnico como información secundaria | C3-25 (el apoyo que explica una exclusión) | `SavedComparisonDetail.test.tsx` | Implementada |
+| C3-07 | Evaluación no soportada mostrando preferencias y afirmaciones de comparabilidad | `presentarEvaluacion(..., estado)` neutraliza métricas y anula `compatibilidad` cuando el estado es `no_soportada`/`malformada` | C3-14 (misma corrección), C3-02 | `regresionesC3.test.ts`: **demostrado** que falla al revertir y pasa al restaurar | Implementada |
+| C3-08 | Estabilidad histórica etiquetada «Fluidez»/«Muy fluido» y expresada como porcentaje | Índice propio 0-100 con sufijo `/100`; rótulos «Muy regular»… «Muy irregular»; se retiró todo «Fluidez» | C3-03, C3-19 (redondeo del índice) | `BenchmarksView.test.tsx`, matriz | Implementada |
+| C3-09 | Textos de ayuda obsoletos («Te diremos quién gana y qué hacer», «Máxima precisión» para dos minutos) | «Más duración» en lugar de «Máxima precisión»; la descripción ya no promete un veredicto | — | `BenchmarksView.test.tsx` | Implementada |
+| C3-10 | La interfaz no permite seleccionar dos grabaciones: compara las dos últimas | Sin cambios: es **deuda funcional** de la fase 6, fuera del alcance autorizado | C3-12 (el texto que la describía mal) | `README.md` del paquete de validación | **Deuda**, no se toca |
+| C3-11 | La selección automática puede formar un par de juegos distintos y el rechazo llega como aviso efímero | Sin cambios en el fondo: **Rust ya protege** (`comparacion_entre`). Es mejora de interfaz | — | — | **Deuda**, no se toca |
+| C3-12 | «Comparar dos grabaciones cualesquiera», que la app no permite | El texto describe lo que ocurre: las dos últimas, sin elección manual | C3-10 | `BenchmarksView.test.tsx` | Implementada |
+| C3-14 | Evaluación ilegible que conservaba preferencias y comparabilidad escritas | `neutralizarMetricas()` anula preferencia, confianza y estado evaluado; `compatibilidad: null` | C3-07, C3-02 | `regresionesC3.test.ts` (reversión demostrada) | Implementada |
+| C3-15 | `presentarGuardada` perdía `malformada`/`no_soportada` | Ver C3-01 | C3-01 | `regresionesC3.test.ts` | Implementada |
+| C3-16 | Las métricas descriptivas afirmaban «Más alto = mejor» | Las cuatro filas descriptivas ya no afirman preferencia; las evaluables nombran dirección, no «mejor» | C3-03, C3-08 | `BenchmarksView.test.tsx` | Implementada |
+| C3-17 | Ruido combinado y margen aplicado yuxtapuestos | «Ruido combinado estimado: ±X %» y «Margen aplicado por la evaluación: Y» en líneas separadas; se dice que el ruido **no** es un intervalo de confianza | C3-23 | `BenchmarksView.test.tsx` | Implementada |
+| C3-18 | El contador contaba indistintas como «con preferencia» | `cobertura.conPreferencia` e `indistintas` separados; el texto no afirma preferencia no emitida | C3-05, C3-24 | `regresionesC3.test.ts` | Implementada |
+| C3-19 | El índice de estabilidad se enseñaba con decimales de máquina | Redondeado con `formatearCifra`, sin alterar el dato | C3-08, C3-22 | `BenchmarksView.test.tsx` | Implementada |
+| C3-21 | Color y «Mejor/Peor» decididos por el signo en React | `DetailsTable` y `TablaMetricas` usan la preferencia del modelo; dos pruebas: con preferencia y sin ella | C3-02, C3-03 | `SavedComparisonDetail.test.tsx` | Implementada |
+| C3-22 | `-0.0 pts` / `+0.0 %`: cero con signo tras redondear | `formatearCifra` normaliza **el resultado del redondeo**; `formatearDiferencia` no pone signo al cero; ausentes y no finitos devuelven `null` | C3-19 | `regresionesC3.test.ts`: **demostrado** que falla al revertir | Implementada |
+| C3-23 | «Dentro del ruido» sin que el resultado lo sostenga | `estadoDeEvidencia()` distingue sin repeticiones / no concluyente / hay veredicto, leyendo solo `verdict` y los recuentos. Sin umbrales nuevos | C3-17 | `BenchmarksView.test.tsx` | Implementada |
+| C3-24 | Dirección y preferencia colapsadas en una columna | Cuatro estados (`con_preferencia`, `indistinta`, `no_evaluada`, `descriptiva`) y columna «Evaluación» | C3-05, C3-18, C3-25 | `regresionesC3.test.ts`, matriz | Implementada |
+| C3-25 | El apoyo declarado se descartaba | `apoyo` por lado en el modelo; la ausencia es ausencia, no un cero | C3-06, C3-24 | `regresionesC3.test.ts` | Implementada |
+| C3-26 | Se atribuía la falta de serie temporal a que la prueba era anterior | Texto neutral que no atribuye procedencia | — | `GraficoTemporal.test.tsx` | Implementada |
+
+### Qué significa «implementada» aquí
+
+Toda la evidencia de esta tabla es **estática o con dobles**: pruebas de Rust por dentro,
+pruebas de Vitest sobre el árbol de React y una reversión controlada que demuestra que las
+regresiones detectan su defecto. **No demuestra cómo se ve la corrección en el equipo del
+usuario**, porque el contenedor no tiene pantalla ni los datos reales. La columna de
+validación en CachyOS queda vacía a propósito.
+
+### Matriz de coherencia — y por qué no bastó
+
+`src/components/matrizCoherencia.test.tsx`: 8 escenarios × 4 comprobaciones, 32 pruebas.
+**La validación real la desmintió en tres escenarios.** Su auditoría está más abajo; aquí
+queda la conclusión: una matriz que construye sus propios fixtures no prueba la interfaz,
+prueba que el fixture y el modelo coinciden.
+
+### Validación real en CachyOS (ronda del 27/11/2026) — **parcial, con defectos residuales**
+
+Entorno aislado `entorno-SVYvTcEy`. Frontend y ejecutable release compilados. La primera
+comprobación de assets falló y, tras `cargo clean --release -p thoriapp` y recompilación, el
+script 03 encontró los 14 blobs dentro del ejecutable; el control negativo del verificador
+pasó. Vigilancia iniciada a las 17:46:59 UTC, **registro sin eventos**, comprobación final
+**INTEGRIDAD OK**: las tres carpetas reales conservan SHA-256, tamaño, mtime en nanosegundos
+y modo.
+
+| Escenario | Resultado real |
+|---|---|
+| SIN_CAMBIO · COMPLETA_MEJORA · COMPLETA_EMPEORA · MIXTO | Resultado principal correcto, con defectos residuales de texto |
+| PARCIAL_PERDIDA | **No superado**: veredicto global incorrecto en el detalle guardado |
+| Histórica | Narrativa recuperada; texto explicativo mejorable |
+| Malformada | **No superado**: clasificación incorrecta en el detalle guardado |
+| No soportada | **No superado**: interpretación residual indebida |
+
+Los cinco escenarios con resultado principal correcto **no** son validación integral de sus
+componentes: sus defectos residuales son D, E, F, G, H e I.
+
+**Comportamientos verificados en el equipo y que no se pueden romper**: guardado de
+SIN_CAMBIO; SIN_CAMBIO sin ganador ni preferencias; contador que separa evaluadas de
+indistintas; MEJORA favorece a Prueba 2; EMPEORA favorece a Prueba 1; MIXTO conserva
+preferencias opuestas sin ganador; PARCIAL neutral en vista previa y Dashboard; la pérdida del
+50 % en el 0,1 % low excluido no se presenta como preferencia desfavorable; estabilidad y
+frametime descriptivos; el aviso de falta de repeticiones no afirma «dentro del ruido»;
+Dashboard distingue histórica, malformada y no soportada; la narrativa original se muestra;
+no aparece `-0 pts`; la guía ya no promete selección manual.
+
+### Auditoría de las pruebas automatizadas (por qué no detectaron los defectos)
+
+| # | Pregunta | Respuesta verificada |
+|---|---|---|
+| 1 | Componentes que renderiza | `ComparisonResultCard`, `SavedComparisonDetail` y `DashboardView`: los reales. El problema no es *qué* renderiza, sino **con qué datos**. |
+| 2 | ¿Mismos datos que el IPC? | **No.** `bench()` y `evaluacion()` se escriben a mano en la prueba. `metrica()` inventa `apoyo = {percentil:{muestras:9000}}`, una forma que no coincide con la que devuelve Rust. |
+| 3 | ¿Mocks fieles de `estado_de_la_evaluacion`? | **No.** La matriz pasa `estadoDeclarado` solo a `presentarGuardada`, pero `SavedComparisonDetail` **nunca recibe esa clasificación** (su prop no existe). Las pruebas no podían detectar el defecto B porque no ejercitan el camino real de la prop. |
+| 4 | ¿Modelo o texto renderizado? | Las tres comprobaciones de texto sí leen el DOM. Pero el escenario parcial **no tenía prohibida** la frase «rinde mejor que la anterior», así que el titular incorrecto pasaba. |
+| 5 | ¿Detecta ausencia de ganador pero no titular erróneo? | **Sí, exactamente eso.** `esperaGanador` mira `modelo.quienFavorece`; el titular del detalle sale de `m.titulo` despachado por `estado`, que el modelo deja en `'mejora'` también en el parcial. La matriz comprobaba el modelo, no el `<h*>` del detalle. |
+| 6 | ¿Caminos no alcanzados? | **Sí**: la línea 362 usa `textoDe(document.body)`, el cuerpo entero del documento, no el contenedor del escenario. Un render anterior puede satisfacer o romper la aserción por azar. |
+| 7 | ¿Fixtures semánticamente iguales a CachyOS? | **No.** El fixture parcial usa `estado:'mejora'` con **todas** las métricas con preferencia y sin `perdida_observada_sin_evaluar`; el caso real tiene 0,1 % low a −50 % excluido y ese motivo. El fixture **codificaba el mismo defecto** que debía detectar. |
+
+**Conclusión de la auditoría**: la matriz era un test de coherencia del *modelo*, no de la
+*pantalla*. Los defectos A, B, C, D y E viven por debajo del modelo (en componentes que
+despachan por campos crudos del registro) o en fixtures que reproducen el defecto.
+
+### Defectos residuales confirmados en el equipo
+
+Las correcciones de esta tabla están **implementadas**; ninguna está **validada en CachyOS**
+todavía salvo las que figuran en «comportamientos verificados» arriba. Diagnóstico completo,
+sin implementar: pendiente de autorización.
+
+| Id | Defecto | Causa raíz | Archivo / línea | Se relaciona con |
+|---|---|---|---|---|
+| **A** | PARCIAL_PERDIDA: el detalle dice «Mejora · rinde mejor que la anterior» mientras Dashboard y vista previa dicen «en parte» | El detalle despacha por `m.titulo` (`'mejora'`) en vez de por `m.veredicto.tipo` (`'cambio_parcial'`). `presentarEvaluacion` **sí** produce `cambio_parcial`, pero el switch `case 'mejora'` lo ignora | `SavedComparisonDetail.tsx:508` (`switch (m.titulo)`), `:596-598` | C3-05, C3-18 |
+| **B** | MALFORMADA: el detalle dice «Evaluación original no registrada» y afirma procedencia histórica | `SavedComparisonDetail` **no tiene prop** `estado_de_la_evaluacion`; llama `presentarGuardada({evaluacion, comparison})` sin la clasificación, así que un registro ilegible se clasifica como ausente. El Dashboard sí la recibe | `SavedComparisonDetail.tsx:1206-1208`; `DashboardView.tsx:182-189` no la pasa | C3-01, C3-15 |
+| **C** | NO SOPORTADA: «sin apoyo declarado», «tal como se evaluaron», «compatibilidad no registrada», «sin preferencia establecida», «(mejora)» | `neutralizarMetricas` anula datos correctamente, pero las tres tablas/etiquetas se renderizan igual que en una evaluación legible y afirman ausencias; `detalle` del veredicto filtra `ev.estado` crudo (`(mejora)`) | `SavedComparisonDetail.tsx:508-520`, `:401`, `:1125`, `:1130`, `:1156` | C3-07, C3-14 |
+| **D** | Motivos y limitaciones en códigos crudos, duplicados entre paréntesis | Faltan traducciones para `no_elegible`, `apoyo_insuficiente`, `perdida_observada_sin_evaluar`, `evaluacion_parcial`; el render añade el código entre paréntesis cuando no hay texto | `SavedComparisonDetail.tsx` (bloque motivos/limitaciones, ≈`:1330`); `lib/etiquetas.ts` | C3-06, C3-25 |
+| **E** | Detalle: «Margen estimado: ±3.0 % (ruido combinado)» | `textoDeMargen` etiqueta `comparison.noise_percent` como *margen*; el ruido y el margen son conceptos distintos y el detalle no lee `condiciones.ruido_combinado_porcentaje` ni `margen_porcentaje` | `SavedComparisonDetail.tsx:624-630` | C3-17 |
+| **F** | «se guardó antes de que Thoriapp registrara la configuración» sin evidencia | Texto fijo que afirma procedencia histórica ante cualquier ausencia de instantánea, incluida la de un registro sintético | `InstantaneaCard.tsx:158`; `SavedComparisonDetail.tsx:506` | C3-26 (mismo patrón) |
+| **G** | Guía: «+16.7 % de FPS y, si la Fluidez se mantiene, gana la nueva grabación 🎉» | Texto de ejemplo que reintroduce la fórmula prohibida: FPS deciden, estabilidad condiciona | `BenchmarksView.tsx:1817` | C3-08, C3-09, C3-16 |
+| **H** | Tabla «Métricas tal como se evaluaron» mezcla dirección y preferencia | Usa `m.preferencia` crudo en vez de `m.estado`; una indistinta se pinta «sube · indistinto», confundible con no evaluada | `SavedComparisonDetail.tsx:1150-1158` | C3-24, C3-21 |
+| **I** | Estabilidad: «77 → 76, diferencia 0 pts»; barras con escalas distintas | `decimals: 0` redondea los extremos pero `delta = despues - antes` se calcula **sin redondear**: dos redondeos independientes. Además el detalle escala las barras con `v/max` (relativa) y la vista previa con `score` (absoluta 0-100) | `SavedComparisonDetail.tsx:298-301`, `:103-106`; `BenchmarksView.tsx:1581` | C3-19, C3-22 |
+| **J** | La narrativa original aparece en comparaciones recién guardadas y puede afirmar una mejora que la evaluación actual no sostiene | `narrativaOriginal` se muestra sin separar visualmente «narrativa antigua» / «evaluación registrada» / «resultado actual» | `SavedComparisonDetail.tsx` (bloque narrativa) | C3-04 |
+
+**Punto E, matiz verificado antes de clasificarlo**: la escala de barras **sí** difiere entre
+superficies (relativa frente a absoluta). Es un defecto real de coherencia, no un artefacto de
+captura. Se propone unificar en la escala absoluta 0-100 que ya usa la vista previa, sin tocar
+`estabilidadDe`.
+
+### Correcciones de los defectos residuales A–J (**implementadas; validación en CachyOS pendiente**)
+
+Autorizadas tras aceptar la auditoría. Regla: **primero la prueba que reproduce el defecto,
+después la corrección**. La suite es `src/components/regresionesResiduales.test.tsx`
+(**39 pruebas**) y renderiza los componentes reales por el camino Dashboard → tarjeta →
+detalle, consultando dentro del contenedor de cada `render`.
+
+#### Fixture de transporte generada por Rust
+
+La fixture **no se escribe a mano ni la clasifica la prueba**.
+`src/test/fixtures/comparaciones_transporte.json` es la salida del **lector y serializador
+reales** de Rust (`try_load_saved_data_de` + la clasificación de `load_comparisons`),
+aplicados a `saved_comparisons.json` de CachyOS. Se generó con un test temporal de
+`benchmarks.rs`, ya retirado, y **sin modificar código de producción**.
+
+Equivalencia comprobada contra la fixture real: 5 de 7 son **idénticas** campo a campo
+(`estado_de_la_evaluacion` aparte). Las dos restantes:
+
+- `Malformada` **difiere solo en `evaluacion`**: en disco es un objeto con `condiciones`
+  corrupto; en el transporte llega **`null`**, porque Rust aparta el registro ilegible. Esta
+  es exactamente la diferencia que una clasificación manual podía perder, y de hecho la
+  primera versión de la suite lo hacía.
+- `PARCIAL_CON_NARRATIVA` es **derivada**: `PARCIAL_PERDIDA` con `id`, `game_name` y
+  `conclusion` cambiados. Hace falta porque ninguna comparación real tiene a la vez
+  narrativa y evaluación soportada, y J exige ese caso. La evaluación es idéntica.
+
+Fixture **versionable dentro del repo**, sin rutas personales ni grabaciones reales.
+Procedencia y regeneración: `src/test/fixtures/README.md`.
+
+#### Tabla de defectos
+
+| Id | Defecto confirmado | Corrección | Prueba (componente real) |
+|---|---|---|---|
+| **A** | El detalle despachaba por `m.titulo` (=`mejora`) y afirmaba «rinde mejor que la anterior» en una parcial | Despacho por `m.veredicto.tipo`; `cambio_parcial` → «Mejora en parte de las métricas» | «no afirma que rinde mejor», «solo en parte de las métricas», «pérdida del 50 % visible» |
+| **B** | El detalle no recibía la clasificación; la ilegible se pintaba como no registrada | Prop `estadoDeLaEvaluacion` propagada hasta `presentarGuardada` | «dice que no se puede leer», «no dice no registrada» |
+| **C** | La tabla nombraba ausencias y citaba el estado crudo `(mejora)` | `evaluacionInterpretable()` en el modelo | «no afirma falta de apoyo», «no filtra el estado crudo» |
+| **D** | Cada motivo salía dos veces: `no_elegible (no_elegible)` | Traducciones; **códigos conocidos accesibles** en un plegado `codigos-tecnicos` y desconocidos marcados | «conserva los códigos conocidos como información técnica secundaria», «apoyo por lado cuando consta» |
+| **E** | `textoDeMargen` rotulaba `noise_percent` como **«Margen estimado: ±3.0 % (ruido combinado…)»** — verificado en el código y en la captura real | Dos campos con nombre propio: **«Ruido combinado»** y **«Margen aplicado»** (`modelo.margenAplicado`); ninguno se reconstruye | «métricas avanzadas no rotulan el ruido como margen» (abre el plegado y comprueba el texto), «los dos valores son distintos» |
+| **F** | «se guardó antes de que Thoriapp registrara…» afirmaba una fecha que no consta | Texto neutral | «no atribuye a prueba anterior», «no afirma cuándo se guardó» |
+| **G** | La guía enseñaba «+16.7 % de FPS y, si la Fluidez se mantiene, gana la nueva 🎉» | Ejemplo ajustado a la regla real: margen, resto de métricas, mixto/parcial | «la guía práctica no declara ganador por FPS y estabilidad» |
+| **H** | `TablaMetricasGuardadas` usaba `preferencia` cruda; dirección y elegibilidad se confundían | Dirección, elegibilidad, evaluación y preferencia separadas | «una métrica que baja puede no tener preferencia», «evaluada e indistinta ≠ no evaluada» |
+| **I** | Extremos redondeados y diferencia restada de los originales; barras relativas al máximo | Diferencia **de los valores originales** y precisión visual coherente; barras 0-100 (`escalaAbsoluta`) | «el ancho de la barra es el índice, no la proporción» |
+| **J** | La narrativa se mostraba igual con o sin evaluación | Rótulo según `interpretable`, que ahora es `false` también para la histórica | «con soportada es relato», «sin evaluación es lo único que consta», «nunca como resultado actual» |
+
+#### Evidencia de reversión controlada
+
+| Defecto revertido | Resultado |
+|---|---|
+| A (quitar el bloque `cambio_parcial`) | **2 pruebas fallan**: «no afirma que rinde mejor», «solo en parte de las métricas» |
+| B (no pasar `estadoDeLaEvaluacion`) | **1 falla**: «dice que no se puede leer» |
+| E (volver a rotular «Margen estimado») | **1 falla**: «métricas avanzadas no rotulan el ruido como margen» |
+| J (`interpretable` = `true` para histórica) | **1 falla**: «sin evaluación estructurada se identifica como lo único que consta» |
+
+| **G** (restaurar «…y, si la Fluidez se mantiene, gana la nueva grabación 🎉») | **2 fallan** |
+| **I** (volver a restar cifras redondeadas) | **3 fallan** |
+
+Restaurado cada vez: 39/39.
+
+#### Última comprobación puntual (antes de la validación real)
+
+- **G era un falso positivo.** La prueba buscaba el bloque de la guía y **retornaba sin
+  fallar si no lo encontraba**, así que no podía detectar nada. Ahora prepara el render de
+  `BenchmarksView` (la guía es contenido estático, se pinta siempre), **afirma que la guía y
+  el ejemplo existen**, comprueba el texto correcto y la ausencia de la regla falsa, y falla
+  si no se renderizan. Demostrado: restaurar el texto defectuoso hace fallar 2 pruebas.
+- **I: la diferencia se calculaba de cifras redondeadas.** `diferencia()` restaba
+  `Math.round(despues) - Math.round(antes)`, lo contrario de lo que debe hacer. Ahora resta
+  los **valores originales** (`toPrecision(12)` para limpiar el ruido de coma flotante) y
+  elige la precisión por magnitud, para que el número sea el real y no un cero por redondeo.
+  Demostrado: volver a la estrategia anterior hace fallar 3 pruebas.
+  - `76,6 → 77,4` (ambos se pintan «77»): antes «0 pts», ahora «+0.8 pts».
+  - `62,49 → 62,51` (se pintan «62 → 63»): antes «0 pts», ahora «+0.02 pts».
+  - `73,1 → 62,4`: antes «−11 pts» (redondeos), ahora «−10.7 pts» (originales).
+- **H: prueba sobre el componente real.** Se distingue dirección (el −50 % medido),
+  elegibilidad y preferencia: una métrica **indistinta** no puede llevar `no_elegible` ni
+  `apoyo_insuficiente`, y una **excluida** se pinta sin «sin diferencia apreciable» y sin
+  «Favorece a».
+- **Fixtures**: documentadas en `src/test/fixtures/README.md` (procedencia sintética, método,
+  las dos diferencias y regeneración). **El archivo sigue sin rastrear**: no está disponible
+  en un clon limpio ni en CI hasta que se añada al staging autorizado.
+
+**Reconciliación de la línea base (corrige el informe anterior).** La cifra «8 fallan / 10
+pasan» era **incoherente**: la tabla sumaba 9. La salida real de la primera ejecución de la
+suite de 18 pruebas fue **9 fallos / 9 éxitos**, y los 9 son A(2), B(2), C(2), D(1), F(2). El
+recuento no se modifica retrospectivamente: se declara el error del informe y se sustituye
+por la salida medida.
+
+**E no «pasaba ya»**: el informe anterior afirmaba que E no se reproducía. **Era falso.** La
+prueba antigua miraba la cabecera y no abría el plegado de métricas avanzadas, que es donde
+estaba «Margen estimado». Al abrirlo, el defecto aparece. La corrección se hizo en esta ronda.
+
+**Nuevo defecto destapado por la prueba de I**: la etiqueta de estabilidad mostraba `77`
+(valor redondeado a 0 decimales) y la barra medía `76,67 %` (valor sin redondear). Dos
+lecturas del mismo dato en la misma línea. Corregido usando la cifra visible.
+
+#### Portabilidad
+
+La suite importa la fixture con ruta relativa (`../test/fixtures/…`), **dentro del repo**.
+Comprobado con el paquete `validacion-c3` **ausente**: la suite pasa 27/27. Ninguna prueba
+depende de rutas absolutas, del paquete externo ni de este contenedor. GitHub Actions ejecuta
+`npx vitest run` sobre el checkout, que contiene la fixture.
+
+#### Limitaciones
+
+- No recorren el IPC ni WebKitGTK: el objeto se pasa como prop. Que Rust serialice esto lo
+  cubre `cargo test` y la fixture generada.
+- Los dobles sustituyen `useSavedComparisons` (acceso a datos), no los componentes.
+- ~~La prueba de G busca la guía en el DOM y, si no se pinta sin medida seleccionada, no
+  falla.~~ **Corregido**: la prueba afirma que la guía existe y falla si no se renderiza.
+
+**No se puede reconstruir con certeza el estado anterior.** La cifra «1052 Rust / 1074 Vitest»
+de `STATUS.md:511-516` salió de mezclar filas y no es un resultado de ejecución fiable; la
+cifra «1074 Rust / 1099 Vitest» de un informe oral tampoco se puede verificar, porque
+`pruebas_c3_20.rs` **no existe en HEAD** y no hay ninguna instantánea ejecutable anterior en
+el repositorio. **Lo que sí está verificado**: hoy hay 1072 pruebas Rust definidas y 1169 de
+Vitest; en la ronda de implementación se **añadieron** 18 de C3-20 y 20 de
+`pruebas_c3_activacion`, y en esta 18 de regresión; ninguna prueba se eliminó.
+
+
+### Tercera validación real (27/11/2026) — incidencias 3.1–3.8
+
+Entorno del responsable: `/home/thor/thoriapp-validacion-c3/entorno-Q2BSZQdI`. C.3 **sigue
+abierta**: no hay staging, commit ni cambio de versión (1.2.0). No se tocó el motor Rust,
+las fórmulas, los umbrales, la elegibilidad, la persistencia, la confirmación de C.2, el
+motor de grupos ni la feature `float_roundtrip`.
+
+| # | Código | Causa concreta | Corrección |
+|---|---|---|---|
+| 3.1 | C3-19 | `CompareMeter` usaba `max = Math.max(base, test)` → escala **relativa**: 73 se pintaba al 100 % y 62 al 84,9 %. | `escalaAbsoluta={100}` en estabilidad del previsualizador; FPS medios siguen relativos. |
+| 3.2 | C3-19 | Precisión de la estabilidad redondeada a entero en las cifras mientras la diferencia iba con decimales. | `precisionMostrada={1}` y diferencia calculada desde los **valores originales**. |
+| 3.3 | C3-24 | La columna «Dirección» concatenaba dirección y preferencia («sube · a favor de la nueva»). | Dos columnas: **Dirección** (hecho medido) y **Preferencia** (juicio del motor). |
+| 3.4 | C3-25 | Las limitaciones globales no nombraban la métrica afectada. | Sección «A qué métrica afecta» con el apoyo por lado registrado (`apoyo_referencia`/`apoyo_candidata`). |
+| 3.5 | C3-07/14/17 | `margenAplicado` se leía de `condiciones` sin mirar si la metodología era interpretable → «Margen aplicado ±5 %» bajo «no soportada». | `margenAplicado` y `ruidoCombinado` se anulan en estados no interpretables; **el valor sigue en disco**. |
+| 3.6 | C3-06 | Con evaluación ilegible se afirmaba «No consta en la evaluación», es decir, se hablaba de su contenido. | «Evaluación no interpretable con esta versión»; el dato medido se sigue mostrando. |
+| 3.7 | C3-04 | «lo que no consta es la conclusión que se mostró entonces» + «Conclusión guardada de esta prueba». | «No se reconstruye un veredicto moderno» + «Texto original que sí consta en esta prueba». Narrativa intacta. |
+| 3.8 | C3-05 | La balanza se pintaba siempre; con `sinGanadora: ''` quedaba un icono sin texto. | El bloque no se pinta sin mensaje; se conserva donde sí lo hay. |
+
+#### Pruebas de regresión
+
+`src/components/regresionesResiduales.test.tsx` pasa de **39 a 53** pruebas sobre las
+superficies reales (la fixture de transporte, el componente y el DOM renderizado).
+
+Comprobado que **detectan el defecto** revirtiendo cada corrección:
+
+| Reversión | Resultado |
+|---|---|
+| 3.5 a `margenAplicado` sin filtrar por estado | **1 falla**: «Margen aplicado: ±5.0 %» visible |
+| 3.8 a pintar la balanza siempre | **1 falla**: balanza sin mensaje |
+| 3.3 a una sola columna «Dirección» | **1 falla**: cabecera «Preferencia» ausente |
+| 3.6 a `ev == null` sin mirar interpretabilidad | **2 fallan**: «No consta en la evaluación» |
+| 3.7 a los rótulos anteriores | **1 falla**: «Conclusión guardada de esta prueba» |
+| 3.1/3.2 a escala relativa (sesión anterior) | **1 falla**: 73/62 sobre escala relativa |
+
+Restaurado cada vez: **53/53**.
+
+#### Validación técnica
+
+Solo frontend y pruebas (no se tocó Rust, así que no se repitió su suite):
+
+- `npx tsc --noEmit` → **0 errores**
+- `npx vitest run` → **1204 pruebas, 81 archivos, todo en verde**
+- `npm run build` → correcto
+- `git diff --check` → sin problemas
+
+Referencia Rust no repetida en esta ronda: 1071 pasadas + 1 ignorada. Los **3 avisos de
+`cargo audit`** siguen preexistentes y pendientes de evaluación.
+
+#### Limitaciones de esta evidencia
+
+- Las pruebas pasan el objeto como prop: **no** ejercitan el IPC real ni WebKitGTK. Que Rust
+  serialice estas estructuras lo cubre `cargo test` y la fixture generada desde Rust.
+- Son pruebas de **contenido renderizado**, no de aspecto visual: no detectan que una columna
+  quede estrecha o que un color no contraste.
+- Sigue sin demostrarse nada sobre la **detección real con juegos** en el equipo del usuario:
+  eso solo lo prueba la validación real.
+- `src/test/` (fixtures de transporte) **sigue sin rastrear**; se incluirá en el staging.
+
+#### Deuda registrada para la fase 6
+
+- **UX**: dentro del detalle de una comparación, pulsar **«Mis pruebas»** no vuelve a la
+  lista. Registrado, no corregido: excede el alcance de C.3.
+- **Precisión decimal de la estabilidad** unificada en historial, vista previa, tarjetas y
+  tablas. Hoy el detalle guardado usa un decimal y la vista previa muestra índices enteros.
+- **Presentación de las limitaciones y del apoyo por métrica en la vista previa**: el
+  detalle guardado ya nombra la métrica afectada y su apoyo; la vista previa sigue con
+  explicaciones genéricas.
+- **Organización visual de dirección, elegibilidad, evaluación y preferencia**: la tabla del
+  detalle guardado ya las separa en columnas; falta darles sitio propio (columnas o
+  bloques) en el resto de la pantalla.
+
+### Cuarta validación real (27/11/2026)
+
+Entorno del responsable: `/home/thor/thoriapp-validacion-c3/entorno-xl2OEREe`.
+
+**Protocolo.** Frontend: 1912 módulos, compilación en 2,38 s. Compilación release: 1 min 28 s.
+Ejecutable generado a las 21:49:20 UTC. Verificador de frontend superado; **14 blobs**
+integrados en el ejecutable. Control negativo superado. Instantánea inicial creada;
+vigilancia iniciada a las 21:50:59 UTC con *watches established*. Integridad final a las
+21:55:28 UTC: **INTEGRIDAD OK**, las tres carpetas idénticas en SHA-256, tamaño, mtime ns y
+modo, incluida WebKitGTK. Registro de vigilancia **sin eventos**; vigilancia finalizada
+hacia las 21:55:34 UTC.
+
+**Resultados por escenario.**
+
+| Escenario | Verificado | Pendiente |
+|---|---|---|
+| **PARCIAL_PERDIDA** | Barras de estabilidad absolutas sobre 100 con 73,3 y 61,7 visibles; veredicto parcial neutral; sin ganador global; 0,1 % low −50 % no evaluada; guardado correcto; detalle con dirección y preferencia en columnas separadas; «A qué métrica afecta» identifica el 0,1 % low con 2000 muestras por lado; balanza vacía eliminada; ruido combinado ±3 % y margen aplicado 5 % separados | Tabla y texto descriptivo de la vista previa con índices enteros; el detalle muestra 73 → 62 con −11,7 pts; limitaciones de la vista previa genéricas; elegibilidad y estado de evaluación sin columnas propias |
+| **NO SOPORTADA** | Clasificación correcta; sin ganador ni corona; datos medidos conservados; 5 % incompatible retirado; frametime como no interpretable; dirección y preferencia separadas | El margen decía «no consta en el registro» aunque existe en las condiciones de la v9 |
+| **HISTÓRICA** | Narrativa original conservada; contradicción de cabecera eliminada; sin veredicto moderno; sin ganador ni corona | La tabla decía «Evaluación no interpretable con esta versión» sin existir evaluación |
+
+#### Correcciones semánticas de la cuarta ronda
+
+**A — estados de evaluación distintos.** El modelo expone `estadoDeLectura` con cuatro
+valores tipados (`soportada`, `no_soportada`, `malformada`, `ausente`) y un único
+discriminante `esLegible()`. Antes un solo booleano colapsaba la ausencia con la
+incompatibilidad. Rótulos reales verificados en el render:
+
+| Estado | Rótulo en la tabla |
+|---|---|
+| `ausente` | «Sin evaluación registrada: solo se muestran las cifras medidas» |
+| `malformada` | «El registro de la evaluación no se puede leer» |
+| `no_soportada` | «Evaluación de una metodología que esta versión no interpreta» |
+| `soportada` | Presentación del contrato (`Favorece a «Prueba 2»`, `No evaluada: apoyo insuficiente`) |
+
+**B — margen no interpretable.** `textoDeMargenAplicado` y `textoDeRuido` distinguen tres
+situaciones: valor legible, valor que **existe pero no se interpreta** («no se interpreta con
+esta versión») y ausencia real («no consta en el registro»). El dato persistido no se toca:
+la fixture conserva `margen_porcentaje: 5.0` y una prueba lo afirma.
+
+**C — procedencia del apoyo: verificado, sin cambios.** Las 2000 muestras por lado proceden
+de `apoyo_referencia.percentil.muestras` / `apoyo_candidata.percentil.muestras`. No se
+confundió con el total de la grabación: `muestras` es `n` (`benchmarks.rs:1017`,
+`cola_nominal = n·(1−p)`). Para el 0,1 % la `cola_nominal` es 2, es decir, **n no es el apoyo
+efectivo de la cola** (2000·0,02 = 40). El rótulo actual dice «muestras», que es lo que el
+contrato declara, y no se inventa nada cuando el apoyo no consta.
+
+#### Evidencia de regresión (correcciones A y B)
+
+`regresionesResiduales.test.tsx`: **53 → 63 pruebas**. Los cuatro estados se comprueban sobre
+el componente real y se verifica que los tres no legibles dicen textos **distintos entre sí**.
+
+| Reversión | Resultado |
+|---|---|
+| A: rótulo único «Evaluación no interpretable con esta versión» | **3 fallan** (ausente, no soportada, malformada) |
+| A: los tres estados con el mismo texto | **1 falla**: los rótulos coinciden entre estados |
+| B: «no consta en el registro» para el margen ilegible | **1 falla** |
+
+Restaurado cada vez: **63/63**.
+
+#### Validación técnica
+
+Solo frontend y pruebas (no se tocó Rust): `npx tsc --noEmit` → 0 · `npx vitest run` →
+**1214 pruebas, 81 archivos, verde** · `npm run build` → correcto · `git diff --check` → OK.
+Rust no repetido (referencia 1071 + 1 ignorada). Los 3 avisos de `cargo audit` siguen
+pendientes de evaluación.
+
+**Estas correcciones A y B no se han validado todavía en CachyOS.** La validación real
+correspondiente llegará en la siguiente ronda dirigida, limitada a los componentes tocados.
+
+#### Limitaciones de esta evidencia
+
+- Las pruebas pasan el objeto como prop: no recorren IPC real ni WebKitGTK.
+- Son pruebas de contenido renderizado, no de aspecto visual.
+- Nada de esto demuestra la detección real con juegos en el equipo del usuario.
+- `src/test/` (fixtures de transporte) **sigue sin rastrear**.
+
+#### Incidencias 3.2 y 3.4: no cerradas del todo
+
+La semántica y la procedencia de los datos son correctas (la diferencia se calcula desde
+valores originales; el apoyo y la métrica afectada salen del contrato). Lo que queda es
+**presentación**: la vista previa sigue con índices enteros y limitaciones genéricas. No son
+defectos cosméticos aislados, pero tampoco de interpretación del contrato: se trasladan como
+deuda de fase 6 sin declararlas resueltas.
+
+### Quinta validación real (27/11/2026)
+
+Entorno del responsable: `/home/thor/thoriapp-validacion-c3/entorno-FtLDuUYl`.
+
+**Protocolo.** Compilación frontend y Rust release correctas. Verificador de frontend: **14
+blobs** presentes en el ejecutable y control negativo superado. Integridad antes/después OK en
+las tres carpetas reales (SHA-256, tamaño, mtime ns y modo). Vigilancia iniciada a las
+22:06:53, **sin eventos registrados**; integridad final a las 22:11:19. Aislamiento validado
+dentro del alcance del protocolo, **sin garantías absolutas**.
+
+**Resultados.** PARCIAL_PERDIDA, MALFORMADA, NO SOPORTADA e HISTÓRICA superan los criterios
+semánticos de la ronda. Único fallo residual: en HISTÓRICA, «Margen aplicado: no se interpreta
+con esta versión», cuando la evaluación está **ausente** y lo correcto es «no consta en el
+registro».
+
+#### Causa del fallo y por qué las pruebas B no lo vieron
+
+`textoDeMargenAplicado` usaba `!esLegible(lectura)` como condición de «no se interpreta».
+`esLegible` responde a la pregunta «¿se puede leer?», que es `false` también cuando **no hay
+nada que leer**. Colapsaba así los tres estados no legibles en un único texto, justo el error
+que la corrección A había separado en las tablas.
+
+Las pruebas de B cubrían solo `no_soportada` y `soportada`; **ninguna abría el panel de
+métricas avanzadas en la comparación histórica**. La prueba de A que toca la histórica leía
+la tabla, no el margen.
+
+Corregido con un `switch` sobre `modelo.estadoDeLectura`, sin tocar el modelo ni la
+procedencia: `soportada`/`ausente` → valor o «no consta»; `malformada`/`no_soportada` → «no se
+interpreta con esta versión». El **mismo defecto latente** existía en `textoDeRuido` y se
+corrigió igual, porque `noise_percent` nulo en una histórica tampoco es «no interpretable».
+
+#### Evidencia de regresión (quinta ronda)
+
+`regresionesResiduales.test.tsx`: **63 → 66 pruebas**. Suite nueva «B (quinta ronda)» sobre el
+componente real, abriendo el panel de métricas avanzadas.
+
+| Comprobación | Antes de corregir | Después |
+|---|---|---|
+| HISTÓRICA dice «no consta en el registro» | **falla** (decía «no se interpreta…») | pasa |
+| HISTÓRICA no anuncia ruido no interpretable | **falla** | pasa |
+| Los cuatro estados dan su texto propio | **falla** | pasa |
+
+Restaurado cada vez: **66/66**. Los otros tres estados se comprueban en la misma suite
+(soportada → `±5.0 %`; no soportada y malformada → «no se interpreta con esta versión»), y
+sus pruebas previas siguen pasando sin cambios.
+
+---
+
+### Sexta validación real y cierre de C.3 (27/11/2026)
+
+Entorno del responsable: `/home/thor/thoriapp-validacion-c3/entorno-a8tbLkg6`.
+
+**Protocolo.** Compilación frontend y Rust release correctas. Verificación de los **14 blobs**
+integrados en el ejecutable superada; control negativo superado. Integridad antes/después
+correcta en las tres carpetas reales (SHA-256, tamaño, mtime ns y modo). Registro de
+vigilancia iniciado a las **22:19:45 UTC, sin eventos de escritura registrados**; comprobación
+final de integridad a las **22:22:48 UTC**.
+
+**Alcance real de esta evidencia.** La vigilancia confirma que **no se registraron eventos de
+escritura** durante la ventana observada, y la comparación de integridad confirma que las tres
+carpetas quedaron idénticas entre la instantánea inicial y la final. No es un mecanismo de
+aislamiento hermético ni garantiza la ausencia de escrituras que no llegasen a registrarse:
+acota el comportamiento observado en esa ventana, nada más.
+
+**Resultado.** HISTÓRICA muestra «no consta en el registro» tanto en **margen aplicado** como
+en **ruido combinado**. Con esto se cierra el último fallo residual de la quinta ronda y C.3
+queda **cerrada dentro del alcance acordado**.
+
+### C.3 — cierre oficial
+
+Cerrada el 27/11/2026 tras seis rondas de validación real en el equipo con datos sintéticos.
+
+| Concepto | Valor |
+|---|---|
+| Pruebas Rust | **1071 superadas + 1 ignorada** (1072 definidas) |
+| Pruebas TypeScript | **1217 superadas** (81 archivos) |
+| **Total** | **2288 pruebas superadas** |
+| De ellas, regresión residual | **66** (incluidas en el total de TypeScript) |
+| `cargo clippy -- -D warnings` | Sin hallazgos |
+| `npm audit --omit=dev` | 0 vulnerabilidades |
+| `cargo audit` | **3 avisos preexistentes**, pendientes de evaluación |
+
+**Pendiente, no declarado corregido:**
+
+- **C3-10** — la interfaz no permite elegir dos grabaciones (deuda funcional).
+- **C3-11** — la selección automática puede formar un par entre juegos distintos; Rust ya
+  protege (`comparacion_entre`). Mejora de interfaz.
+- **3.2** — precisión decimal unificada de estabilidad: la semántica es correcta, queda la
+  presentación.
+- **3.4** — presentación de limitaciones y apoyo en la vista previa.
+- **Validación con juegos reales**: **no ejecutada**. Todo lo validado usa datos sintéticos
+  sobre el ejecutable real. La detección con juegos reales sigue sin demostrarse en C.3.
+
+**Deudas de fase 6** (no implementadas): ver «Deuda registrada para la fase 6».
+
+## Auditoría de cierre de C.3
+
+### Evidencia por nivel
+
+| Nivel | Alcance | Qué demuestra | Qué **no** demuestra |
+|---|---|---|---|
+| **Automatizado** | 1217 pruebas de Vitest (81 archivos); 1071 Rust + 1 ignorada; clippy limpio | Contratos, regresiones, contenido renderizado | Aspecto visual, IPC real, WebKitGTK, detección de juegos |
+| **Real con datos sintéticos** | 5 rondas en CachyOS (entornos `SVYvTcEy`, `Q2BSZQdI`, `xl2OEREe`, `FtLDuUYl` y el inicial) | Presentación correcta sobre el ejecutable real con fixtures | Comportamiento con juegos reales |
+| **Pendiente con juegos reales** | Protocolo de `docs/validacion-real.md` | — | **No ejecutado**: la limitación de Eslabong/Tattoo Tycoon sigue abierta |
+
+### Inventario C3-01 a C3-26
+
+Implementadas: C3-01, 02, 03, 04, 05, 06, 07, 08, 09, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+21, 22, 23, 24, 25, 26 y C3-ISO-1 (alcance evaluado).
+**Deuda, no tocada**: C3-10 (no se pueden elegir dos grabaciones) y C3-11 (par automático entre
+juegos distintos; Rust ya protege).
+
+Las incidencias 3.1–3.8 de la tercera ronda y A/B/C de la cuarta están en sus secciones. **3.2
+y 3.4 no se declaran cerradas**: semántica y procedencia son correctas, queda la presentación
+visual, trasladada a fase 6.
+
+### Validación técnica de cierre
+
+- `npx tsc --noEmit` → **0 errores**
+- `npx vitest run` → **1217 pruebas, 81 archivos, verde**
+- `npm run build` → correcto
+- `npm audit --omit=dev` → **0 vulnerabilidades**
+- `cargo test --locked --bins` → **1071 pasadas + 1 ignorada** (1072 definidas)
+- `cargo clippy --locked --bins -- -D warnings` → **sin hallazgos**
+- `cargo audit --file Cargo.lock` → **3 avisos preexistentes** (abajo)
+- `git diff --check` → sin problemas
+
+### Avisos de auditoría (pendientes de evaluación, no introducidos en C.3)
+
+| Crate | Tipo | Estado |
+|---|---|---|
+| `chrono` | sin mantenimiento | Sin actualización disponible |
+| `proc-macro-error` | sin mantenimiento | Sin actualización disponible |
+| `glib` | `Iterator`/`DoubleEndedIterator` de `VariantStrIter` no sólidos | Actualizar a ≥0.20.0 (con parche) |
+
+### Archivos
+
+**Modificados** (26 archivos, entre ellos): `STATUS.md`, `src-tauri/Cargo.toml` (solo
+`features = ["float_roundtrip"]`), `src-tauri/src/{benchmarks,evaluacion,main}.rs`,
+`src-tauri/src/evaluacion/pruebas_c2.rs`, `BenchmarksView.tsx`, `SavedComparisonDetail.tsx`,
+`presentacionEvaluacion` (nuevo), `interpretacion.ts` (eliminado), `evaluacionGuardada.ts`
+(eliminado).
+
+**Eliminados**: `src/lib/evaluacionGuardada.ts` y `.test.ts`, `src/lib/interpretacion.ts`.
+Motivo: su lógica y su clasificación se consolidaron en `presentacionEvaluacion.ts`, que es
+ahora el único modelo de presentación. La cobertura se conservó: `presentacionEvaluacion.test.ts`
+tiene 32 pruebas e incluye los cuatro estados.
+
+**No rastreados que deben entrar en el commit**: `src/test/` (fixture de transporte y su
+README), `regresionesResiduales.test.tsx`, `matrizCoherencia.test.tsx`,
+`presentacionEvaluacion.ts` y `.test.ts`, `etiquetas.ts`, `regresionesC3.test.ts`,
+`useComparison.test.tsx`, `src-tauri/src/evaluacion/pruebas_c3_20.rs`.
+
+**`Cargo.lock`**: sin cambios.
+
+### Trazas e instrumentación
+
+Sin `traza_c3`, `console.log`, `dbg!` ni archivos temporales. `diagnostico_procesos.rs` es
+preexistente (v1.2.0) y es funcionalidad, no instrumentación. Se corrigió un comentario de
+`BenchmarksView.tsx` que remitía a `interpretacion.ts`, ya eliminado.
+
+### Protocolo de validación real reducido (para después de corregir)
+
+No hace falta repetir los ocho escenarios completos. Basta con:
+
+1. **PARCIAL_PERDIDA** (A, D, H, I) — abrir `SINTETICO PARCIAL_PERDIDA` desde el Dashboard:
+   - Titular **«Mejora en parte de las métricas»**, no «Mejora».
+   - **No** debe aparecer «rinde mejor que la anterior» ni «Mejor resultado observado».
+   - Fila del **0,1 % low**: −50.0 %, sin «Favorece a» y sin preferencia.
+   - FPS medios y 1 % low **conservan** su «Favorece a Prueba 2».
+   - Límites en castellano; **ningún** `codigo (codigo)` duplicado.
+   - Estabilidad: 73 → 62 con **−11 pts**, y las barras sobre escala 0-100.
+2. **MALFORMADA** (B) — abrir `SINTETICO Malformada`:
+   - El detalle debe coincidir con el listado: **no legible / no compatible**, **no** «Mejora».
+   - **No** debe decir «Evaluación original no registrada» (eso es histórico, no ilegible).
+3. **NO SOPORTADA** (C) — abrir `SINTETICO No soportada`:
+   - **Sin** «sin apoyo declarado», «Métricas tal como se evaluaron», «compatibilidad no
+     registrada», «sin preferencia establecida» ni «(mejora)».
+   - Las cifras medidas **sí** se muestran.
+4. **Histórica y narrativa** (F, J) — abrir `SINTETICO Historica`:
+   - Rótulo «Conclusión guardada …, sin evaluación estructurada».
+   - En COMPLETA_MEJORA, la narrativa pasa a «Texto original de la medición» con la nota de
+     que el resultado vigente es el de la evaluación.
+   - Ninguna superficie dice «se guardó antes de que Thoriapp registrara…».
+5. **Guía rápida** (G): el ejemplo ya no concluye «gana la nueva» por más FPS y estabilidad.
+6. **COMPLETA_MEJORA** (control positivo) — debe seguir diciendo «Mejora» con su ganadora.
+   **MIXTO** y **SIN_CAMBIO** no cambian de significado: se comprueba por pruebas
+   automatizadas (`matrizCoherencia.test.tsx`), no hace falta repetirlos a mano.
+
+**Aislamiento**: mismo protocolo (entorno nuevo, cerrojo `instancia.lock`, sin tocar ACL ni
+CSP). **Al cerrar**: `02-comprobar-integridad.sh` sobre las tres carpetas, con `sha256sum` y
+`stat`.
+
+### Instrumentación retirada
+
+Se retiró la traza temporal de C.3: `traza_c3.rs`, el comando `traza_c3_frontend`, su
+invocación en `useComparison.ts` y `BenchmarksView.tsx`, el mock de las pruebas y el `export`
+del lanzador aislado. **Se conservan**: los mecanismos normales de diagnóstico de la app, las
+4 regresiones de C3-13, las 18 de C3-20 (inventario reconciliado: 9 + 6 + 3) y
+`float_roundtrip`.
+
+### Validación ejecutada
+
+`npx tsc --noEmit` · `npx vitest run` (1151) · `npm run build` · `npm audit --omit=dev` (0) ·
+`cargo test --locked --bins` (1071 pasan, 1 ignorada) · `cargo clippy --locked --bins -- -D
+warnings` (limpio) · `cargo audit` (3 avisos **preexistentes**, no evaluados aquí: `chrono` y `proc-macro-error`
+«unmaintained», `glib` con `Unsoundness` en `VariantStrIter`; `cargo audit` los etiqueta
+«allowed warnings» por su configuración, lo que **no** equivale a que el proyecto los haya
+aceptado: no hay política explícita registrada) · `git diff --check`.
+
+C3 permanece **implementada y pendiente de validación real final**. No se cierra.
+
+## C3-ISO-1 — aislamiento de la validación (**cerrada dentro del alcance evaluado**)
+
+Incidencia abierta al detectar alteraciones en los datos reales durante la validación manual
+de C.3. **Cerrada** tras repetir la comprobación con un entorno aislado nuevo y vigilancia
+con `inotify` real.
+
+### Lo que se corrigió
+
+| ID | Defecto | Corrección |
+|---|---|---|
+| I-1 | `paso()` del observador reescribe `sessions.json` en cada pasada aunque no cambie nada | **No corregido**: deuda registrada (ver «Deuda técnica registrada»), ajena a esta fase |
+| I-2 | El cerrojo de instancia vive en `XDG_CONFIG_HOME`, así que el entorno aislado **no ve** una instancia normal | Lanzador `04`: aborta si hay una instancia de Thoriapp en marcha, comprobando por nombre y por `/proc/*/exe` |
+| I-3 | Script `02`: `sort` en C y `comm` en la locale del usuario; rutas con TAB y saltos de línea partían el registro; `ENLACE`/`AUSENTE` se colaban como rutas | Instantáneas con campos **separados por NUL** y **clase explícita** por registro; `LC_ALL=C` fijado para todo el script; `sort -z` y `comm -z` |
+| I-4 | Excluir la caché de WebKit del veredicto de aislamiento | **Rechazado** por decisión de producto: la caché cuenta igual que los datos |
+
+### Evidencia de la comprobación controlada (CachyOS, 27/11)
+
+| Comprobación | Resultado |
+|---|---|
+| Entorno nuevo | `/home/thor/thoriapp-validacion-c3/entorno-RuPS3pst` |
+| Instancias de Thoriapp antes del arranque | Ninguna detectada |
+| `inotify` | `inotify-tools` 4.26.291-1.1, con `PRUEBA OK` sobre inotify real |
+| Vigilancia | Establecida **antes** de arrancar la app |
+| Ejecución aislada y cierre | Normal |
+| Log de vigilancia | **Sin eventos** |
+| Integridad | **`INTEGRIDAD OK`**: las tres carpetas idénticas (sha256, tamaño, mtime ns y modo) |
+| Instantáneas del intento anterior | Fecha de modificación y tamaño **conservados** |
+
+Las pruebas de detección del script corregido se ejecutaron antes de la validación real:
+archivos nuevos, eliminados, modificados, enlaces, rutas ausentes, nombres con tabulador y
+salto de línea, y **dos archivos que intercambian su contenido conservando tamaño, permisos y
+mtime** (ambos cambios detectados). Locales: `C`, `C.utf8` y `POSIX`; `es_ES.UTF-8` **no se
+ejecutó** porque no existe en el entorno de pruebas.
+
+### Limitaciones que se conservan
+
+- **La vigilancia no es recursiva.** Cubre las tres carpetas reales, un nivel de cada una. No
+  desciende a `WebKitCache`: generaríamos un evento por acceso a la caché y llenaríamos el
+  disco. Una escritura en un subdirectorio **no registrado por nombre de archivo** no se vería
+  en el log, aunque sí cambiaría la instantánea de integridad.
+- **Las alteraciones del primer intento no se pueden atribuir retrospectivamente.** La
+  vigilancia empezó después; no hay registro de qué proceso escribió entre las 12:57 y las
+  16:24. Que la repetición saliera limpia **no demuestra** qué pasó entonces, y no se afirma
+  que hubiera una ejecución no aislada.
+- **La comprobación de instancias es puntual**, no continua: es una foto antes del arranque y
+  no impide que otra instancia se abra después.
+- **`inotifywait` no identifica el PID** que provoca un evento. Atribuirlo exige
+  `fanotify`/`auditd` con root, fuera del alcance de este protocolo.
+
+Ni los entornos ni las evidencias de las dos rondas se han eliminado.
 
 ## Cierre de 5.3 — validación real y limitación conocida
 
@@ -1606,6 +2433,24 @@ Resto de avisos, prioridad menor (estilo y limpieza):
 
 No se corrigen en esta entrega, que solo pretendía arreglar el CI. Corregirlos es una tarea
 aparte, y conviene empezar por los escapes octales.
+
+### `paso()` del observador reescribe `sessions.json` en cada pasada (C3-ISO-1 / I-1)
+
+**No corregido**: pertenece al observador de sesiones (5.3), no a la fase en curso.
+
+`sessions_service::ServicioDeSesiones::paso()` llama `self.guardar(&data)` **sin
+condición** al final de cada pasada. `guardar()` → `escribir_atomico` (`.tmp` + `rename`),
+y el `rename` cambia el **`mtime` aunque los bytes sean idénticos**. Con el observador
+encendido, una pasada cada 5, 10 o 30 s según el estado.
+
+Los demás escritores sí evitan la escritura sin cambios (`fijar_activo`, `anotar_grabacion`,
+`asignar_juego` devuelven `false`); `paso()` es el único que no.
+
+Observado en la validación real: `sessions.json` conservó SHA256, tamaño y permisos, pero su
+`mtime` cambió. Es escritura sin cambio de contenido, no corrupción.
+
+Prioridad media: no afecta a los datos; sí al desgaste del disco, a los backups
+incrementales y a cualquier comprobación de integridad basada en `mtime`.
 
 ### Otras
 

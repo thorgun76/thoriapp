@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { Benchmark } from '../lib/types';
 import { SIN_DATOS_TEMPORALES } from '../lib/umbrales';
-import { ANTES, DESPUES } from '../lib/interpretacion';
+import { ANTES, DESPUES } from '../lib/etiquetas';
 
 /**
  * Gráfico del frametime (ms por muestra) de las dos grabaciones.

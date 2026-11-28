@@ -5,7 +5,6 @@ mod covers;
 mod cpu_rank;
 mod diagnostico_procesos;
 mod engine;
-#[cfg(test)]
 mod evaluacion;
 mod evidencia_proceso;
 #[cfg(test)]
@@ -67,6 +66,8 @@ async fn diagnose_covers() -> String {
     spawn_blocking(covers::diagnose).await.unwrap_or_default()
 }
 
+/// Traza temporal de diagnóstico del frontend (C.3).
+///
 #[derive(Serialize)]
 struct HwInfo {
     #[serde(flatten)]
@@ -895,7 +896,7 @@ fn main() {
             benchmarks::delete_benchmark,
             benchmarks::delete_benchmarks_for_game,
             benchmarks::delete_all_benchmarks,
-            benchmarks::compare_benchmarks,
+            benchmarks::compare_benchmarks_evaluada,
             benchmarks::analyze_mangohud_log_command,
             benchmarks::detect_mangohud_log_path,
             benchmarks::check_mangohud_installed,
@@ -924,7 +925,7 @@ fn main() {
             log_watcher::processed_logs_count,
             log_watcher::forget_processed_logs,
             shaders::get_shader_cache,
-            benchmarks::save_comparison,
+            benchmarks::save_comparison_evaluada,
             benchmarks::load_comparisons,
             benchmarks::delete_comparison,
             benchmarks::delete_all_comparisons,

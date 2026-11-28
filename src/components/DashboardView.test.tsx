@@ -185,6 +185,42 @@ describe('Mis pruebas: filas de la lista', () => {
     expect(fila.getAttribute('aria-label')).not.toMatch(/rinde mejor/i);
   });
 
+  it('una mejora con cobertura parcial no se anuncia como victoria global [C.3]', () => {
+    // Caso real del motor: FPS y 1 % low suben, el 0,1 % low cae un 50 % pero no es
+    // elegible, así que el motor decide `mejora` con `evaluacion_parcial`.
+    const c = guardada(
+      '1',
+      { avg_fps: 100, fps_1_percent_low: 80, fps_0_1_percent_low: 60, number: 1 },
+      { avg_fps: 120, id: 'b2', fps_1_percent_low: 96, fps_0_1_percent_low: 30, number: 2 },
+      20
+    );
+    c.evaluacion = {
+      metodologia_interpretacion: 'v1',
+      evaluada_en: '2026-01-02 11:00:00',
+      referencia: { id: c.comparison.baseline.id },
+      candidata: { id: c.comparison.test.id },
+      estado: 'mejora',
+      confianza: 'observada',
+      condiciones: { compatibilidad_metodologica: 'establecida', margen_porcentaje: 5 },
+      motivos: [],
+      limitaciones: [
+        'no_elegible',
+        'apoyo_insuficiente',
+        'perdida_observada_sin_evaluar',
+        'evaluacion_parcial',
+      ],
+      metricas: [],
+    } as never;
+    c.estado_de_la_evaluacion = 'soportada';
+    guardadas.push(c);
+
+    render(<DashboardView />);
+    const etiqueta = filaDe().getAttribute('aria-label') ?? '';
+    // Se dice que el cambio es parcial, y no se anuncia una mejora sin matices.
+    expect(etiqueta).toContain('en parte de las métricas');
+    expect(etiqueta).not.toMatch(/\brinde mejor\b/i);
+  });
+
   it('las grabaciones antiguas se anuncian sin inventarles un número', () => {
     guardadas.push(
       guardada(

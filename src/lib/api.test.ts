@@ -92,7 +92,13 @@ describe('payload de save_benchmark', () => {
   it('expone los comandos de benchmarks en el wrapper', () => {
     expect(typeof api.saveBenchmark).toBe('function');
     expect(typeof api.analyzeMangohudLog).toBe('function');
-    expect(typeof api.compareBenchmarks).toBe('function');
+    // C.3: la comparación individual solo existe **evaluada**, y el guardado exige la
+    // confirmación. Un `compareBenchmarks` o un `saveComparison` sueltos serían la ruta
+    // alternativa sin evaluación que C.3 retira.
+    expect(typeof api.compareBenchmarksEvaluada).toBe('function');
+    expect(typeof api.saveComparisonEvaluada).toBe('function');
+    expect(api).not.toHaveProperty('compareBenchmarks');
+    expect(api).not.toHaveProperty('saveComparison');
     expect(typeof api.updateProfile).toBe('function');
   });
 

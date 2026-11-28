@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { RecordedSetup, Benchmark, BenchmarkComparison, GroupComparison } from '../lib/types';
 import { api } from '../lib/api';
+import type { EvaluacionPersistida } from '../lib/api';
 import { useMangoHud } from '../hooks/useMangoHud';
 import { useBenchmarks, MismoJuego } from '../hooks/useBenchmarks';
 import { useShaderCache } from '../hooks/useShaderCache';
 import { ShaderStutterCard } from './ShaderStutterCard';
-import { useComparison } from '../hooks/useComparison';
+import { useComparison, puedeGuardar } from '../hooks/useComparison';
 import { useLogWatcher } from '../hooks/useLogWatcher';
 import { useConfirm, useToast } from '../hooks/useConfirm';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -14,12 +15,16 @@ import { fmtDuration, formatTimestamp } from '../lib/format';
 import { tieThreshold, marginLabel } from '../lib/noise';
 import { duraMenosDe, textoDeDuracion } from '../lib/duracion';
 import { MIN_TIE_PERCENT } from '../lib/umbrales';
-import {
-  interpretar, ANTES, DESPUES,
-  type Tono, type CambioMetrica, type Ganador,
-} from '../lib/interpretacion';
+import { ANTES, DESPUES, etiquetasDe } from '../lib/etiquetas';
 import { estabilidad } from '../lib/estabilidad';
-import { etiquetasDe, titularDelCambio, mejorObservada } from '../lib/interpretacion';
+import {
+  formatearCifra,
+  presentarEvaluacion,
+  presentarSinEvaluacion,
+  textoDeEtiqueta,
+  type ModeloDePresentacion,
+  type Tono,
+} from '../lib/presentacionEvaluacion';
 import { GroupComparisonCard } from './GroupComparisonCard';
 import { Toggle } from './Toggle';
 import { openExternal } from '../lib/links';
@@ -108,7 +113,7 @@ const DURATION_OPTIONS = [
   { seconds: 30, label: '30 s', note: 'Rápido' },
   { seconds: 60, label: '1 min', note: 'Recomendado' },
   { seconds: 90, label: '1 min 30 s', note: 'Muy fiable' },
-  { seconds: 120, label: '2 min', note: 'Máxima precisión' },
+  { seconds: 120, label: '2 min', note: 'Más duración' },
 ];
 
 // Segundos iniciales que se descartan: incluyen la carga del nivel y la compilación
@@ -130,17 +135,25 @@ const AUTO_RECOGER_KEY = 'mangohud_auto_recoger';
  *
  * Se delega en `lib/estabilidad.ts`, que sanea NaN/∞/negativos y satura a 100. Aquí se
  * devuelve 0 solo para que `buildRows` (que trabaja con `number`) siga funcionando; los
- * datos inválidos se detectan en `lib/interpretacion.ts`, que es quien decide el veredicto.
+ * datos inválidos se detectan en `lib/presentacionEvaluacion.ts`, que es quien decide el
+ * veredicto y el estado de cada métrica.
  */
 function smoothScore(b: Benchmark): number {
   return estabilidad(b.avg_fps, b.fps_1_percent_low, b.fps_0_1_percent_low) ?? 0;
 }
 
+/**
+ * C3-08: nombres que **no** describen velocidad ni calidad del juego.
+ *
+ * «Muy fluido» / «Fluido» valoraban el juego entero con un índice que solo mide
+ * regularidad, y daban a entender una preferencia que el motor no emite. Se nombra lo que
+ * mide —cuánto se mantiene la velocidad media en los peores momentos— y nada más.
+ */
 function smoothLabel(score: number): string {
-  if (score >= 65) return 'Muy fluido';
-  if (score >= 50) return 'Fluido';
-  if (score >= 35) return 'Algunos tirones';
-  return 'Muchos tirones';
+  if (score >= 65) return 'Muy regular';
+  if (score >= 50) return 'Regular';
+  if (score >= 35) return 'Algo irregular';
+  return 'Muy irregular';
 }
 
 const hasStutterData = (b: Benchmark) =>
@@ -196,12 +209,12 @@ export function buildRows(c: BenchmarkComparison): MetricRow[] {
 
   const rows: MetricRow[] = [
     makeRow({
-      key: 'avg', group: 'speed', label: 'FPS promedio', hint: 'Más alto = mejor',
+      key: 'avg', group: 'speed', label: 'FPS promedio', hint: 'Imágenes por segundo. Más alto es más rápido',
       base: b.avg_fps, test: t.avg_fps, decimals: 1, unit: '',
       higherIsBetter: true, weight: 1, floor: 0.01,
     }),
     makeRow({
-      key: 'ft', group: 'speed', label: 'Tiempo por imagen', hint: 'Menos ms = mejor',
+      key: 'ft', group: 'speed', label: 'Tiempo por imagen', hint: 'Milisegundos por imagen. Menos es más rápido',
       base: b.frame_time_avg, test: t.frame_time_avg, decimals: 2, unit: ' ms',
       higherIsBetter: false, weight: 0, floor: 0.01,
     }),
@@ -211,12 +224,12 @@ export function buildRows(c: BenchmarkComparison): MetricRow[] {
       higherIsBetter: true, weight: 3, floor: 1,
     }),
     makeRow({
-      key: 'low1', group: 'smooth', label: 'Peores momentos (1% Low)', hint: 'FPS en el 1% más lento. Más alto = mejor',
+      key: 'low1', group: 'smooth', label: 'Peores momentos (1% Low)', hint: 'FPS en el 1% más lento. Más alto es más rápido',
       base: b.fps_1_percent_low, test: t.fps_1_percent_low, decimals: 1, unit: '',
       higherIsBetter: true, weight: 2, floor: 0.01,
     }),
     makeRow({
-      key: 'low01', group: 'smooth', label: 'Peores tirones (0.1% Low)', hint: 'FPS en el 0.1% más lento. Más alto = mejor',
+      key: 'low01', group: 'smooth', label: 'Peores tirones (0.1% Low)', hint: 'FPS en el 0.1% más lento. Más alto es más rápido',
       base: b.fps_0_1_percent_low, test: t.fps_0_1_percent_low, decimals: 1, unit: '',
       higherIsBetter: true, weight: 1, floor: 0.01,
     }),
@@ -226,22 +239,22 @@ export function buildRows(c: BenchmarkComparison): MetricRow[] {
   if (hasStutterData(b) && hasStutterData(t)) {
     rows.push(
       makeRow({
-        key: 'spikes', group: 'smooth', label: 'Tirones bruscos por minuto', hint: 'Menos = mejor',
+        key: 'spikes', group: 'smooth', label: 'Tirones bruscos por minuto', hint: 'Cuántos tirones por minuto. Descriptiva',
         base: b.spikes_per_min!, test: t.spikes_per_min!, decimals: 1, unit: '',
         higherIsBetter: false, weight: 3, floor: 1,
       }),
       makeRow({
-        key: 'over33', group: 'smooth', label: 'Tiempo bajo 30 FPS', hint: '% del tiempo. Menos = mejor',
+        key: 'over33', group: 'smooth', label: 'Tiempo bajo 30 FPS', hint: '% del tiempo por debajo de 30 FPS. Descriptiva',
         base: b.pct_over_33ms!, test: t.pct_over_33ms!, decimals: 1, unit: '%',
         higherIsBetter: false, weight: 2, floor: 1,
       }),
       makeRow({
-        key: 'jitter', group: 'smooth', label: 'Saltos entre imágenes', hint: 'Menos ms = mejor',
+        key: 'jitter', group: 'smooth', label: 'Saltos entre imágenes', hint: 'Variación media entre imágenes. Descriptiva',
         base: b.jitter_ms!, test: t.jitter_ms!, decimals: 2, unit: ' ms',
         higherIsBetter: false, weight: 1, floor: 0.5,
       }),
       makeRow({
-        key: 'worst', group: 'smooth', label: 'Peor tirón', hint: 'Menos ms = mejor',
+        key: 'worst', group: 'smooth', label: 'Peor tirón', hint: 'Duración del peor fotograma. Descriptiva',
         base: b.worst_frame_ms!, test: t.worst_frame_ms!, decimals: 1, unit: ' ms',
         higherIsBetter: false, weight: 0, floor: 5,
       }),
@@ -252,36 +265,47 @@ export function buildRows(c: BenchmarkComparison): MetricRow[] {
 }
 
 /**
- * Nivel de una familia de métricas para el chip de cada tarjeta.
+ * Nivel visual de una métrica, **copiado** de la preferencia que estableció el motor.
  *
- * Ya no hay puntuación ponderada (los pesos 3/2/1 se han retirado): el resultado lo
- * decide `interpretar()` en `lib/interpretacion.ts`, que es el único intérprete que
- * queda. Aquí solo se traduce el cambio de una métrica a su etiqueta visual.
+ * `MetricaPresentada` no tiene `mejor`/`peor`: solo `preferencia`. Así el color de una
+ * métrica no puede nacer de un signo ni de un umbral calculado aquí. `no_establecida`
+ * (o una preferencia desconocida) se pinta como «sin preferencia», no como «igual».
  */
-const levelOfCambio = (c: CambioMetrica): Level =>
-  c === 'mejor' ? 'better' : c === 'peor' ? 'worse' : 'same';
+function levelDePreferencia(preferencia: string | null | undefined): Level {
+  if (preferencia === 'favor_de_candidata') return 'better';
+  if (preferencia === 'favor_de_referencia') return 'worse';
+  return 'same';
+}
+
+/** Preferencia de una métrica del modelo, o `null` si el motor no la estableció. */
+function preferenciaDe(modelo: ModeloDePresentacion, clave: string): string | null {
+  const m = modelo.metricas.find((mm) => mm.clave === clave);
+  return m?.preferencia?.codigo ?? null;
+}
 
 /** Nombres visibles de cada grabación. Únicos para toda la aplicación. */
 export { ANTES as NOMBRE_ANTES, DESPUES as NOMBRE_DESPUES };
 
 /** Color de cada estado del resultado, compartido con la vista de pruebas guardadas. */
 export const TONO_STYLE: Record<Tono, { box: string; iconBox: string; text: string; Icon: typeof ThumbsUp }> = {
-  bien:     { box: 'border-compatible/60 bg-compatible/10', iconBox: 'bg-compatible/20', text: 'text-[var(--compatible)]', Icon: ThumbsUp },
-  mal:      { box: 'border-error/60 bg-error/10',           iconBox: 'bg-error/20',      text: 'text-[var(--error)]',      Icon: ThumbsDown },
-  atencion: { box: 'border-caution/60 bg-caution/10',       iconBox: 'bg-caution/20',    text: 'text-[var(--caution)]',    Icon: Scale },
+  positivo: { box: 'border-compatible/60 bg-compatible/10', iconBox: 'bg-compatible/20', text: 'text-[var(--compatible)]', Icon: ThumbsUp },
+  negativo: { box: 'border-error/60 bg-error/10',           iconBox: 'bg-error/20',      text: 'text-[var(--error)]',      Icon: ThumbsDown },
+  aviso:    { box: 'border-caution/60 bg-caution/10',       iconBox: 'bg-caution/20',    text: 'text-[var(--caution)]',    Icon: Scale },
   neutro:   { box: 'border-[var(--border)] bg-[var(--bg)]', iconBox: 'bg-border/40',     text: 'text-[var(--text-muted)]', Icon: Scale },
 };
 
 const LEVEL_STYLE: Record<Level, { chip: string; word: string }> = {
   better: { chip: 'bg-compatible/15 text-[var(--compatible)]', word: 'Mejor' },
-  same:   { chip: 'bg-border/40 text-[var(--text-muted)]',     word: 'Igual' },
+  // «Sin preferencia» y no «Igual»: que el motor no establezca preferencia no es que las
+  // dos pruebas sean equivalentes.
+  same:   { chip: 'bg-border/40 text-[var(--text-muted)]',     word: 'Sin preferencia' },
   worse:  { chip: 'bg-error/15 text-[var(--error)]',           word: 'Peor' },
 };
 
 /* ─────────────────────────── Componentes pequeños ─────────────────────────── */
 
 /** Dos barras (la de antes y la nueva) con el mismo criterio, para ver quién gana de un vistazo. */
-function CompareMeter({
+export function CompareMeter({
   icon,
   title,
   help,
@@ -293,6 +317,8 @@ function CompareMeter({
   footer,
   etiquetaBase,
   etiquetaTest,
+  escalaAbsoluta,
+  precisionMostrada,
 }: {
   icon: ReactNode;
   title: string;
@@ -301,15 +327,40 @@ function CompareMeter({
   test: number;
   decimals: number;
   unit: string;
-  level: Level;
+  /**
+   * `better`/`worse` solo si el motor estableció la preferencia de la métrica.
+   * `same` es «sin preferencia establecida», y `descriptiva` es una métrica que el motor
+   * no evalúa (estabilidad, frametime): no lleva chip de ninguna clase.
+   */
+  level: Level | 'descriptiva';
   footer: string;
   /** Cómo se llama cada grabación: «Prueba 1» o «Antes» en las antiguas. */
   etiquetaBase: string;
   etiquetaTest: string;
+  /**
+   * C3-19: máximo de la escala, para índices con un techo conocido (la estabilidad es
+   * 0-100). Sin esto la barra se dibuja **relativa** a la mayor de las dos grabaciones:
+   * 73 contra 62 salía al 100 % y al 85 %, y la misma cifra se veía más llena aquí que
+   * en el historial. Las métricas sin techo (FPS medios) siguen relativas: ahí comparar
+   * las dos barras entre sí es lo que se quiere leer.
+   */
+  escalaAbsoluta?: number;
+  /**
+   * C3-19b: decimales con los que se pinta la cifra del extremo. Por defecto, `decimals`.
+   * La estabilidad mostraba «73 → 62» redondeando a entero mientras la diferencia se
+   * calculaba con el valor real (−11,7): dos lecturas del mismo dato que no cuadraban.
+   */
+  precisionMostrada?: number;
 }) {
-  const max = Math.max(base, test, 0.0001);
-  const pct = (v: number) => `${Math.max(4, (v / max) * 100)}%`;
-  const style = LEVEL_STYLE[level];
+  const dec = precisionMostrada ?? decimals;
+  const max = escalaAbsoluta ?? Math.max(base, test, 0.0001);
+  const pct = (v: number) => {
+    // La barra mide la cifra **visible**, no el valor en bruto: si la etiqueta dice 73,2
+    // la barra no puede quedar en 73,17 %.
+    const visible = dec === decimals ? v : Number(v.toFixed(dec));
+    return `${Math.max(4, Math.min(100, (visible / max) * 100))}%`;
+  };
+  const style = level === 'descriptiva' ? null : LEVEL_STYLE[level];
 
   return (
     <div className="p-4 rounded-xl bg-[var(--bg)] border border-[var(--border)]">
@@ -318,9 +369,13 @@ function CompareMeter({
           {icon}
           {title}
         </h4>
-        <span className={`text-xs font-bold px-2.5 py-1 rounded-md whitespace-nowrap ${style.chip}`}>
-          {style.word}
-        </span>
+        {/* Sin chip cuando la métrica no se evalúa: un «Igual» o un «Mejor» aquí sería
+            un veredicto que el motor no ha dado. */}
+        {style && (
+          <span className={`text-xs font-bold px-2.5 py-1 rounded-md whitespace-nowrap ${style.chip}`}>
+            {style.word}
+          </span>
+        )}
       </div>
       <p className="text-xs text-[var(--text-muted)] mb-4">{help}</p>
 
@@ -328,7 +383,7 @@ function CompareMeter({
         <div>
           <div className="flex justify-between text-xs mb-1">
             <span className="font-semibold text-[#38bdf8]" title={etiquetaBase}>{etiquetaBase}</span>
-            <span className="font-bold text-[var(--text)]">{base.toFixed(decimals)}{unit}</span>
+            <span className="font-bold text-[var(--text)]">{base.toFixed(dec)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
             <div className="h-full rounded-full bg-[#38bdf8] transition-all duration-500" style={{ width: pct(base) }} />
@@ -337,7 +392,7 @@ function CompareMeter({
         <div>
           <div className="flex justify-between text-xs mb-1">
             <span className="font-semibold text-[var(--caution)]" title={etiquetaTest}>{etiquetaTest}</span>
-            <span className="font-bold text-[var(--text)]">{test.toFixed(decimals)}{unit}</span>
+            <span className="font-bold text-[var(--text)]">{test.toFixed(dec)}{unit}</span>
           </div>
           <div className="h-2.5 rounded-full bg-[var(--surface)] overflow-hidden">
             <div className="h-full rounded-full bg-[var(--caution)] transition-all duration-500" style={{ width: pct(test) }} />
@@ -350,20 +405,35 @@ function CompareMeter({
   );
 }
 
+/** Qué métrica del motor corresponde a cada fila de la tabla de detalle. */
+const CLAVE_POR_FILA: Record<string, string> = {
+  avg: 'avg_fps',
+  ft: 'frame_time_avg',
+  low1: 'fps_1_percent_low',
+  low01: 'fps_0_1_percent_low',
+  // `smooth` no está a propósito: la estabilidad no la evalúa el motor (C3-03/C3-08).
+};
+
 export function DetailsTable({
   rows,
-  showEstabilidad = false,
+  modelo,
   etiquetaBase = 'Antes',
   etiquetaTest = 'Después',
 }: {
   rows: MetricRow[];
-  showEstabilidad?: boolean;
+  /**
+   * Modelo compartido. La tabla **no** decide «Mejor»/«Peor»: pinta la preferencia que el
+   * motor estableció para cada métrica (C3-21). `row.gain` y `row.winner` se siguen
+   * calculando para otras partes de la vista, pero aquí no deciden nada.
+   */
+  modelo: ModeloDePresentacion;
   etiquetaBase?: string;
   etiquetaTest?: string;
 }) {
+  const porClave = new Map(modelo.metricas.map((m) => [m.clave, m]));
   const groups: { id: Group; title: string }[] = [
     { id: 'speed', title: 'FPS medios' },
-    { id: 'smooth', title: showEstabilidad ? 'Estabilidad y peores momentos' : 'Fluidez' },
+    { id: 'smooth', title: 'Estabilidad y peores momentos' },
   ];
 
   return (
@@ -380,13 +450,28 @@ export function DetailsTable({
           <div key={g.id} className="space-y-2">
             <p className="px-4 text-xs font-bold text-[var(--text-muted)]">{g.title}</p>
             {rows.filter((r) => r.group === g.id).map((r) => {
+              const ev = porClave.get(CLAVE_POR_FILA[r.key] ?? '') ?? null;
+              // C3-21: el chip sale de la preferencia de Rust, nunca del signo del cambio.
+              // Sin preferencia —descriptiva, excluida o indistinta— no hay «Mejor» ni
+              // «Peor»: la fila se muestra, pero no afirma dirección.
               const chip =
-                r.winner === 'tie'
+                ev?.estado === 'descriptiva' || ev == null || ev.estado === 'no_evaluada'
                   ? 'bg-border/40 text-[var(--text-muted)]'
-                  : r.gain > 0
-                  ? 'bg-compatible/15 text-[var(--compatible)]'
-                  : 'bg-error/15 text-[var(--error)]';
-              const word = r.winner === 'tie' ? 'Sin cambio concluyente' : r.gain > 0 ? 'Mejor' : 'Peor';
+                  : ev.estado === 'indistinta'
+                  ? 'bg-border/40 text-[var(--text-muted)]'
+                  : ev.preferencia?.codigo === 'favor_de_referencia'
+                  ? 'bg-error/15 text-[var(--error)]'
+                  : 'bg-compatible/15 text-[var(--compatible)]';
+              const word =
+                ev?.estado === 'descriptiva' || ev == null
+                  ? 'Descriptiva'
+                  : ev.estado === 'no_evaluada'
+                  ? 'No evaluada'
+                  : ev.estado === 'indistinta'
+                  ? 'Sin cambio apreciable'
+                  : ev.preferencia?.codigo === 'favor_de_referencia'
+                  ? `Mejor ${etiquetaBase}`
+                  : `Mejor ${etiquetaTest}`;
 
               return (
                 <div
@@ -397,11 +482,17 @@ export function DetailsTable({
                     <p className="text-sm font-semibold text-[var(--text)]">{r.label}</p>
                     <p className="text-[11px] text-[var(--text-dim)]">{r.hint}</p>
                   </div>
-                  <span className={`text-right text-sm ${r.winner === 'base' ? 'font-bold text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
-                    {r.base.toFixed(r.decimals)}{r.unit}
+                  {/*
+                    C3-21: los valores van en el mismo tono. Antes se ponía en negrita el
+                    lado «ganador», lo que destacaba una cifra a partir de un umbral
+                    calculado en React. La preferencia ya está dicha en la columna de
+                    resultado, con el dato que estableció Rust.
+                  */}
+                  <span className="text-right text-sm text-[var(--text-muted)]">
+                    {formatearCifra(r.base, r.decimals)}{r.unit}
                   </span>
-                  <span className={`text-right text-sm ${r.winner === 'test' ? 'font-bold text-[var(--text)]' : 'text-[var(--text-muted)]'}`}>
-                    {r.test.toFixed(r.decimals)}{r.unit}
+                  <span className="text-right text-sm text-[var(--text-muted)]">
+                    {formatearCifra(r.test, r.decimals)}{r.unit}
                   </span>
                   <div className="flex justify-end">
                     <span className={`text-xs font-bold px-2 py-1 rounded-md whitespace-nowrap ${chip}`}>
@@ -419,34 +510,67 @@ export function DetailsTable({
 }
 
 /**
- * Quién gana en una comparación, para poder mostrarlo fuera de esta pantalla.
+ * Resumen de una comparación para mostrarlo fuera de esta pantalla.
  *
- * Delega en `interpretar()`, el único intérprete de la aplicación. Los nombres de la
- * unión de tipos se mantienen (`empate`/`depende`) para no tocar a sus consumidores.
+ * Ya no hay intérprete en TypeScript: el resumen **copia** el veredicto del modelo de
+ * presentación, que lo toma de la evaluación de Rust. Los nombres de la unión de tipos se
+ * mantienen para no tocar a sus consumidores.
  */
 export type OverallWinner = 'antes' | 'despues' | 'empate' | 'depende';
 
-const GANADOR_A_WINNER: Record<Ganador, OverallWinner> = {
-  antes: 'antes',
-  despues: 'despues',
-  ninguno: 'empate',
-  mixto: 'depende',
-};
-
-export function summarizeComparison(c: BenchmarkComparison): {
+export function summarizeComparison(comparacion: BenchmarkComparison): {
   winner: OverallWinner;
   title: string;
 } {
-  const r = interpretar(c, etiquetasDe(c));
+  const modelo = presentarSinEvaluacion(comparacion);
+  // Sin evaluación no hay ganadora: `depende` es la respuesta honesta, no un empate.
+  // Este resumen se usa para comparaciones que aún no han pasado por el motor.
   return {
-    winner: GANADOR_A_WINNER[r.ganador],
-    title: r.titulo,
+    winner: modelo.quienFavorece === 'candidata'
+      ? 'despues'
+      : modelo.quienFavorece === 'referencia'
+      ? 'antes'
+      : 'depende',
+    title: tituloDeCabecera(modelo),
   };
+}
+
+/** Texto de la cabecera del modelo. Vive aquí porque es redacción, no metodología. */
+export function tituloDeCabecera(m: ModeloDePresentacion, etiquetas?: ReturnType<typeof etiquetasDe>): string {
+  const despues = etiquetas?.despues ?? 'la nueva';
+  const antes = etiquetas?.antes ?? 'la anterior';
+  // `cambio_parcial` se interroga **antes** que el titular: un caso con cobertura parcial
+  // conserva `titulo: 'mejora' | 'empeora'`, pero no puede enunciarse como victoria.
+  if (m.veredicto.tipo === 'cambio_parcial') {
+    const aFavor = m.veredicto.favor === 'candidata' ? despues : antes;
+    return `Mejora observada con ${aFavor}, solo en parte de las métricas`;
+  }
+  switch (m.titulo) {
+    case 'historica':
+      return 'Comparación sin evaluación registrada';
+    case 'no_soportada':
+      return 'Evaluación de otra versión';
+    case 'malformada':
+      return 'La evaluación no se puede leer';
+    case 'datos_insuficientes':
+      return 'Sin datos suficientes para decidir';
+    case 'solo_descriptiva':
+      return 'Solo descriptiva: las metodologías no son comparables';
+    case 'mixto':
+      return 'Unas métricas mejoran y otras empeoran';
+    case 'sin_cambio':
+      return 'Sin un cambio que se pueda sostener';
+    case 'mejora':
+      return `Mejor con ${despues}`;
+    case 'empeora':
+      return `Mejor con ${antes}`;
+  }
 }
 
 /* ───────────────────── Tarjeta de resultado (se reutiliza en Mis pruebas) ───────────────────── */
 
 export function ComparisonResultCard({
+  evaluacion,
   comparison,
   onClose,
   closeLabel = 'Cerrar comparación',
@@ -454,6 +578,14 @@ export function ComparisonResultCard({
   groupRows,
   children,
 }: {
+  /**
+   * Evaluación calculada por Rust para esta comparación.
+   *
+   * **Obligatoria a propósito**: no hay una tarjeta de resultado sin evaluación. Si se
+   * quisiera pintar una comparación histórica, se hace con el modelo de presentación de
+   * una guardada, no aquí.
+   */
+  evaluacion: EvaluacionPersistida;
   comparison: BenchmarkComparison;
   onClose?: () => void;
   closeLabel?: string;
@@ -467,30 +599,35 @@ export function ComparisonResultCard({
 }) {
   const [showDetails, setShowDetails] = useState(false);
 
-  // Único intérprete: el mismo que usa la vista de pruebas guardadas. Los avisos que
-  // antes calculaba `buildWarnings` vienen ya de aquí, con las mismas reglas.
+  // Único modelo de presentación: el mismo que usan «Mis pruebas» y el panel. No hay
+  // aquí ninguna regla: estado, preferencia y margen vienen ya decididos por Rust.
   const etiquetas = etiquetasDe(comparison);
-  const r = interpretar(comparison, etiquetas);
+  const modelo = presentarEvaluacion(evaluacion, comparison, { origen: 'evaluada' });
   const rows = buildRows(comparison);
-  // Titular y ganadora con la MISMA redacción que la vista de prueba guardada: el
-  // «Gana “Prueba 1”» en rojo se leía al revés (parecía que la ganadora era la mala).
-  const mejor = mejorObservada(r, etiquetas);
-  const style = TONO_STYLE[r.tono];
+
+  const style = TONO_STYLE[modelo.tono];
   const VerdictIcon = style.Icon;
 
   const smoothRow = rows.find((rr) => rr.key === 'smooth')!;
-  const avg = r.metricas.find((m) => m.clave === 'avg_fps')!;
-  const est = r.metricas.find((m) => m.clave === 'estabilidad')!;
-  const noiseText = r.margenTexto;
+  const avg = modelo.descriptivas.fpsAntes != null && modelo.descriptivas.fpsDespues != null
+    ? { antes: modelo.descriptivas.fpsAntes, despues: modelo.descriptivas.fpsDespues, pct: modelo.descriptivas.diferenciaFpsPct }
+    : null;
 
+  // La estabilidad es **descriptiva**: se dice qué mide y qué no, nunca quién gana. Rust
+  // no la evalúa, así que aquí no puede haber ni preferencia ni «mejor con».
+  const estRef = modelo.descriptivas.estabilidad?.referencia ?? null;
+  const estCand = modelo.descriptivas.estabilidad?.candidata ?? null;
   const smoothFooter =
-    est.cambio === 'mejor'
-      ? `Con ${etiquetas.despues} el juego se mantiene más parejo.`
-      : est.cambio === 'peor'
-      ? `Con ${etiquetas.despues} el juego tiene más tirones.`
-      : est.cambio === 'sin_datos'
-      ? 'No hay datos suficientes para comparar la estabilidad.'
-      : 'El juego se mantiene igual de parejo.';
+    estRef == null || estCand == null
+      ? 'No hay datos suficientes para describir la estabilidad.'
+      // C3-19: el índice es un número con decimales de máquina; se enseña redondeado y
+      // sin signo, porque no afirma una dirección. Redondear aquí no lo altera: el dato
+      // guardado y el que usa el resto del modelo siguen intactos.
+      : `Índice descriptivo (0-100): ${formatearCifra(estRef.indice, 0)} → ${formatearCifra(estCand.indice, 0)}. Mide qué parte de la velocidad media se mantiene en los peores momentos; no dice si el juego va lo bastante rápido ni si la diferencia es real.`;
+
+  const margen = modelo.margenAplicado;
+  const evidencia = estadoDeEvidencia(groupRows);
+  const margenTexto = margen != null ? `${margen.toFixed(1)} %` : null;
 
   return (
     <article
@@ -498,81 +635,124 @@ export function ComparisonResultCard({
     >
       <h3 className="text-base font-bold text-[var(--text)] mb-4">{title}</h3>
 
-      {r.avisos.length > 0 && (
+      {modelo.limitaciones.length > 0 && (
         <div className="mb-4 p-3 rounded-lg bg-[var(--caution-bg)] border border-caution/50 space-y-1.5">
-          {r.avisos.map((w) => (
-            <p key={w} className="text-xs text-[var(--caution)] font-semibold flex items-start gap-2">
+          {modelo.limitaciones.map((l) => (
+            <p key={l.codigo} className="text-xs text-[var(--caution)] font-semibold flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
-              {w}
+              {textoDeEtiqueta(l)}
             </p>
           ))}
         </div>
       )}
 
-      {/* Veredicto */}
+      {/* Veredicto: una sola fuente, la evaluación de Rust. */}
       <div className={`p-5 rounded-xl border-2 mb-4 flex items-start gap-4 ${style.box}`}>
         <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${style.iconBox}`}>
           <VerdictIcon className={`w-6 h-6 ${style.text}`} />
         </div>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-1">
-            <p className={`text-xl font-bold ${style.text}`}>{titularDelCambio(r, etiquetas)}</p>
-            <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[var(--surface)] text-[var(--text-muted)] border border-[var(--border)]">
-              {r.chipConfianza}
-            </span>
-          </div>
-          <p className="text-sm text-[var(--text)] mt-1">{r.explicacion}</p>
-          {mejor ? (
-            <p className="text-sm font-semibold text-[var(--text)] mt-2">
-              Mejor resultado observado: {mejor.nombre}
-            </p>
-          ) : null}
-          {noiseText && (
-            <p className="text-xs text-[var(--text-muted)] mt-2 flex items-start gap-1.5">
-              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              <span>
-                Margen de ruido de estas grabaciones: <strong>{noiseText}</strong>. Una diferencia menor
-                puede ser simple variación entre partidas; repite la prueba antes de decidir.
+            <p className={`text-xl font-bold ${style.text}`}>{tituloDeCabecera(modelo, etiquetas)}</p>
+            {modelo.confianza && (
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[var(--surface)] text-[var(--text-muted)] border border-[var(--border)]">
+                {textoDeEtiqueta(modelo.confianza)}
               </span>
+            )}
+          </div>
+
+          {/* Cobertura: una evaluación parcial no es una victoria global, y se dice. */}
+          {modelo.cobertura.parcial && (
+            <p className="text-sm text-[var(--text)] mt-1">
+              Se pudieron juzgar {modelo.cobertura.evaluadas} de {modelo.cobertura.totales}{' '}
+              métricas. Lo que favorece a una prueba no convierte el resultado en una
+              victoria: las demás no se pudieron decidir.
             </p>
           )}
-          {/* Las dos grabaciones no bastan para concluir: se dice aquí, junto al
-              titular, para que no se lea solo el «gana» y se ignore el resto. */}
-          {sinEvidenciaDeGrupo(groupRows) && (
+          {/* C3-18: `evaluadas` incluye las indistintas a propósito (participaron), pero
+              «con preferencia establecida» es otra cosa. Se dicen por separado para no
+              afirmar una preferencia que el motor no emitió. */}
+          {modelo.quienFavorece == null && modelo.cobertura.evaluadas > 0 && !modelo.cobertura.parcial && (
+            <p className="text-sm text-[var(--text)] mt-1">
+              {modelo.cobertura.conPreferencia > 0
+                ? `${modelo.cobertura.conPreferencia} de ${modelo.cobertura.totales} métricas con preferencia establecida`
+                : `${modelo.cobertura.totales} métricas evaluadas, ninguna con preferencia establecida`}
+              {modelo.cobertura.indistintas > 0 &&
+                ` (${modelo.cobertura.indistintas} indistinta${modelo.cobertura.indistintas === 1 ? '' : 's'}: la diferencia quedó dentro del margen)`}
+              .
+            </p>
+          )}
+
+          {/* C3-17: ruido estimado y margen aplicado son dos cifras distintas y se nombran
+              por separado, cada una con lo que es. No son un intervalo de confianza ni una
+              garantía de reproducibilidad: el ruido es una estimación de la variación entre
+              mediciones, y el margen es lo que la evaluación exigió para afirmar un cambio. */}
+          {(margenTexto || modelo.ruidoCombinado != null) && (
+            <div className="mt-2 space-y-1">
+              {modelo.ruidoCombinado != null && (
+                <p className="text-xs text-[var(--text-muted)] flex items-start gap-1.5">
+                  <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Ruido combinado estimado: <strong>±{formatearCifra(modelo.ruidoCombinado, 1)} %</strong>.
+                    Es la variación esperada entre mediciones, no un intervalo de confianza.
+                  </span>
+                </p>
+              )}
+              {margenTexto && (
+                <p className="text-xs text-[var(--text-muted)] flex items-start gap-1.5">
+                  <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Margen aplicado por la evaluación: <strong>{margenTexto}</strong>. Por
+                    debajo de esa diferencia no se afirma un cambio. Repite la prueba antes
+                    de decidir.
+                  </span>
+                </p>
+              )}
+            </div>
+          )}
+          {/* C3-23: el aviso dice lo que el resultado permite decir. «Dentro del ruido»
+              solo se afirma cuando el motor concluye `no_concluyente` con repeticiones; si
+              lo que falta son grabaciones, se pide grabar, no se diagnostica el ruido. */}
+          {evidencia.tipo === 'sin_repeticiones' && (
             <p className="text-xs font-semibold text-[var(--caution)] mt-2 flex items-start gap-1.5">
               <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
               <span>
-                Todavía no hay pruebas de que este cambio sea real: con las grabaciones
-                que tienes, la diferencia entra dentro del ruido. Graba la misma escena
-                varias veces antes y después.
+                Faltan repeticiones para sostener este cambio: no hay suficientes
+                grabaciones de cada configuración. Graba la misma escena varias veces antes
+                y después.
+              </span>
+            </p>
+          )}
+          {evidencia.tipo === 'no_concluyente' && (
+            <p className="text-xs font-semibold text-[var(--caution)] mt-2 flex items-start gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                Con las repeticiones que tienes, el cambio entre las dos configuraciones no
+                se distingue del ruido entre partidas.
               </span>
             </p>
           )}
         </div>
       </div>
 
-      {/* FPS medios y estabilidad. Los niveles salen del intérprete compartido, así que
-          esta tarjeta y la vista de pruebas guardadas no pueden discrepar. */}
+      {/* FPS medios y estabilidad. El nivel de los FPS sale de la preferencia que
+          estableció el motor; la estabilidad no tiene nivel porque no se evalúa. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
         <CompareMeter
           icon={<Gauge className="w-4 h-4 text-[var(--action)]" />}
           title="FPS medios"
           help="Cuántas imágenes por segundo (FPS) muestra el juego."
-          base={avg.antes ?? 0}
-          test={avg.despues ?? 0}
+          base={avg?.antes ?? 0}
+          test={avg?.despues ?? 0}
           decimals={0}
           unit=" FPS"
-          level={levelOfCambio(avg.cambio)}
+          level={levelDePreferencia(preferenciaDe(modelo, 'avg_fps'))}
           etiquetaBase={etiquetas.antes}
           etiquetaTest={etiquetas.despues}
           footer={
-            avg.diferencia == null
+            avg == null || avg.pct == null
               ? 'No hay FPS medios guardados.'
-              : `${avg.diferencia >= 0 ? '+' : ''}${avg.diferencia.toFixed(1)} FPS${
-                  avg.diferenciaPct != null
-                    ? ` (${avg.diferenciaPct >= 0 ? '+' : ''}${avg.diferenciaPct.toFixed(1)} %)`
-                    : ''
-                }${noiseText ? `, margen ${noiseText}` : ''}.`
+              : `${avg.despues - avg.antes >= 0 ? '+' : ''}${(avg.despues - avg.antes).toFixed(1)} FPS (${avg.pct >= 0 ? '+' : ''}${avg.pct.toFixed(1)} %)${margenTexto ? `, margen ${margenTexto}` : ''}.`
           }
         />
         <CompareMeter
@@ -583,7 +763,14 @@ export function ComparisonResultCard({
           test={smoothRow.test}
           decimals={0}
           unit=""
-          level={levelOfCambio(est.cambio)}
+          /* C3-19: índice con techo conocido, escala absoluta 0-100. Sin esto la barra se
+             dibujaba relativa a la mayor de las dos grabaciones (73 → 100 %, 62 → 85 %). */
+          escalaAbsoluta={100}
+          /* C3-19b: un decimal en el extremo, para que la cifra visible y la diferencia
+             (−11,7 puntos) hablen del mismo número. */
+          precisionMostrada={1}
+          /* Descriptiva: sin preferencia, sin chip de «mejor/peor», sin veredicto. */
+          level="descriptiva"
           etiquetaBase={etiquetas.antes}
           etiquetaTest={etiquetas.despues}
           footer={smoothFooter}
@@ -603,6 +790,7 @@ export function ComparisonResultCard({
       {showDetails && (
         <DetailsTable
           rows={rows}
+          modelo={modelo}
           etiquetaBase={etiquetas.antes}
           etiquetaTest={etiquetas.despues}
         />
@@ -674,9 +862,34 @@ function useGroupComparison(
  * contradecir. Con datos, si ninguna métrica supera el ruido, el veredicto de una
  * sola comparación es una pista, no un resultado.
  */
-function sinEvidenciaDeGrupo(rows?: GroupComparison[] | null): boolean {
-  if (!rows || rows.length === 0) return false;
-  return !rows.some((r) => r.verdict === 'mejora' || r.verdict === 'empeora');
+/**
+ * Qué se puede decir de la evidencia de grupo, sin inventar la causa.
+ *
+ * C3-23: tener repeticiones y no concluir **no** demuestra que la diferencia esté dentro
+ * del ruido. Son tres situaciones distintas y el motor las separa con datos que ya emite:
+ *
+ *  - `sin_repeticiones`: no hay filas, o alguna métrica se quedó sin grabaciones por lado.
+ *  - `no_concluyente`: hay repeticiones y ninguna métrica superó su margen. Eso es lo más
+ *    parecido a «no se distingue del ruido», pero el veredicto del motor es
+ *    `no_concluyente`, así que se dice **eso**, no una causa más fuerte.
+ *  - `ninguna`: hay evidencia a favor o en contra.
+ *
+ * No se calcula ningún umbral aquí: solo se leen `verdict` y los recuentos de grabaciones.
+ */
+type EstadoDeEvidencia =
+  | { tipo: 'sin_evidencia_que_mostrar' }
+  | { tipo: 'sin_repeticiones' }
+  | { tipo: 'no_concluyente' }
+  | { tipo: 'hay_veredicto' };
+
+function estadoDeEvidencia(rows?: GroupComparison[] | null): EstadoDeEvidencia {
+  if (!rows || rows.length === 0) return { tipo: 'sin_evidencia_que_mostrar' };
+  if (rows.some((r) => r.verdict === 'mejora' || r.verdict === 'empeora')) {
+    return { tipo: 'hay_veredicto' };
+  }
+  // Ninguna métrica llegó a veredicto: ¿es por falta de repeticiones o por margen?
+  const sinRepeticiones = rows.some((r) => r.antes_runs < 2 || r.despues_runs < 2);
+  return sinRepeticiones ? { tipo: 'sin_repeticiones' } : { tipo: 'no_concluyente' };
 }
 
 // `sufijoOrigen` y `textoComando` viven en `lib/pruebaLabel` para compartirse con el
@@ -816,11 +1029,22 @@ export function BenchmarksView({
 
   const {
     comparison,
+    evaluacion,
+    confirmacion: confirmacionComparacion,
     isSaved: isCurrentSaved,
     saving: savingComparison,
     save: saveCurrentComparison,
     clear: clearComparison,
+    guardadoPerdido: guardadoPerdidoComparacion,
   } = useComparison(antesId, despuesId, notify);
+
+  // Regla única de «se puede guardar»: vive en el hook, no se reimplementa aquí.
+  const sePuedeGuardar = puedeGuardar({
+    confirmacion: confirmacionComparacion,
+    isSaved: isCurrentSaved,
+    saving: savingComparison,
+    guardadoPerdido: guardadoPerdidoComparacion,
+  });
 
   // La comparación de dos grabaciones es una pista; el grupo dice si es real.
   const groupRows = useGroupComparison(benchmarks);
@@ -1379,8 +1603,9 @@ export function BenchmarksView({
                           className="bg-[var(--surface)] rounded-lg p-3 border border-[var(--border)]"
                           title="Qué tan parejo va el juego. Cuanto más alto, menos tirones."
                         >
-                          <div className="text-xs text-[var(--text-muted)] mb-1 font-medium">Fluidez</div>
-                          <div className="text-2xl font-bold text-[var(--text)]">{score.toFixed(0)}%</div>
+                          {/* C3-08: es un índice 0-100, no un porcentaje de nada. */}
+                          <div className="text-xs text-[var(--text-muted)] mb-1 font-medium">Estabilidad</div>
+                          <div className="text-2xl font-bold text-[var(--text)]">{formatearCifra(score, 0)}<span className="text-sm font-normal text-[var(--text-dim)]">/100</span></div>
                           <div className="h-1.5 rounded-full bg-[var(--bg)] overflow-hidden mt-1.5">
                             <div className="h-full rounded-full bg-[var(--action)]" style={{ width: `${score}%` }} />
                           </div>
@@ -1415,7 +1640,7 @@ export function BenchmarksView({
           </div>
 
           <p className="text-xs text-[var(--text-dim)] mt-3">
-            Velocidad = FPS promedio. Fluidez = qué tan parejo va el juego (más alto, menos tirones). Peores momentos = tus FPS en el 1% más lento.
+            Velocidad = FPS promedio. Estabilidad = índice de 0 a 100 sobre cuánto se mantiene la velocidad media en los peores momentos (más alto, menos tirones); es descriptivo y no decide si un juego es mejor. Peores momentos = tus FPS en el 1% más lento.
           </p>
 
           {shown.length === 1 && (
@@ -1435,17 +1660,39 @@ export function BenchmarksView({
         <GroupComparisonCard rows={groupRows} />
       )}
 
-      {/* Resultado de la comparación */}
-      {comparison && (
+      {/* Resultado de la comparación. Se pinta **con** su evaluación: si no hay
+          evaluación vigente no hay comparación, así que no existe una tarjeta sin
+          veredicto del motor. */}
+      {comparison && evaluacion && (
         <ComparisonResultCard
+          evaluacion={evaluacion}
           comparison={comparison}
           groupRows={groupRows}
           onClose={clearComparison}
         >
+          {/* Con el resultado del guardado en duda no se ofrece repetir: podría chocar
+              con el duplicado y el usuario no sabría cuál de los dos estados es el real. */}
+          {guardadoPerdidoComparacion?.tipo === 'desconocido' && (
+            <p className="w-full mt-4 p-3 rounded-lg text-xs font-semibold bg-[var(--caution-bg)] border border-caution/50 text-[var(--caution)] flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              No se pudo confirmar si esta comparación se guardó. Abre «Mis pruebas» antes
+              de intentarlo otra vez: si está, ya no hace falta.
+            </p>
+          )}
+          {/* Hay una guardada de este par, pero no consta que sea este intento: se dice lo
+              que se sabe y no se presenta como resultado confirmado. */}
+          {guardadoPerdidoComparacion?.tipo === 'par_existente' && (
+            <p className="w-full mt-4 p-3 rounded-lg text-xs font-semibold bg-[var(--caution-bg)] border border-caution/50 text-[var(--caution)] flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              Ya hay una comparación guardada de estas dos pruebas, pero no se pudo
+              confirmar si es la de este intento. Ábrela en «Mis pruebas» para ver qué
+              quedó registrado.
+            </p>
+          )}
           <button
             type="button"
             onClick={saveCurrentComparison}
-            disabled={isCurrentSaved || savingComparison}
+            disabled={!sePuedeGuardar || isCurrentSaved}
             className={`w-full mt-4 px-4 py-3 rounded-lg text-sm font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
               isCurrentSaved
                 ? 'bg-compatible/10 text-[var(--compatible)] border border-compatible/40 cursor-default'
@@ -1544,11 +1791,13 @@ export function BenchmarksView({
             <div className="flex-1">
               <p className="font-bold text-[var(--text)] mb-1">Mira el resultado</p>
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-                La comparación aparece sola, sin pulsar nada más. Te diremos quién gana y qué hacer.
+                La comparación aparece sola, sin pulsar nada más. Verás qué cambió entre las
+                dos grabaciones y qué se puede afirmar con ellas: no todo cambio medido basta
+                para concluir que una configuración es mejor.
               </p>
               <div className="mt-2 p-2 rounded bg-caution/10 border border-caution/30">
                 <p className="text-[11px] text-[var(--caution)] font-semibold">
-                  💡 Fíjate primero en la Fluidez: un juego con más FPS pero con tirones se siente peor.
+                  💡 Mira también la estabilidad: un juego con más FPS pero con tirones se siente peor. Es un dato descriptivo, no un veredicto.
                 </p>
               </div>
             </div>
@@ -1571,7 +1820,7 @@ export function BenchmarksView({
               Si quieres empezar una serie limpia, pulsa <strong className="text-[var(--text)]">Borrar historial</strong>. Los otros juegos no se tocan.
             </li>
             <li>
-              También puedes comparar dos grabaciones cualesquiera de <strong className="text-[var(--text)]">Mis pruebas</strong>, con cualquier configuración y fecha.
+              Para comparar, Thoriapp enfrenta las <strong className="text-[var(--text)]">dos últimas grabaciones</strong> del juego. Elegir a mano otras dos todavía no está disponible; el historial de <strong className="text-[var(--text)]">Mis pruebas</strong> sirve para consultar las anteriores.
             </li>
           </ul>
         </div>
@@ -1594,7 +1843,10 @@ export function BenchmarksView({
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[var(--compatible)] font-bold">✓</span>
-              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7% de FPS</strong> y, si la Fluidez se mantiene, gana la nueva grabación 🎉</span>
+              {/* G: «más FPS + estabilidad mantenida = gana» no es la regla de Rust. Una
+                  comparación puede ser mixta, parcial o quedar dentro del margen; cuál de
+                  las dos rinde mejor lo decide la evaluación, y a veces no lo decide. */}
+              <span>La comparación aparece sola → <strong className="text-[var(--compatible)]">+16.7 % de FPS</strong>; si esa diferencia supera el margen y el resto de métricas acompañan, la evaluación dirá que una grabación rinde mejor. Si no, lo dirá como mixto, parcial o dentro del margen.</span>
             </div>
           </div>
         </div>

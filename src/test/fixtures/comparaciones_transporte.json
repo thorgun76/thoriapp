@@ -1,0 +1,1506 @@
+[
+  {
+    "id": "SINT-GUARDADA-0",
+    "saved_at": "2026-01-08 09:35:00",
+    "game_name": "SINTETICO COMPLETA_MEJORA",
+    "before_fps": 100.0,
+    "after_fps": 125.0,
+    "fps_change_percent": 25.0,
+    "comparison": {
+      "baseline": {
+        "id": "SINTETICO_COMPLETA_MEJORA-PRE-A",
+        "profile_id": "",
+        "game_name": "SINTETICO COMPLETA_MEJORA",
+        "appid": 900001,
+        "timestamp": "2026-01-08 09:00:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 100.0,
+        "fps_1_percent_low": 80.0,
+        "fps_0_1_percent_low": 70.0,
+        "max_fps": 140.0,
+        "min_fps": 48.0,
+        "frame_time_avg": 10.0,
+        "frame_time_1_percent_high": 12.5,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-COMPLETA_MEJORA-A.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINTETICO_COMPLETA_MEJORA-PRE-B",
+        "profile_id": "",
+        "game_name": "SINTETICO COMPLETA_MEJORA",
+        "appid": 900001,
+        "timestamp": "2026-01-08 09:20:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 125.0,
+        "fps_1_percent_low": 100.0,
+        "fps_0_1_percent_low": 88.0,
+        "max_fps": 175.0,
+        "min_fps": 60.0,
+        "frame_time_avg": 8.0,
+        "frame_time_1_percent_high": 10.0,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-COMPLETA_MEJORA-B.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": 25.0,
+      "fps_1_percent_change_percent": 25.0,
+      "fps_0_1_percent_change_percent": 25.71428571428571,
+      "frame_time_change_percent": -20.0,
+      "conclusion": "",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "evaluacion": {
+      "metodologia_interpretacion": "v1",
+      "evaluada_en": "2026-01-08 09:30:00",
+      "referencia": {
+        "id": "SINTETICO_COMPLETA_MEJORA-PRE-A"
+      },
+      "candidata": {
+        "id": "SINTETICO_COMPLETA_MEJORA-PRE-B"
+      },
+      "estado": "mejora",
+      "confianza": "observada",
+      "metricas": [
+        {
+          "clave": "avg_fps",
+          "antes": 100.0,
+          "despues": 125.0,
+          "diferencia": 25.0,
+          "diferencia_pct": 25.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_1_percent_low",
+          "antes": 80.0,
+          "despues": 100.0,
+          "diferencia": 20.0,
+          "diferencia_pct": 25.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 200.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 200.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_0_1_percent_low",
+          "antes": 70.0,
+          "despues": 88.0,
+          "diferencia": 18.0,
+          "diferencia_pct": 25.71428571428571,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        }
+      ],
+      "condiciones": {
+        "compatibilidad_metodologica": "establecida",
+        "margen_porcentaje": 5.0,
+        "ruido_combinado_porcentaje": 3.0,
+        "comandos_iguales": true
+      }
+    },
+    "estado_de_la_evaluacion": "soportada"
+  },
+  {
+    "id": "SINT-GUARDADA-1",
+    "saved_at": "2026-01-08 09:35:00",
+    "game_name": "SINTETICO COMPLETA_EMPEORA",
+    "before_fps": 120.0,
+    "after_fps": 95.0,
+    "fps_change_percent": -20.833333333333336,
+    "comparison": {
+      "baseline": {
+        "id": "SINTETICO_COMPLETA_EMPEORA-PRE-A",
+        "profile_id": "",
+        "game_name": "SINTETICO COMPLETA_EMPEORA",
+        "appid": 900002,
+        "timestamp": "2026-01-08 09:00:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 120.0,
+        "fps_1_percent_low": 96.0,
+        "fps_0_1_percent_low": 84.0,
+        "max_fps": 168.0,
+        "min_fps": 57.599999999999994,
+        "frame_time_avg": 8.333333333333334,
+        "frame_time_1_percent_high": 10.416666666666666,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-COMPLETA_EMPEORA-A.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINTETICO_COMPLETA_EMPEORA-PRE-B",
+        "profile_id": "",
+        "game_name": "SINTETICO COMPLETA_EMPEORA",
+        "appid": 900002,
+        "timestamp": "2026-01-08 09:20:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 95.0,
+        "fps_1_percent_low": 76.0,
+        "fps_0_1_percent_low": 66.0,
+        "max_fps": 133.0,
+        "min_fps": 45.6,
+        "frame_time_avg": 10.526315789473685,
+        "frame_time_1_percent_high": 13.157894736842104,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-COMPLETA_EMPEORA-B.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": -20.833333333333336,
+      "fps_1_percent_change_percent": -20.833333333333336,
+      "fps_0_1_percent_change_percent": -21.428571428571427,
+      "frame_time_change_percent": 26.31578947368421,
+      "conclusion": "",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "evaluacion": {
+      "metodologia_interpretacion": "v1",
+      "evaluada_en": "2026-01-08 09:30:00",
+      "referencia": {
+        "id": "SINTETICO_COMPLETA_EMPEORA-PRE-A"
+      },
+      "candidata": {
+        "id": "SINTETICO_COMPLETA_EMPEORA-PRE-B"
+      },
+      "estado": "empeora",
+      "confianza": "observada",
+      "metricas": [
+        {
+          "clave": "avg_fps",
+          "antes": 120.0,
+          "despues": 95.0,
+          "diferencia": -25.0,
+          "diferencia_pct": -20.833333333333336,
+          "direccion": "baja",
+          "preferencia": "favor_de_referencia",
+          "motivos": [
+            "favorece_referencia",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_1_percent_low",
+          "antes": 96.0,
+          "despues": 76.0,
+          "diferencia": -20.0,
+          "diferencia_pct": -20.833333333333336,
+          "direccion": "baja",
+          "preferencia": "favor_de_referencia",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 200.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 200.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_referencia",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_0_1_percent_low",
+          "antes": 84.0,
+          "despues": 66.0,
+          "diferencia": -18.0,
+          "diferencia_pct": -21.428571428571427,
+          "direccion": "baja",
+          "preferencia": "favor_de_referencia",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_referencia",
+            "participo"
+          ]
+        }
+      ],
+      "condiciones": {
+        "compatibilidad_metodologica": "establecida",
+        "margen_porcentaje": 5.0,
+        "ruido_combinado_porcentaje": 3.0,
+        "comandos_iguales": true
+      }
+    },
+    "estado_de_la_evaluacion": "soportada"
+  },
+  {
+    "id": "SINT-GUARDADA-2",
+    "saved_at": "2026-01-08 09:35:00",
+    "game_name": "SINTETICO PARCIAL_PERDIDA",
+    "before_fps": 100.0,
+    "after_fps": 120.0,
+    "fps_change_percent": 20.0,
+    "comparison": {
+      "baseline": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-A",
+        "profile_id": "",
+        "game_name": "SINTETICO PARCIAL_PERDIDA",
+        "appid": 900003,
+        "timestamp": "2026-01-08 09:00:00",
+        "duration_seconds": 200.0,
+        "avg_fps": 100.0,
+        "fps_1_percent_low": 80.0,
+        "fps_0_1_percent_low": 60.0,
+        "max_fps": 140.0,
+        "min_fps": 48.0,
+        "frame_time_avg": 10.0,
+        "frame_time_1_percent_high": 12.5,
+        "total_frames": 2000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-PARCIAL_PERDIDA-A.csv",
+        "sample_count": 2000,
+        "duracion_medida": 200.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 2000,
+          "filas_con_rendimiento_valido": 2000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 2000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 2.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-B",
+        "profile_id": "",
+        "game_name": "SINTETICO PARCIAL_PERDIDA",
+        "appid": 900003,
+        "timestamp": "2026-01-08 09:20:00",
+        "duration_seconds": 200.0,
+        "avg_fps": 120.0,
+        "fps_1_percent_low": 96.0,
+        "fps_0_1_percent_low": 30.0,
+        "max_fps": 168.0,
+        "min_fps": 57.599999999999994,
+        "frame_time_avg": 8.333333333333334,
+        "frame_time_1_percent_high": 10.416666666666666,
+        "total_frames": 2000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-PARCIAL_PERDIDA-B.csv",
+        "sample_count": 2000,
+        "duracion_medida": 200.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 2000,
+          "filas_con_rendimiento_valido": 2000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 2000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 2.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": 20.0,
+      "fps_1_percent_change_percent": 20.0,
+      "fps_0_1_percent_change_percent": -50.0,
+      "frame_time_change_percent": -16.66666666666666,
+      "conclusion": "",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "evaluacion": {
+      "metodologia_interpretacion": "v1",
+      "evaluada_en": "2026-01-08 09:30:00",
+      "referencia": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-A"
+      },
+      "candidata": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-B"
+      },
+      "estado": "mejora",
+      "confianza": "observada",
+      "metricas": [
+        {
+          "clave": "avg_fps",
+          "antes": 100.0,
+          "despues": 120.0,
+          "diferencia": 20.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_1_percent_low",
+          "antes": 80.0,
+          "despues": 96.0,
+          "diferencia": 16.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_0_1_percent_low",
+          "antes": 60.0,
+          "despues": 30.0,
+          "diferencia": -30.0,
+          "diferencia_pct": -50.0,
+          "direccion": "baja",
+          "preferencia": "no_establecida",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 2.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 2.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "limitaciones": [
+            "no_elegible",
+            "apoyo_insuficiente"
+          ]
+        }
+      ],
+      "limitaciones": [
+        "no_elegible",
+        "apoyo_insuficiente",
+        "perdida_observada_sin_evaluar",
+        "evaluacion_parcial"
+      ],
+      "condiciones": {
+        "compatibilidad_metodologica": "establecida",
+        "margen_porcentaje": 5.0,
+        "ruido_combinado_porcentaje": 3.0,
+        "comandos_iguales": true
+      }
+    },
+    "estado_de_la_evaluacion": "soportada"
+  },
+  {
+    "id": "SINT-HISTORICA",
+    "saved_at": "2026-01-09 10:30:00",
+    "game_name": "SINTETICO Historica",
+    "before_fps": 90.0,
+    "after_fps": 110.0,
+    "fps_change_percent": 22.22222222222222,
+    "comparison": {
+      "baseline": {
+        "id": "SINT-HIST-A",
+        "profile_id": "",
+        "game_name": "SINTETICO Historica",
+        "appid": 900101,
+        "timestamp": "2026-01-09 10:00:00",
+        "duration_seconds": 1200.0,
+        "avg_fps": 90.0,
+        "fps_1_percent_low": 70.0,
+        "fps_0_1_percent_low": 60.0,
+        "max_fps": 125.99999999999999,
+        "min_fps": 42.0,
+        "frame_time_avg": 11.11111111111111,
+        "frame_time_1_percent_high": 14.285714285714286,
+        "total_frames": 12000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-HIST-A.csv",
+        "sample_count": 12000,
+        "duracion_medida": 1200.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 12000,
+          "filas_con_rendimiento_valido": 12000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 12000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 12000,
+            "cola_nominal": 120.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 12000,
+            "cola_nominal": 12.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINT-HIST-B",
+        "profile_id": "",
+        "game_name": "SINTETICO Historica",
+        "appid": 900101,
+        "timestamp": "2026-01-09 10:20:00",
+        "duration_seconds": 1200.0,
+        "avg_fps": 110.0,
+        "fps_1_percent_low": 88.0,
+        "fps_0_1_percent_low": 75.0,
+        "max_fps": 154.0,
+        "min_fps": 52.8,
+        "frame_time_avg": 9.090909090909092,
+        "frame_time_1_percent_high": 11.363636363636363,
+        "total_frames": 12000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-HIST-B.csv",
+        "sample_count": 12000,
+        "duracion_medida": 1200.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 12000,
+          "filas_con_rendimiento_valido": 12000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 12000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 12000,
+            "cola_nominal": 120.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 12000,
+            "cola_nominal": 12.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": 22.22222222222222,
+      "fps_1_percent_change_percent": 25.71428571428571,
+      "fps_0_1_percent_change_percent": 25.0,
+      "frame_time_change_percent": -18.181818181818173,
+      "conclusion": "Texto narrativo ORIGINAL de la epoca (sin evaluacion registrada).",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "estado_de_la_evaluacion": "no_registrada"
+  },
+  {
+    "id": "SINT-MALFORMADA",
+    "saved_at": "2026-01-09 11:35:00",
+    "game_name": "SINTETICO Malformada",
+    "before_fps": 100.0,
+    "after_fps": 120.0,
+    "fps_change_percent": 20.0,
+    "comparison": {
+      "baseline": {
+        "id": "SINT-MAL-A",
+        "profile_id": "",
+        "game_name": "SINTETICO Malformada",
+        "appid": 900102,
+        "timestamp": "2026-01-09 11:00:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 100.0,
+        "fps_1_percent_low": 80.0,
+        "fps_0_1_percent_low": 70.0,
+        "max_fps": 140.0,
+        "min_fps": 48.0,
+        "frame_time_avg": 10.0,
+        "frame_time_1_percent_high": 12.5,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-MAL-A.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINT-MAL-B",
+        "profile_id": "",
+        "game_name": "SINTETICO Malformada",
+        "appid": 900102,
+        "timestamp": "2026-01-09 11:20:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 120.0,
+        "fps_1_percent_low": 96.0,
+        "fps_0_1_percent_low": 84.0,
+        "max_fps": 168.0,
+        "min_fps": 57.599999999999994,
+        "frame_time_avg": 8.333333333333334,
+        "frame_time_1_percent_high": 10.416666666666666,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-MAL-B.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": 20.0,
+      "fps_1_percent_change_percent": 20.0,
+      "fps_0_1_percent_change_percent": 20.0,
+      "frame_time_change_percent": -16.66666666666666,
+      "conclusion": "",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "estado_de_la_evaluacion": "malformada"
+  },
+  {
+    "id": "SINT-NO-SOPORTADA",
+    "saved_at": "2026-01-09 12:35:00",
+    "game_name": "SINTETICO No soportada",
+    "before_fps": 100.0,
+    "after_fps": 120.0,
+    "fps_change_percent": 20.0,
+    "comparison": {
+      "baseline": {
+        "id": "SINT-NOSOP-A",
+        "profile_id": "",
+        "game_name": "SINTETICO No soportada",
+        "appid": 900103,
+        "timestamp": "2026-01-09 12:00:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 100.0,
+        "fps_1_percent_low": 80.0,
+        "fps_0_1_percent_low": 70.0,
+        "max_fps": 140.0,
+        "min_fps": 48.0,
+        "frame_time_avg": 10.0,
+        "frame_time_1_percent_high": 12.5,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-NOSOP-A.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINT-NOSOP-B",
+        "profile_id": "",
+        "game_name": "SINTETICO No soportada",
+        "appid": 900103,
+        "timestamp": "2026-01-09 12:20:00",
+        "duration_seconds": 2000.0,
+        "avg_fps": 120.0,
+        "fps_1_percent_low": 96.0,
+        "fps_0_1_percent_low": 84.0,
+        "max_fps": 168.0,
+        "min_fps": 57.599999999999994,
+        "frame_time_avg": 8.333333333333334,
+        "frame_time_1_percent_high": 10.416666666666666,
+        "total_frames": 20000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-NOSOP-B.csv",
+        "sample_count": 20000,
+        "duracion_medida": 2000.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 20000,
+          "filas_con_rendimiento_valido": 20000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 20000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 200.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 20000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": 20.0,
+      "fps_1_percent_change_percent": 20.0,
+      "fps_0_1_percent_change_percent": 20.0,
+      "frame_time_change_percent": -16.66666666666666,
+      "conclusion": "",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "evaluacion": {
+      "metodologia_interpretacion": "v9",
+      "evaluada_en": "2026-01-09 12:30:00",
+      "referencia": {
+        "id": "SINT-NOSOP-A"
+      },
+      "candidata": {
+        "id": "SINT-NOSOP-B"
+      },
+      "estado": "mejora",
+      "confianza": "observada",
+      "metricas": [
+        {
+          "clave": "avg_fps",
+          "antes": 100.0,
+          "despues": 120.0,
+          "diferencia": 20.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_1_percent_low",
+          "antes": 80.0,
+          "despues": 96.0,
+          "diferencia": 16.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 200.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 200.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_0_1_percent_low",
+          "antes": 70.0,
+          "despues": 84.0,
+          "diferencia": 14.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 20000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        }
+      ],
+      "condiciones": {
+        "compatibilidad_metodologica": "establecida",
+        "margen_porcentaje": 5.0,
+        "ruido_combinado_porcentaje": 3.0,
+        "comandos_iguales": true
+      }
+    },
+    "estado_de_la_evaluacion": "no_soportada"
+  },
+  {
+    "id": "SINT-GUARDADA-PN",
+    "saved_at": "2026-01-08 09:35:00",
+    "game_name": "SINTETICO PARCIAL_CON_NARRATIVA",
+    "before_fps": 100.0,
+    "after_fps": 120.0,
+    "fps_change_percent": 20.0,
+    "comparison": {
+      "baseline": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-A",
+        "profile_id": "",
+        "game_name": "SINTETICO PARCIAL_PERDIDA",
+        "appid": 900003,
+        "timestamp": "2026-01-08 09:00:00",
+        "duration_seconds": 200.0,
+        "avg_fps": 100.0,
+        "fps_1_percent_low": 80.0,
+        "fps_0_1_percent_low": 60.0,
+        "max_fps": 140.0,
+        "min_fps": 48.0,
+        "frame_time_avg": 10.0,
+        "frame_time_1_percent_high": 12.5,
+        "total_frames": 2000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 1,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-PARCIAL_PERDIDA-A.csv",
+        "sample_count": 2000,
+        "duracion_medida": 200.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 2000,
+          "filas_con_rendimiento_valido": 2000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 2000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 2.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "test": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-B",
+        "profile_id": "",
+        "game_name": "SINTETICO PARCIAL_PERDIDA",
+        "appid": 900003,
+        "timestamp": "2026-01-08 09:20:00",
+        "duration_seconds": 200.0,
+        "avg_fps": 120.0,
+        "fps_1_percent_low": 96.0,
+        "fps_0_1_percent_low": 30.0,
+        "max_fps": 168.0,
+        "min_fps": 57.599999999999994,
+        "frame_time_avg": 8.333333333333334,
+        "frame_time_1_percent_high": 10.416666666666666,
+        "total_frames": 2000,
+        "notes": "DATO SINTETICO C.3: generado por tipos reales, no es una medicion",
+        "launch_command": "%command%",
+        "origen_comando": "instantanea",
+        "steam_command": "%command%",
+        "number": 2,
+        "snapshot": null,
+        "sesion_id": null,
+        "spikes_per_min": null,
+        "pct_over_33ms": null,
+        "jitter_ms": null,
+        "worst_frame_ms": null,
+        "warmup_seconds": 10.0,
+        "noise_percent": 1.0,
+        "shader_stutter": null,
+        "log_path": "/sintetico/SINT-PARCIAL_PERDIDA-B.csv",
+        "sample_count": 2000,
+        "duracion_medida": 200.0,
+        "metodologia_calculo": "v2",
+        "contabilidad_muestras": {
+          "filas_originales": 2000,
+          "filas_con_rendimiento_valido": 2000,
+          "filas_con_rendimiento_invalido": 0,
+          "excluidas_por_calentamiento": 0,
+          "muestras_analizadas": 2000,
+          "incidencias": {
+            "filas_repetidas": 0,
+            "orden_invertido": 0,
+            "negativas": 0,
+            "no_finitas": 0,
+            "reloj_incompleto": 0,
+            "columna_elapsed_ausente": 0,
+            "celda_reloj_ausente": 0,
+            "celda_reloj_vacia": 0,
+            "celda_reloj_ilegible": 0
+          },
+          "eje_temporal_fiable": false,
+          "columna_elapsed_presente": false
+        },
+        "apoyo_metricas": {
+          "fps_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 20.0,
+            "observaciones_interpoladas": 2
+          },
+          "fps_0_1_percent_low": {
+            "muestras": 2000,
+            "cola_nominal": 2.0,
+            "observaciones_interpoladas": 2
+          }
+        }
+      },
+      "fps_change_percent": 20.0,
+      "fps_1_percent_change_percent": 20.0,
+      "fps_0_1_percent_change_percent": -50.0,
+      "frame_time_change_percent": -16.66666666666666,
+      "conclusion": "Texto narrativo ORIGINAL de la epoca (con evaluacion estructurada registrada).",
+      "noise_percent": null,
+      "within_noise": false,
+      "comandos_iguales": true
+    },
+    "evaluacion": {
+      "metodologia_interpretacion": "v1",
+      "evaluada_en": "2026-01-08 09:30:00",
+      "referencia": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-A"
+      },
+      "candidata": {
+        "id": "SINTETICO_PARCIAL_PERDIDA-PRE-B"
+      },
+      "estado": "mejora",
+      "confianza": "observada",
+      "metricas": [
+        {
+          "clave": "avg_fps",
+          "antes": 100.0,
+          "despues": 120.0,
+          "diferencia": 20.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_1_percent_low",
+          "antes": 80.0,
+          "despues": 96.0,
+          "diferencia": 16.0,
+          "diferencia_pct": 20.0,
+          "direccion": "sube",
+          "preferencia": "favor_de_candidata",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 20.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "motivos": [
+            "favorece_candidata",
+            "participo"
+          ]
+        },
+        {
+          "clave": "fps_0_1_percent_low",
+          "antes": 60.0,
+          "despues": 30.0,
+          "diferencia": -30.0,
+          "diferencia_pct": -50.0,
+          "direccion": "baja",
+          "preferencia": "no_establecida",
+          "apoyo_referencia": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 2.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "apoyo_candidata": {
+            "percentil": {
+              "muestras": 2000,
+              "cola_nominal": 2.0,
+              "observaciones_interpoladas": 2
+            }
+          },
+          "limitaciones": [
+            "no_elegible",
+            "apoyo_insuficiente"
+          ]
+        }
+      ],
+      "limitaciones": [
+        "no_elegible",
+        "apoyo_insuficiente",
+        "perdida_observada_sin_evaluar",
+        "evaluacion_parcial"
+      ],
+      "condiciones": {
+        "compatibilidad_metodologica": "establecida",
+        "margen_porcentaje": 5.0,
+        "ruido_combinado_porcentaje": 3.0,
+        "comandos_iguales": true
+      }
+    },
+    "estado_de_la_evaluacion": "soportada"
+  }
+]

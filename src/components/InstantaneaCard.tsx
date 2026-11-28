@@ -147,17 +147,18 @@ export function InstantaneaCard({ bench, onCopy }: InstantaneaCardProps) {
   if (!bench) return null;
 
   if (!snap) {
-    // Benchmark anterior a la subfase 5.2. No se reconstruye nada: los datos de hoy no
-    // dicen cómo se hizo una prueba de antes.
+    // F: la ausencia de instantánea **no demuestra** que la prueba sea anterior a que
+    // Thoriapp registrara la configuración. Un archivo borrado, una escritura a medias o un
+    // registro ilegible producen el mismo vacío. Se dice lo único que consta: que no está.
     return (
       <article className="p-4 rounded-xl bg-[var(--surface)] border border-[var(--border)]">
         <p className="text-sm font-semibold text-[var(--text)] mb-1">
           Instantánea no disponible
         </p>
         <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-          {etiquetaPrueba(bench)} se guardó antes de que Thoriapp registrara la configuración
-          de cada prueba. No se completa con los datos actuales del juego ni del perfil: eso
-          diría cómo está todo hoy, no cómo se hizo la prueba.
+          De {etiquetaPrueba(bench)} no consta la configuración con la que se hizo la prueba.
+          No se completa con los datos actuales del juego ni del perfil: eso diría cómo está
+          todo hoy, no cómo se hizo la prueba.
         </p>
       </article>
     );

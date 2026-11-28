@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { etiquetasDe, interpretar } from './interpretacion';
+import { etiquetasDe } from './etiquetas';
 import { comandoPegable, etiquetaPrueba, textoComando } from './pruebaLabel';
-import type { Benchmark, BenchmarkComparison } from './types';
+import type { Benchmark } from './types';
 
 /**
  * Numeración de pruebas («Prueba N»).
@@ -72,80 +72,6 @@ describe('etiquetasDe', () => {
   it('mezcla: una con número y otra sin él', () => {
     const et = etiquetasDe({ baseline: bench(), test: bench({ number: 5 }) });
     expect(et).toEqual({ antes: 'Antes', despues: 'Prueba 5' });
-  });
-});
-
-/**
- * Comparación con la forma que consume `interpretar`.
- *
- * Se rellena igual que en `interpretacion.test.ts`: el intérprete deriva los cambios de
- * los propios benchmarks, no de campos precalculados, así que los `*_change_percent` van
- * a cero a propósito para no sugerir que se usan.
- */
-const comparacion = (baseline: Benchmark, test: Benchmark, noise = 5): BenchmarkComparison =>
-  ({
-    baseline,
-    test,
-    fps_change_percent: 0,
-    fps_1_percent_change_percent: 0,
-    fps_0_1_percent_change_percent: 0,
-    frame_time_change_percent: 0,
-    conclusion: '',
-    noise_percent: noise,
-    within_noise: false,
-  }) as unknown as BenchmarkComparison;
-
-describe('interpretar con números de prueba', () => {
-  it('el ganador se nombra con el número real de la grabación', () => {
-    // Sube el promedio Y los peores momentos: mejora clara de la segunda grabación.
-    const c = comparacion(
-      bench({ number: 1, avg_fps: 74.3, fps_1_percent_low: 50, fps_0_1_percent_low: 45 }),
-      bench({ number: 2, avg_fps: 100.7, fps_1_percent_low: 70, fps_0_1_percent_low: 62 })
-    );
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.ganador).toBe('despues');
-    expect(r.titulo).toContain('Prueba 2');
-    expect(r.titulo).not.toContain('Después');
-  });
-
-  it('el número del ganador corresponde a la grabación que de verdad gana', () => {
-    // Aquí empeora: gana la de referencia, que es la Prueba 7.
-    const c = comparacion(
-      bench({ number: 7, avg_fps: 120, fps_1_percent_low: 90, fps_0_1_percent_low: 85 }),
-      bench({ number: 8, avg_fps: 60, fps_1_percent_low: 40, fps_0_1_percent_low: 35 })
-    );
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.ganador).toBe('antes');
-    expect(r.titulo).toContain('Prueba 7');
-    expect(r.titulo).not.toContain('Prueba 8');
-  });
-
-  it('sin números se sigue diciendo Antes/Después', () => {
-    const c = comparacion(
-      bench({ avg_fps: 74.3, fps_1_percent_low: 50, fps_0_1_percent_low: 45 }),
-      bench({ avg_fps: 100.7, fps_1_percent_low: 70, fps_0_1_percent_low: 62 })
-    );
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.titulo).toContain('Después');
-  });
-
-  it('sin etiquetas explícitas no revienta y deriva las etiquetas del número', () => {
-    const c = comparacion(
-      bench({ number: 1, avg_fps: 74.3, fps_1_percent_low: 50, fps_0_1_percent_low: 45 }),
-      bench({ number: 2, avg_fps: 100.7, fps_1_percent_low: 70, fps_0_1_percent_low: 62 })
-    );
-    const r = interpretar(c);
-    expect(r.titulo).toContain('Prueba 2');
-  });
-
-  it('los criterios no cambian: diferencia dentro del margen sigue sin concluir', () => {
-    // 0,5 % de diferencia con ruido 5 %: no se declara mejora.
-    const c = comparacion(
-      bench({ number: 1, avg_fps: 100, fps_1_percent_low: 70, fps_0_1_percent_low: 60 }),
-      bench({ number: 2, avg_fps: 100.5, fps_1_percent_low: 70.3, fps_0_1_percent_low: 60.3 })
-    );
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.ganador).not.toBe('despues');
   });
 });
 

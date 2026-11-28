@@ -6,7 +6,7 @@ import {
   topeY, umbralDePico,
 } from './GraficoTemporal';
 import { SIN_DATOS_TEMPORALES } from '../lib/umbrales';
-import { ANTES, DESPUES } from '../lib/interpretacion';
+import { ANTES, DESPUES } from '../lib/etiquetas';
 
 afterEach(cleanup);
 
@@ -48,8 +48,15 @@ describe('GraficoTemporal: pruebas antiguas sin serie', () => {
 
   it('el mensaje no promete que los datos vayan a aparecer solos', () => {
     // Es importante no dar a entender que la app va a rellenar los datos.
-    expect(SIN_DATOS_TEMPORALES).toMatch(/antes de que/i);
     expect(SIN_DATOS_TEMPORALES).not.toMatch(/calcul|estimar|inferir/i);
+  });
+
+  it('C3-26: no atribuye la ausencia a una procedencia que el dato no prueba', () => {
+    // El texto anterior afirmaba «se guardó antes de que Thoriapp almacenara los tiempos».
+    // Faltar la serie también ocurre con registros importados o con logs sin eje temporal,
+    // así que esa causa era una invención. El mensaje solo puede decir que no consta.
+    expect(SIN_DATOS_TEMPORALES).not.toMatch(/antes de que/i);
+    expect(SIN_DATOS_TEMPORALES).toMatch(/no tiene guardad/i);
   });
 
   it('una serie vacía también se trata como ausencia de datos', () => {

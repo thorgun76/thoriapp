@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SavedComparisonDetail, tokenizarComando, diffComandos } from './SavedComparisonDetail';
-import { interpretar, etiquetasDe, titularDelCambio, mejorObservada } from '../lib/interpretacion';
+import type { EvaluacionPersistida } from '../lib/api';
 import type { Benchmark, BenchmarkComparison } from '../lib/types';
 
 afterEach(cleanup);
@@ -66,36 +66,72 @@ function abrirConfiguracion() {
 }
 
 /**
- * Evaluación **registrada** coherente con la comparación.
+ * Evaluación **registrada** con la forma que produce Rust.
  *
- * El detalle de una prueba guardada ya no interpreta: muestra lo que se guardó. Para que
- * estas pruebas sigan comprobando el veredicto de los datos que construyen, se registra
- * una evaluación con el estado que daba el intérprete, calculado **aquí**, en la prueba,
- * y no dentro del componente.
+ * **Reescrito en C.3.** Antes el estado se derivaba aquí llamando a `interpretar()`, el
+ * intérprete de frontend. Ese módulo ya no existe: el motor es la única fuente, y estas
+ * pruebas declaran el estado a mano para comprobar qué pinta la vista a partir de él.
+ *
+ * El valor por defecto (`mejora`) coincide con lo que estas pruebas esperan en la mayoría
+ * de los casos; las que necesitan otro estado lo piden explícitamente.
  */
-function evaluacionDe(c: BenchmarkComparison) {
-  const r = interpretar(c);
-  const estado =
-    r.estado === 'mejora' || r.estado === 'empeora' || r.estado === 'mixto' ||
-    r.estado === 'sin_cambio' || r.estado === 'datos_insuficientes'
-      ? r.estado
-      : 'datos_insuficientes';
+function evaluacionDe(
+  c: BenchmarkComparison,
+  estado: EvaluacionPersistida['estado'] = 'mejora'
+): EvaluacionPersistida {
   return {
+    version: 1,
+    metodologia: 'v1',
     metodologia_interpretacion: 'v1',
     evaluada_en: '2026-01-02 11:00:00',
-    referencia: { id: c.baseline.id },
-    candidata: { id: c.test.id },
+    referencia: { id: c.baseline.id, number: c.baseline.number ?? null },
+    candidata: { id: c.test.id, number: c.test.number ?? null },
     estado,
     confianza: 'provisional',
-    condiciones: { compatibilidad_metodologica: 'establecida' as const },
-    estado_de_la_evaluacion: 'soportada' as const,
-  };
+    condiciones: {
+      margen_porcentaje: 5,
+      compatibilidad_metodologica: 'establecida',
+    },
+    ruido_combinado_porcentaje: c.noise_percent ?? null,
+    motivos: [],
+    limitaciones: [],
+    metricas: [],
+  } as EvaluacionPersistida;
+}
+
+/**
+ * Evaluación con métricas concretas, para probar la presentación de preferencias.
+ *
+ * El helper `evaluacionDe` devuelve `metricas: []`, que es un caso real (una evaluación
+ * sin métricas evaluables) pero no sirve para comprobar colores. Aquí se declaran las
+ * métricas con la forma que produce Rust y con el apoyo que el motor escribió.
+ */
+function evaluacionConMetricas(
+  c: BenchmarkComparison,
+  filas: { clave: string; preferencia: string | null; apoyo: number }[]
+): EvaluacionPersistida {
+  const base = evaluacionDe(c);
+  const apoyo = (n: number) => ({
+    percentil: { muestras: n, valor: 0 },
+  });
+  return {
+    ...base,
+    metricas: filas.map((f) => ({
+      clave: f.clave,
+      direccion: 'mas_es_mejor',
+      // C3-24: la elegibilidad y la preferencia son campos distintos.
+      elegible: true,
+      preferencia: f.preferencia,
+      apoyo_referencia: apoyo(f.apoyo),
+      apoyo_candidata: apoyo(f.apoyo),
+    })),
+  } as unknown as EvaluacionPersistida;
 }
 
 function renderDetail(
   c: BenchmarkComparison,
   handlers: Partial<{ onDelete: () => void; onCopy: (t: string) => void }> = {},
-  evaluacion: ReturnType<typeof evaluacionDe> | null = evaluacionDe(c)
+  evaluacion: EvaluacionPersistida | null = evaluacionDe(c)
 ) {
   return render(
     <SavedComparisonDetail
@@ -178,9 +214,10 @@ describe('diffComandos', () => {
 
 describe('SavedComparisonDetail: jerarquía', () => {
   it('el resultado va ANTES que la configuración', () => {
-    const { container } = renderDetail(cmp());
+    // Se registra `sin_cambio`, que es lo que el motor diría de dos grabaciones iguales.
+    const c = cmp();
+    const { container } = renderDetail(c, {}, evaluacionDe(c, 'sin_cambio'));
     const texto = container.textContent ?? '';
-    // El veredicto guardado para «sin cambio»; antes lo decía el intérprete.
     const posResultado = texto.indexOf('Sin cambio');
     const posConfig = texto.indexOf('Configuración comparada');
     expect(posResultado).toBeGreaterThan(-1);
@@ -312,11 +349,14 @@ describe('SavedComparisonDetail: acciones y accesibilidad', () => {
     renderDetail(cmp());
     const boton = screen.getByRole('button', { name: /Ver métricas avanzadas/i });
     expect(boton.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.queryByText(/Margen estimado/)).toBeNull();
+    // E: el rótulo «Margen estimado» ya no existe: el ruido combinado y el margen
+    // aplicado son dos datos distintos y cada uno lleva su nombre.
+    expect(screen.queryByText(/Ruido combinado/)).toBeNull();
 
     fireEvent.click(boton);
     expect(boton.getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByText(/Margen estimado/)).toBeTruthy();
+    expect(screen.getByText(/Ruido combinado/)).toBeTruthy();
+    expect(screen.getByText(/Margen aplicado/)).toBeTruthy();
   });
 
   it('las barras tienen etiqueta accesible, no solo color', () => {
@@ -327,7 +367,10 @@ describe('SavedComparisonDetail: acciones y accesibilidad', () => {
   });
 
   it('datos con FPS cero no rompen la pantalla', () => {
-    const { container } = renderDetail(cmp({ avg_fps: 0 }, { avg_fps: 0 }));
+    const c = cmp({ avg_fps: 0 }, { avg_fps: 0 });
+    // El motor no puede evaluar sin FPS: el registro guardado dice eso, y la vista lo
+    // presenta tal cual, sin deducirlo de las cifras.
+    const { container } = renderDetail(c, {}, evaluacionDe(c, 'datos_insuficientes'));
     // Con FPS cero la evaluación registrada es «datos insuficientes», no un veredicto.
     expect(container.textContent).toContain('Datos insuficientes');
     // Y no se inventa una ganadora.
@@ -346,7 +389,8 @@ describe('SavedComparisonDetail: acciones y accesibilidad', () => {
 
   it('grabaciones guardadas sin noise_percent siguen funcionando', () => {
     // Compatibilidad: comparaciones antiguas no tienen margen guardado.
-    renderDetail(cmp({}, {}, null));
+    const c = cmp({}, {}, null);
+    renderDetail(c, {}, evaluacionDe(c, 'sin_cambio'));
     // Sin margen guardado se dice que no consta; no se asume un margen del 3 %.
     const texto = document.body.textContent ?? '';
     expect(texto).toMatch(/margen|Sin cambio/i);
@@ -380,7 +424,7 @@ describe('SavedComparisonDetail: panel VS', () => {
   });
 
   it('empeora: corona a la Prueba 1 y dice que la Prueba 2 rinde peor', () => {
-    renderDetail(EMPEORA());
+    renderDetail(EMPEORA(), {}, evaluacionDe(EMPEORA(), 'empeora'));
     const texto = document.body.textContent ?? '';
     expect(texto).toContain('Mejor resultado observado');
     expect(texto).toContain('Empeora');
@@ -390,37 +434,40 @@ describe('SavedComparisonDetail: panel VS', () => {
   });
 
   it('mejora: corona a la Prueba 2', () => {
-    const r = interpretar(MEJORA(), etiquetasDe(MEJORA()));
-    expect(r.estado).toBe('mejora');
-    expect(mejorObservada(r, etiquetasDe(MEJORA()))?.nombre).toBe('Prueba 2');
+    // Con `estado: 'mejora'` el modelo solo puede favorecer a la candidata, que es la
+    // Prueba 2. La corona sale de ahí, no de mirar las cifras.
+    renderDetail(MEJORA(), {}, evaluacionDe(MEJORA(), 'mejora'));
+    expect(document.body.textContent).toContain('Mejor resultado observado: Prueba 2');
   });
 
-  it('más FPS medios con peores lows NO da corona (respeta el estado mixto)', () => {
-    // Promedio arriba, 1 % low y 0,1 % low claramente abajo: el intérprete decide.
+  it('un estado mixto no da corona aunque los FPS medios suban', () => {
+    // Promedio arriba, lows abajo; el motor lo evaluó como mixto. Una métrica mejor no
+    // es una ganadora.
     const c = cmp(
       { number: 1, avg_fps: 60, fps_1_percent_low: 50, fps_0_1_percent_low: 45 },
       { number: 2, avg_fps: 80, fps_1_percent_low: 30, fps_0_1_percent_low: 20 }
     );
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.estado).toBe('mixto');
-    expect(mejorObservada(r, etiquetasDe(c))).toBeNull();
+    renderDetail(c, {}, evaluacionDe(c, 'mixto'));
+    const texto = document.body.textContent ?? '';
+    expect(texto).toContain('Resultado mixto');
+    expect(texto).not.toContain('Mejor resultado observado');
   });
 
-  it('sin diferencia concluyente no hay corona', () => {
+  it('sin cambio no hay corona', () => {
     const c = SIN_CAMBIO();
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.estado).toBe('sin_cambio');
-    expect(mejorObservada(r, etiquetasDe(c))).toBeNull();
+    renderDetail(c, {}, evaluacionDe(c, 'sin_cambio'));
+    expect(document.body.textContent).not.toContain('Mejor resultado observado');
   });
 
   it('datos insuficientes no hay corona', () => {
     const c = cmp({ number: 1, avg_fps: 0 }, { number: 2, avg_fps: 0 });
-    const r = interpretar(c, etiquetasDe(c));
-    expect(mejorObservada(r, etiquetasDe(c))).toBeNull();
+    renderDetail(c, {}, evaluacionDe(c, 'datos_insuficientes'));
+    expect(document.body.textContent).not.toContain('Mejor resultado observado');
   });
 
   it('sin corona no aparece la insignia «Mejor resultado» en la pantalla', () => {
-    renderDetail(SIN_CAMBIO());
+    const c = SIN_CAMBIO();
+    renderDetail(c, {}, evaluacionDe(c, 'sin_cambio'));
     expect(screen.queryByText(/^Mejor resultado$/i)).toBeNull();
   });
 
@@ -436,27 +483,23 @@ describe('SavedComparisonDetail: panel VS', () => {
   it('no repite una recomendación al pie del resultado', () => {
     // El titular y «Mejor resultado observado» ya dicen lo que pasó; el consejo final
     // («Vuelve a Prueba 1: …») se eliminó del intérprete y de las dos pantallas.
-    for (const c of [EMPEORA(), MEJORA(), SIN_CAMBIO()]) {
-      const { container, unmount } = renderDetail(c);
+    const estados = [
+      [EMPEORA(), 'empeora'],
+      [MEJORA(), 'mejora'],
+      [SIN_CAMBIO(), 'sin_cambio'],
+    ] as const;
+    for (const [c, estado] of estados) {
+      const { container, unmount } = renderDetail(c, {}, evaluacionDe(c, estado));
       expect(container.textContent ?? '').not.toMatch(/Vuelve a «/);
       unmount();
     }
   });
 
-  it('el aviso del 0,1 % low aparece una sola vez y en la caja técnica', () => {
-    // Antes salía dos veces con el mismo contenido: en la lista de avisos del veredicto
-    // (`low01.aviso`) y en la explicación técnica de abajo. Ahora solo en la segunda.
-    // La grabación del fixture dura 60 s: no es corta, así que el aviso NO debe salir.
-    const c = EMPEORA();
-    const r = interpretar(c, etiquetasDe(c));
-    // El intérprete sí lo emitía con su propio criterio; la vista guardada decide con la
-    // duración medida, y 60 s no es una grabación corta.
-    expect(r.low01.aviso).toBeTruthy();
-
-    renderDetail(c);
-    const texto = document.body.textContent ?? '';
-    expect(texto).not.toContain(r.low01.aviso!);
-    expect(texto).not.toMatch(/puede variar mucho con grabaciones cortas/gi);
+  it('con una grabación de 60 s el aviso del 0,1 % low no aparece', () => {
+    // El aviso depende de la duración **medida**, no de ninguna evaluación: 60 s no es una
+    // grabación corta, así que no hay nada que advertir.
+    renderDetail(EMPEORA());
+    expect(document.body.textContent).not.toMatch(/puede variar mucho con grabaciones cortas/gi);
   });
 
   it('una grabación corta sí muestra el aviso del 0,1 % low, una sola vez', () => {
@@ -475,20 +518,22 @@ describe('SavedComparisonDetail: panel VS', () => {
   });
 
   it('los estados sin ganadora no pintan «Peor» agresivo', () => {
-    renderDetail(SIN_CAMBIO());
+    const c = SIN_CAMBIO();
+    renderDetail(c, {}, evaluacionDe(c, 'sin_cambio'));
     const texto = document.body.textContent ?? '';
     expect(texto).not.toContain('rinde peor');
   });
 
-  it('el titular habla del cambio, no de quién gana', () => {
+  it('el título del veredicto es el registrado, sin recomponerlo con las cifras', () => {
     const c = EMPEORA();
-    const r = interpretar(c, etiquetasDe(c));
-    expect(titularDelCambio(r, etiquetasDe(c))).toBe('Prueba 2 rinde peor');
+    renderDetail(c, {}, evaluacionDe(c, 'empeora'));
+    expect(document.body.textContent).toContain('Empeora');
   });
 
   it('muestra la confianza registrada como chip', () => {
-    // El chip sale de la evaluación guardada, no de una interpretación nueva.
-    renderDetail(EMPEORA());
+    // El chip sale de la evaluación guardada, no de ninguna interpretación.
+    const c = EMPEORA();
+    renderDetail(c, {}, evaluacionDe(c, 'empeora'));
     expect(screen.getByText('Provisional')).toBeTruthy();
   });
 
@@ -513,7 +558,7 @@ describe('SavedComparisonDetail: panel VS', () => {
   it('la insignia «Mejor resultado» va en la misma fila que el nombre, no encima', () => {
     // Si la insignia va en su propio bloque, empuja el marcador de FPS hacia abajo y los
     // dos números quedan a distinta altura: el duelo se ve descuadrado.
-    renderDetail(EMPEORA());
+    renderDetail(EMPEORA(), {}, evaluacionDe(EMPEORA(), 'empeora'));
 
     const insignia = screen.getByText(/^Mejor resultado$/i).parentElement!;
     const filaNombre = insignia.parentElement!;
@@ -528,9 +573,7 @@ describe('SavedComparisonDetail: panel VS', () => {
     // La garantía de alineación es que la fila del nombre mide lo mismo en los dos lados
     // aunque solo uno lleve insignia; si difirieran, los FPS quedarían descuadrados.
     const c = EMPEORA();
-    const r = interpretar(c, etiquetasDe(c));
-    expect(r.ganador).toBe('antes'); // solo un lado lleva insignia
-    renderDetail(c);
+    renderDetail(c, {}, evaluacionDe(c, 'empeora')); // solo un lado lleva insignia
 
     // El botón va dentro del span de `PruebaN`; la fila del nombre es su abuelo.
     const filas = ['Prueba 1', 'Prueba 2'].map(
@@ -616,18 +659,39 @@ describe('SavedComparisonDetail: tabla única de métricas', () => {
     expect(celda(/Tiempo por imagen/i, 2)).toBe('-20.0 %');
   });
 
-  it('las métricas que mejoran al bajar no se pintan de error', () => {
-    renderDetail(cmp({ frame_time_avg: 20 }, { frame_time_avg: 16 }));
+  // C3-21: el color deja de salir del signo del cambio y sale de la preferencia que
+  // estableció Rust. Bajar el tiempo por imagen es mejorar, y eso **tiene** que verse
+  // verde con el motor de acuerdo; el caso contrario (bajar los FPS) tiene que verse en
+  // error aunque el signo sea positivo al revés. Las dos pruebas fijan la preferencia a
+  // mano, así que no dependen de ningún umbral calculado en React.
+  it('las métricas que mejoran al bajar llevan la preferencia del motor', () => {
+    const c = cmp({ frame_time_avg: 20 }, { frame_time_avg: 16 });
+    renderDetail(c, {}, evaluacionConMetricas(c, [
+      { clave: 'frame_time_avg', preferencia: 'favor_de_candidata', apoyo: 9000 },
+    ]));
     const cambio = celdas(/Tiempo por imagen/i)[2];
-    expect(cambio.className).toContain('compatible');
+    // El -20 % es mejora porque el motor lo dijo, no porque el signo sea negativo.
+    expect(cambio.className).toContain('font-semibold');
     expect(cambio.className).not.toContain('text-[var(--error)]');
+    // La columna de evaluación nombra la grabación, no el código interno.
+    const juicio = celdas(/Tiempo por imagen/i)[3];
+    expect(juicio.textContent).toMatch(/Favorece a/);
+    expect(juicio.textContent).not.toMatch(/favor_de_/);
+    expect(juicio.className).toContain('compatible');
   });
 
-  it('el valor que gana se resalta en cada fila', () => {
-    renderDetail(cmp({ avg_fps: 60 }, { avg_fps: 80 }));
-    const c = celdas(/FPS medios/i);
-    expect(c[0].className).not.toContain('font-semibold'); // antes: 60, pierde
-    expect(c[1].className).toContain('font-semibold'); // después: 80, gana
+  it('sin preferencia del motor, una mejora aritmética no se presenta como mejora', () => {
+    // Contrapunto de la prueba anterior: mismo -20 %, pero el motor no juzgó la métrica.
+    // Afirmar «mejora» aquí sería una preferencia inventada en React.
+    const c = cmp({ frame_time_avg: 20 }, { frame_time_avg: 16 });
+    renderDetail(c, {}, evaluacionConMetricas(c, [
+      { clave: 'frame_time_avg', preferencia: null, apoyo: 9000 },
+    ]));
+    const celdasFila = celdas(/Tiempo por imagen/i);
+    expect(celdasFila[2].className).not.toContain('compatible');
+    expect(celdasFila[2].className).not.toContain('text-[var(--error)]');
+    expect(celdasFila[2].className).not.toContain('font-semibold');
+    expect(celdasFila[3].textContent).not.toMatch(/Favorece a/);
   });
 
   it('una métrica sin datos en una de las dos grabaciones muestra «—»', () => {
@@ -662,3 +726,82 @@ describe('SavedComparisonDetail: tabla única de métricas', () => {
 
 
 
+
+/**
+ * Regresiones H3, H4, H7, H8 y H9 [C.3]: lo que se comprueba es el **valor** y el
+ * **comportamiento**, no la presencia de una etiqueta explicativa.
+ */
+describe('estabilidad y preferencia no se derivan de las cifras', () => {
+  it('H3: el índice de estabilidad es el suyo, no el 1 % low', () => {
+    // 100 FPS con 70 / 60 → (2*0.7 + 0.6)/3*100 = 66.7
+    // Con 90 / 80 → (2*0.9 + 0.8)/3*100 = 86.7
+    renderDetail(
+      cmp(
+        { avg_fps: 100, fps_1_percent_low: 70, fps_0_1_percent_low: 60 },
+        { avg_fps: 100, fps_1_percent_low: 90, fps_0_1_percent_low: 80 }
+      )
+    );
+    const pantalla = document.body.textContent ?? '';
+    // El índice se redondea a entero en la interfaz: 66.7 → 67 y 86.7 → 87.
+    expect(pantalla).toContain('67');
+    expect(pantalla).toContain('87');
+    // …y el 1 % low se sigue viendo como 1 % low, con su propio número.
+    expect(pantalla).toContain('70.0');
+    expect(pantalla).toContain('90.0');
+  });
+
+  it('H8: la tarjeta de estabilidad no lleva chip Mejor/Peor', () => {
+    // Mejora clarísima de estabilidad: si hubiera chip, saldría aquí.
+    renderDetail(
+      cmp(
+        { avg_fps: 100, fps_1_percent_low: 30, fps_0_1_percent_low: 20 },
+        { avg_fps: 100, fps_1_percent_low: 95, fps_0_1_percent_low: 90 }
+      )
+    );
+    // La tarjeta de estabilidad se localiza por su encabezado.
+    const tarjeta = screen.getByRole('heading', { name: 'Estabilidad' }).closest('div')!
+      .parentElement!;
+    expect(tarjeta.textContent).not.toMatch(/\b(Mejor|Peor)\b/);
+    expect(tarjeta.textContent).not.toMatch(/a favor de/i);
+  });
+
+  it('H7: el índice de estabilidad no se presenta como fluidez alcanzada', () => {
+    // 30 FPS constantes: el índice da 100, que **no** significa «va fluido».
+    renderDetail(
+      cmp(
+        { avg_fps: 30, fps_1_percent_low: 30, fps_0_1_percent_low: 30 },
+        { avg_fps: 30, fps_1_percent_low: 30, fps_0_1_percent_low: 30 }
+      )
+    );
+    const pantalla = document.body.textContent ?? '';
+    // El índice llega a su máximo…
+    expect(pantalla).toContain('100');
+    // …y precisamente por eso se niega la lectura de fluidez: la única mención permitida
+    // es la que **desmiente** esa inferencia (la nota del índice), no una afirmación.
+    const menciones = pantalla.match(/va fluido|es fluido|fluido/gi) ?? [];
+    expect(menciones).toHaveLength(1);
+    expect(pantalla).toMatch(/no «va fluido»/);
+  });
+
+  it('H4: ninguna fila histórica obtiene preferencia por el signo', () => {
+    // Histórica (sin evaluación) con todas las cifras subiendo: aun así, sin preferencias.
+    renderDetail(
+      cmp({ avg_fps: 60, fps_1_percent_low: 40 }, { avg_fps: 90, fps_1_percent_low: 80 }),
+      {},
+      null
+    );
+    const tablas = screen.getAllByRole('table');
+    const tabla = tablas[tablas.length - 1]!;
+    const texto = tabla.textContent ?? '';
+    expect(texto).not.toMatch(/a favor de la nueva|a favor de la anterior/i);
+    expect(texto).not.toMatch(/sin preferencia establecida/i);
+  });
+
+  it('H4: tampoco en el panel principal de una histórica', () => {
+    renderDetail(cmp({ avg_fps: 60 }, { avg_fps: 90 }), {}, null);
+    const pantalla = document.body.textContent ?? '';
+    // Sin evaluación no hay corona ni «mejor resultado observado» que nombre un ganador.
+    expect(pantalla).not.toMatch(/Mejor resultado observado/i);
+    expect(pantalla).not.toMatch(/Mejor resultado(?!$)/i);
+  });
+});

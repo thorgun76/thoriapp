@@ -670,8 +670,12 @@ fn c2_duplicado_con_contenido_distinto_se_rechaza() {
     let historial = [a, b];
     let err = crate::benchmarks::buscar_unico_para_c2(&historial, "dup", "Benchmark base")
         .expect_err("debe rechazar");
-    assert!(err.contains("2 grabaciones"), "mensaje: {err}");
-    assert!(err.contains("contenido distinto"), "mensaje: {err}");
+    // El discriminante es la variante: el texto puede cambiar sin romper la prueba.
+    let crate::benchmarks::FallaDeBusqueda::Ambigua { mensaje } = err else {
+        panic!("se esperaba ambigüedad, llegó {err:?}");
+    };
+    assert!(mensaje.contains("2 grabaciones"), "mensaje: {mensaje}");
+    assert!(mensaje.contains("contenido distinto"), "mensaje: {mensaje}");
 }
 
 /// Dos grabaciones con el mismo id y contenido **idéntico** también son ambiguas.
@@ -686,7 +690,10 @@ fn c2_duplicado_con_contenido_identico_tambien_se_rechaza() {
     let historial = [a, b];
     let err = crate::benchmarks::buscar_unico_para_c2(&historial, "dup", "Benchmark base")
         .expect_err("debe rechazar");
-    assert!(err.contains("contenido idéntico"), "mensaje: {err}");
+    let crate::benchmarks::FallaDeBusqueda::Ambigua { mensaje } = err else {
+        panic!("se esperaba ambigüedad, llegó {err:?}");
+    };
+    assert!(mensaje.contains("contenido idéntico"), "mensaje: {mensaje}");
 }
 
 /// Un identificador ausente se rechaza con su propio mensaje.
@@ -697,7 +704,10 @@ fn c2_identificador_ausente_se_rechaza() {
     )];
     let err = crate::benchmarks::buscar_unico_para_c2(&historial, "fantasma", "Benchmark base")
         .expect_err("debe rechazar");
-    assert!(err.contains("no encontrado"), "mensaje: {err}");
+    let crate::benchmarks::FallaDeBusqueda::NoEncontrada { mensaje } = err else {
+        panic!("se esperaba ausencia, llegó {err:?}");
+    };
+    assert!(mensaje.contains("no encontrado"), "mensaje: {mensaje}");
 }
 
 /// Un único registro se acepta y se devuelve tal cual.

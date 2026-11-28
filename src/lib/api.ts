@@ -154,6 +154,50 @@ export interface CondicionesDeComparacion {
   variable_evaluada?: { codigo: string } | null;
 }
 
+/**
+ * Declaración de qué variable de configuración se estaba midiendo.
+ *
+ * Opcional y **explícita**: si no se declara, la evaluación queda sin variable. No se
+ * infiere del comando ni del nombre del perfil. Viaja **igual** en la vista previa y en
+ * el guardado: si difieren, Rust rechaza el guardado por `significado_cambiado`.
+ */
+export interface VariableEvaluada {
+  codigo: string;
+}
+
+/**
+ * Lo que Rust devuelve al evaluar una comparación y lo que la interfaz debe devolver
+ * intacto para guardarla.
+ *
+ * La comparación vivida **dentro** de la confirmación es deliberado: no existe un segundo
+ * comando que devuelva la comparación sin evaluación.
+ */
+export interface ConfirmacionDeVistaPrevia {
+  evaluacion: EvaluacionPersistida;
+  comparacion: BenchmarkComparison;
+}
+
+/** Los cuatro motivos de rechazo que produce el motor. Códigos estables de `evaluacion.rs`. */
+export type CodigoDeMotivoDeRechazo =
+  | 'entradas_cambiadas'
+  | 'significado_cambiado'
+  | 'evaluacion_no_corresponde'
+  | 'valor_no_persistible';
+
+/**
+ * Error del contrato IPC de comparación guardada.
+ *
+ * Tipado **por origen**: la interfaz elige qué hacer con el discriminante, nunca analizando
+ * el texto de un mensaje. No es un formato en disco: los archivos no cambian.
+ */
+export type ErrorDeEvaluacion =
+  | { tipo: 'confirmacion_rechazada'; motivo: CodigoDeMotivoDeRechazo | string }
+  | { tipo: 'grabacion_inexistente'; mensaje: string }
+  | { tipo: 'identificador_ambiguo'; mensaje: string }
+  | { tipo: 'comparacion_ya_existente'; comparacion_id: string }
+  | { tipo: 'lectura_fallida'; archivo: string; mensaje: string }
+  | { tipo: 'escritura_fallida'; mensaje: string };
+
 export interface EvaluacionPersistida {
   metodologia_interpretacion: VersionDeInterpretacion;
   evaluada_en: string;
@@ -502,10 +546,34 @@ export const api = {
       gameName: juego.gameName || '',
     }),
   deleteAllBenchmarks: () => invoke<void>('delete_all_benchmarks'),
-  compareBenchmarks: (baselineId: string, testId: string) =>
-    invoke<BenchmarkComparison>('compare_benchmarks', { baselineId, testId }),
-  saveComparison: (baselineId: string, testId: string) =>
-    invoke<unknown>('save_comparison', { baselineId, testId }),
+  /**
+   * Vista previa **evaluada** de dos grabaciones: el único camino a una comparación
+   * individual. Devuelve la evaluación y la comparación juntas.
+   *
+   * Rechaza con `ErrorDeEvaluacion` si un identificador falta o es ambiguo.
+   */
+  compareBenchmarksEvaluada: (
+    baselineId: string,
+    testId: string,
+    variable: VariableEvaluada | null,
+  ) =>
+    invoke<ConfirmacionDeVistaPrevia>('compare_benchmarks_evaluada', {
+      baselineId,
+      testId,
+      variable,
+    }),
+  /**
+   * Guarda una comparación **con la evaluación confirmada**. Rust relee, recalcula y
+   * comprueba que la confirmación sigue siendo válida antes de escribir.
+   *
+   * `variable` tiene que ser la misma con la que se pidió la vista previa; si no, se
+   * rechaza con `significado_cambiado`.
+   */
+  saveComparisonEvaluada: (
+    confirmacion: ConfirmacionDeVistaPrevia,
+    variable: VariableEvaluada | null,
+  ) =>
+    invoke<SavedComparison>('save_comparison_evaluada', { confirmacion, variable }),
 
   // ---------- Utilidades ----------
   openUrl: (url: string) => invoke<void>('open_url', { url }),

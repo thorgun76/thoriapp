@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { AlertTriangle, BarChart3, Trash2, ChevronRight } from 'lucide-react';
-import { nombreLegible, etiquetasDe } from '../lib/interpretacion';
-import { estadoDeEvaluacionGuardada } from '../lib/evaluacionGuardada';
+import { nombreLegible, etiquetasDe } from '../lib/etiquetas';
+import { presentarGuardada } from '../lib/presentacionEvaluacion';
+import type { ModeloDePresentacion } from '../lib/presentacionEvaluacion';
 import { formatTimestamp } from '../lib/format';
 import { PruebaN } from './PruebaN';
 import { SavedComparisonDetail } from './SavedComparisonDetail';
@@ -19,47 +20,80 @@ const testDateOf = (c: SavedComparison) => c.comparison.test.timestamp;
 
 const normGame = (n: string) => n.trim().toLowerCase();
 
-const ESTADO_TEXTO = {
-  mejora: 'text-[var(--compatible)]',
-  empeora: 'text-[var(--error)]',
-  mixto: 'text-[var(--caution)]',
-  sin_cambio: 'text-[var(--text-muted)]',
-  datos_insuficientes: 'text-[var(--text-dim)]',
-  solo_descriptiva: 'text-[var(--text-muted)]',
+/** Color del **titular**, según lo que el modelo autoriza a afirmar. */
+const TONO_TEXTO = {
+  positivo: 'text-[var(--compatible)]',
+  negativo: 'text-[var(--error)]',
+  aviso: 'text-[var(--caution)]',
+  neutro: 'text-[var(--text-muted)]',
 } as const;
 
 /**
  * Cómo se resume una prueba guardada en el listado.
  *
- * Una prueba guardada **no se reinterpreta**. Si se guardó con evaluación, manda lo que
- * se guardó; si no, se dice que no se registró y se enseña la variación de FPS, que es un
- * dato medido. Pintar aquí un veredicto recalculado con las reglas de hoy sería presentar
- * una conclusión nueva como si fuera la original.
+ * Todo sale del **modelo de presentación compartido**: aquí no se decide nada. Tres cosas
+ * que este resumen garantiza, y que la versión anterior no:
+ *
+ *  - un registro **malformado no lanza**: devuelve un aviso. Un archivo estropeado no puede
+ *    tumbar la lista entera, que era el fallo H5;
+ *  - el **porcentaje de FPS no se colorea por el estado** (H6): el color del veredicto va
+ *    en el titular, y el número se queda neutro, porque es una magnitud medida y no un
+ *    juicio;
+ *  - una histórica sin evaluación no adquiere titular de veredicto.
  */
-function resumenDeGuardada(c: SavedComparison): { texto: string; color: string } {
-  const estado = estadoDeEvaluacionGuardada(c);
-  if (estado === 'no_registrada') {
-    return { texto: 'Sin evaluación registrada', color: 'text-[var(--text-muted)]' };
+function resumenDeGuardada(c: SavedComparison): {
+  texto: string;
+  color: string;
+  /** `true` si el estado viene de una evaluación legible (y por tanto hay veredicto). */
+  conEvaluacion: boolean;
+} {
+  let modelo: ModeloDePresentacion;
+  try {
+    modelo = presentarGuardada(c);
+  } catch {
+    // Un registro imposible de presentar se presenta como no legible, no se propaga:
+    // perder una fila es aceptable, perder la pantalla no.
+    return {
+      texto: 'Evaluación no legible',
+      color: TONO_TEXTO.aviso,
+      conEvaluacion: false,
+    };
   }
-  if (estado === 'no_soportada') {
-    return { texto: 'Evaluación no compatible', color: 'text-[var(--text-muted)]' };
-  }
-  const ev = c.evaluacion!;
-  const clave = (ev.estado === 'solo_descriptiva' ? 'solo_descriptiva' : ev.estado) as
-    | keyof typeof ESTADO_TEXTO;
-  const texto = TEXTOS_ESTADO_GUARDADO[ev.estado] ?? `Evaluación registrada (${ev.estado})`;
-  return { texto, color: ESTADO_TEXTO[clave] ?? 'text-[var(--text-muted)]' };
-}
 
-/** Etiqueta de cada estado guardado. Vocabulario cerrado; lo desconocido se ve crudo. */
-const TEXTOS_ESTADO_GUARDADO: Record<string, string> = {
-  mejora: 'Mejora',
-  empeora: 'Empeora',
-  mixto: 'Resultado mixto',
-  sin_cambio: 'Sin cambio',
-  datos_insuficientes: 'Datos insuficientes',
-  solo_descriptiva: 'Solo descriptivo',
-};
+  const color = TONO_TEXTO[modelo.tono] ?? TONO_TEXTO.neutro;
+  // Un cambio con cobertura parcial se dice como tal: la fila no puede anunciar «Mejora»
+  // a secas cuando el motor solo pudo decidir con parte de las métricas.
+  if (modelo.veredicto.tipo === 'cambio_parcial') {
+    return {
+      texto:
+        modelo.veredicto.favor === 'candidata'
+          ? 'Mejora en parte de las métricas'
+          : 'Empeora en parte de las métricas',
+      color,
+      conEvaluacion: true,
+    };
+  }
+  switch (modelo.titulo) {
+    case 'historica':
+      return { texto: 'Sin evaluación registrada', color, conEvaluacion: false };
+    case 'no_soportada':
+      return { texto: 'Evaluación de otra versión', color, conEvaluacion: false };
+    case 'malformada':
+      return { texto: 'Evaluación no legible', color, conEvaluacion: false };
+    case 'datos_insuficientes':
+      return { texto: 'Datos insuficientes', color, conEvaluacion: true };
+    case 'solo_descriptiva':
+      return { texto: 'Solo descriptivo', color, conEvaluacion: true };
+    case 'mixto':
+      return { texto: 'Resultado mixto', color, conEvaluacion: true };
+    case 'sin_cambio':
+      return { texto: 'Sin cambio', color, conEvaluacion: true };
+    case 'mejora':
+      return { texto: 'Mejora', color, conEvaluacion: true };
+    case 'empeora':
+      return { texto: 'Empeora', color, conEvaluacion: true };
+  }
+}
 
 /** «Mis pruebas»: las comparaciones guardadas, de la más reciente a la más antigua. */
 export function DashboardView() {
@@ -148,6 +182,7 @@ export function DashboardView() {
         <SavedComparisonDetail
           comparison={selected.comparison}
           evaluacion={selected.evaluacion}
+          estadoDeLaEvaluacion={selected.estado_de_la_evaluacion}
           onBack={() => setSelectedId(null)}
           onDelete={() => askDeleteOne(selected)}
           onCopy={copyText}
@@ -301,7 +336,9 @@ export function DashboardView() {
                 {/* Resultado: variación de FPS y titular del intérprete. */}
                 <div className="flex items-center gap-3 shrink-0">
                   <div className="text-right max-w-[13rem]">
-                    <p className={`text-sm font-bold font-mono tabular-nums ${resumen.color}`}>
+                    {/* Magnitud medida: color de texto normal, sin heredar el tono del
+                        veredicto. Que el cambio sea del +8 % no lo hace bueno. */}
+                    <p className="text-sm font-bold font-mono tabular-nums text-[var(--text)]">
                       {pctCambio > 0 ? '+' : ''}
                       {pctCambio.toFixed(1)}%
                     </p>

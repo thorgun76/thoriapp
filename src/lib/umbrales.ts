@@ -41,5 +41,13 @@ export const MIN_NOISE_PERCENT = 3;
  */
 export const MIN_TIE_PERCENT = 5;
 
-/** Marcador de "no hay datos temporales": usado en tests y en la UI. */
-export const SIN_DATOS_TEMPORALES = 'Esta prueba se guardó antes de que Thoriapp almacenara los tiempos por muestra, así que no hay gráfico temporal.';
+/**
+ * Marcador de «no hay datos temporales»: usado en tests y en la UI.
+ *
+ * C3-26: **no se atribuye una causa**. Que falte la serie no prueba que la prueba sea
+ * anterior al almacenamiento de tiempos: también ocurre con un registro importado, con un
+ * log sin eje temporal o con una grabación que no produjo muestras. Afirmar lo primero
+ * inventaba una procedencia que el dato no sostiene, así que el texto solo dice lo que
+ * consta: que no hay series guardadas.
+ */
+export const SIN_DATOS_TEMPORALES = 'Esta prueba no tiene guardados los tiempos por muestra, así que no hay gráfico temporal.';
