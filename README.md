@@ -101,13 +101,12 @@ Comprobada **en el equipo real** (CachyOS), no solo con fixtures:
 ## 📋 Estructura del proyecto
 
 - `src-tauri/` — backend Rust: motor de comandos, perfiles, benchmarks, observador.
-  - `src/engine.rs`, `src/rules.rs` — motor y reglas.
-  - `src/benchmarks.rs`, `src/mangohud.rs` — pruebas e importación.
-  - `src/sessions*.rs`, `src/proceso_linux.rs`, `src/evidencia_proceso.rs` — observador.
-  - `src/fixtures_procesos.rs` — topologías reales usadas por las pruebas.
 - `src/` — frontend React/TypeScript.
 - `tests/fixtures/mangohud/` — grabaciones reales usadas como fixtures (sin datos personales).
 - `docs/` — documentación de arquitectura, decisiones y planificación.
+
+El detalle de módulos, símbolos y tests está en `docs/ARCHITECTURE.md`, `docs/CODE_MAP.md` y
+`docs/IPC_MAP.md`.
 
 ## 🧪 Comprobar el proyecto
 
@@ -129,6 +128,9 @@ red real y se lanza a mano con `--ignored`.
 ## 📚 Documentación
 
 - `STATUS.md` — estado por fase, decisiones y correcciones con su evidencia.
+- `docs/ARCHITECTURE.md` — capas, flujos de datos y contratos persistidos.
+- `docs/CODE_MAP.md` — dónde está cada funcionalidad: símbolos, IPC y tests.
+- `docs/IPC_MAP.md` — índice completo de comandos IPC y su método en `api.ts`.
 - `docs/sesiones-de-ejecucion.md` — contrato del observador y qué está garantizado.
 - `docs/validacion-real.md` — protocolo de comprobación con juegos reales en el equipo.
 - `docs/planificacion-fases.md` — frontera entre fases.

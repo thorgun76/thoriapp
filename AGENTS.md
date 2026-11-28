@@ -42,6 +42,9 @@ necesites.
 | Fichero | Contenido |
 |---|---|
 | `STATUS.md` | Estado, correcciones con su evidencia y deuda técnica. |
+| `docs/ARCHITECTURE.md` | Capas, flujos, fuente de verdad por dominio, contratos persistidos. |
+| `docs/CODE_MAP.md` | Dónde está cada funcionalidad: símbolos, IPC y tests. |
+| `docs/IPC_MAP.md` | Índice completo de comandos IPC → método de `api.ts`. |
 | `docs/planificacion-fases.md` | Roadmap y frontera entre fases. |
 | `docs/sesiones-de-ejecucion.md` | Arquitectura del observador y garantías. |
 | `docs/validacion-real.md` | Protocolo con juegos reales en el equipo. |
@@ -49,6 +52,23 @@ necesites.
 | `README.md` / `CHANGELOG.md` | Uso e historial de versiones. |
 
 Este fichero no repite el roadmap ni el historial.
+
+## Navegación
+
+Antes de un `rg` amplio o de leer un módulo entero, `docs/CODE_MAP.md` dice qué fichero y qué
+símbolo. Si el mapa y el código discrepan, manda el código: corrige el mapa en el mismo cambio
+en que renombres, muevas o añadas rutas, símbolos, comandos IPC o tests.
+
+Eficiencia (sin que cueste corrección, seguridad ni fiabilidad):
+
+- Ajusta la profundidad del análisis al alcance y al riesgo real de la tarea.
+- Si conoces el símbolo, ve a él directamente; no busques lo que ya sabes dónde está.
+- Consulta solo las secciones documentales que necesites.
+- Evita exploraciones amplias y leer módulos grandes de principio a fin.
+- No repitas búsquedas, lecturas ni comprobaciones ya hechas sin justificación.
+- Reutiliza la evidencia válida mientras sus condiciones no cambien.
+- Tests focalizados durante el desarrollo; suite completa al cerrar, según `## Validaciones`.
+- Informes concisos: no repitas instrucciones ni evidencia ya presentada.
 
 ## Validaciones
 
